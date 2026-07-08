@@ -10,3 +10,4 @@
 # books (not product; keeps the published crate lean).
 /examples/scan.rs
 /examples/ncx_audit.rs
+/examples/repair_audit.rs

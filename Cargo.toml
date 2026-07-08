@@ -23,6 +23,11 @@ epubveri = "0.4.4"
 # Pure-Rust only (no C deps), same philosophy as epubveri: zip's "deflate"
 # feature uses flate2 -> miniz_oxide (Rust); bzip2/zstd (C) stay disabled.
 zip = { version = "2.2", default-features = false, features = ["deflate"] }
+# Structural editing for content-model fixers: parse an XHTML document to find
+# a node's exact byte range and edit it surgically (preserving everything
+# else). Pure-Rust, and already epubveri's own XML parser — no new transitive
+# weight, and byte ranges line up with the positions epubveri reports.
+roxmltree = "0.20"
 
 [profile.release]
 opt-level = 2

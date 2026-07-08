@@ -5,7 +5,8 @@
 //! safely. v1 ships one fixer — HTML-entity mapping (`RSC-016`), the highest-ROI
 //! defect from the feasibility spike — and the registry grows from there.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::ops::Range;
 
 use epubveri::report::Report;
 
@@ -16,6 +17,7 @@ pub fn plan(report: &Report, ws: &Workspace, _goal: Goal) -> Vec<ProposedFix> {
     let mut fixes = Vec::new();
     fixes.extend(html_entities(report, ws));
     fixes.extend(ncx_ncnames(report, ws));
+    fixes.extend(content_type_meta(report, ws));
     // Future fixers append here, in a sensible confirm order.
     fixes
 }
@@ -305,6 +307,172 @@ fn is_attr_boundary(text: &str, start: usize) -> bool {
             .unwrap_or(false)
 }
 
+/// `RSC-005` / `opf.content_document.invalid_content_type_meta`: a content
+/// document whose legacy `<meta http-equiv="Content-Type" content="…">` does not
+/// carry exactly `text/html; charset=utf-8` (real corpus: a bogus mime like
+/// `http://www.w3.org/1999/xhtml; charset=utf-8`, or a missing space in
+/// `text/html;charset=utf-8`; some files carry two such metas). Per the EPUB 3.3
+/// reference, we normalize the encoding declaration to the current HTML5 form —
+/// a single `<meta charset="utf-8"/>` — removing every legacy/duplicate
+/// encoding meta so `conflicting_encoding_declarations` can't newly fire. This
+/// is the first *structural* fixer: `params` is empty, so we parse the document
+/// (roxmltree) to find each meta's exact byte range and edit surgically.
+/// Declines (leaves flagged) any document that doesn't parse or that declares a
+/// non-UTF-8 charset — we never blindly re-encode. `ConfirmNeeded`.
+fn content_type_meta(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    let mut files: BTreeSet<String> = BTreeSet::new();
+    for m in &report.messages {
+        if m.rule == Some("opf.content_document.invalid_content_type_meta") {
+            if let Some(loc) = m.location.as_deref() {
+                files.insert(loc.to_string());
+            }
+        }
+    }
+
+    let mut fixes = Vec::new();
+    for file in files {
+        let Some(text) = ws.get_text(&file) else {
+            continue;
+        };
+        let Some(edits) = plan_encoding_normalization(&text) else {
+            continue; // unparseable or non-UTF-8 — decline, never guess
+        };
+        if edits.is_empty() {
+            continue;
+        }
+
+        let n = edits.len();
+        let preview = vec![Change {
+            path: file.clone(),
+            note: format!(
+                "normalize to a single <meta charset=\"utf-8\"/> ({n} encoding <meta> rewritten/removed)"
+            ),
+        }];
+        let file_for_apply = file.clone();
+
+        fixes.push(ProposedFix {
+            fix_id: "fix.content_type_meta",
+            addresses_id: "RSC-005".to_string(),
+            addresses_rule: Some("opf.content_document.invalid_content_type_meta".to_string()),
+            tier: Tier::ConfirmNeeded,
+            title: format!(
+                "Normalize the encoding declaration in {file} to HTML5 <meta charset=\"utf-8\">"
+            ),
+            rationale: "EPUB 3.3 content documents declare their encoding with the HTML5 \
+                 `<meta charset=\"utf-8\">`. The legacy `<meta http-equiv=\"Content-Type\">` form \
+                 (and any duplicate encoding declaration) is replaced so exactly one current-form \
+                 declaration remains. Applied only when every declared charset is UTF-8 — the \
+                 EPUB-required encoding — so this never re-encodes content."
+                .to_string(),
+            preview,
+            apply_fn: Box::new(move |ws: &mut Workspace| {
+                if let Some(text) = ws.get_text(&file_for_apply) {
+                    if let Some(edits) = plan_encoding_normalization(&text) {
+                        ws.set_text(&file_for_apply, apply_edits(&text, edits));
+                    }
+                }
+            }),
+        });
+    }
+    fixes
+}
+
+/// One surgical byte-range edit (`replacement == ""` means delete).
+struct MetaEdit {
+    range: Range<usize>,
+    replacement: String,
+}
+
+/// Compute the edits that collapse every encoding-declaration `<meta>` in an
+/// XHTML document into a single `<meta charset="utf-8"/>`. `None` (decline) if
+/// the document doesn't parse as XML or any encoding meta declares a non-UTF-8
+/// charset. The returned edits are non-overlapping byte ranges over `text`.
+fn plan_encoding_normalization(text: &str) -> Option<Vec<MetaEdit>> {
+    let doc = roxmltree::Document::parse(text).ok()?;
+
+    // (byte range, is this a `charset=` meta?)
+    let mut metas: Vec<(Range<usize>, bool)> = Vec::new();
+    for n in doc
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "meta")
+    {
+        let is_http_ct = n
+            .attribute("http-equiv")
+            .is_some_and(|v| v.eq_ignore_ascii_case("content-type"));
+        let charset_attr = n.attribute("charset");
+        if !is_http_ct && charset_attr.is_none() {
+            continue; // not an encoding declaration
+        }
+        // Declared charset (from the `charset` attr, or `charset=` in `content`)
+        // must be UTF-8; a non-UTF-8 declaration means we'd risk a re-encode.
+        let declared = charset_attr
+            .map(str::to_string)
+            .or_else(|| n.attribute("content").and_then(declared_charset));
+        if let Some(cs) = &declared {
+            if !cs.eq_ignore_ascii_case("utf-8") {
+                return None;
+            }
+        }
+        metas.push((n.range(), charset_attr.is_some()));
+    }
+
+    if metas.is_empty() {
+        return None;
+    }
+    metas.sort_by_key(|(r, _)| r.start);
+
+    let mut edits = Vec::new();
+    match metas.iter().position(|(_, is_charset)| *is_charset) {
+        // An existing charset meta survives; drop every other encoding meta.
+        Some(keep) => {
+            for (i, (range, _)) in metas.iter().enumerate() {
+                if i != keep {
+                    edits.push(MetaEdit {
+                        range: range.clone(),
+                        replacement: String::new(),
+                    });
+                }
+            }
+        }
+        // No charset meta: rewrite the first meta to the HTML5 form, drop rest.
+        None => {
+            for (i, (range, _)) in metas.iter().enumerate() {
+                edits.push(MetaEdit {
+                    range: range.clone(),
+                    replacement: if i == 0 {
+                        "<meta charset=\"utf-8\"/>".to_string()
+                    } else {
+                        String::new()
+                    },
+                });
+            }
+        }
+    }
+    Some(edits)
+}
+
+/// Apply non-overlapping byte-range edits to `text` (highest offset first, so
+/// earlier offsets stay valid).
+fn apply_edits(text: &str, mut edits: Vec<MetaEdit>) -> String {
+    edits.sort_by_key(|e| std::cmp::Reverse(e.range.start));
+    let mut out = text.to_string();
+    for e in edits {
+        out.replace_range(e.range, &e.replacement);
+    }
+    out
+}
+
+/// Extract the `charset=` token from an http-equiv `content` value, e.g.
+/// `"text/html; charset=utf-8"` → `"utf-8"`. `None` if absent.
+fn declared_charset(content: &str) -> Option<String> {
+    let idx = content.to_ascii_lowercase().find("charset=")?;
+    let value: String = content[idx + "charset=".len()..]
+        .chars()
+        .take_while(|c| !c.is_whitespace() && !matches!(c, ';' | '"' | '\'' | ',' | '>'))
+        .collect();
+    (!value.is_empty()).then_some(value)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -366,5 +534,57 @@ mod tests {
         let text = "<navPoint id='5abc'>";
         let out = replace_id_attr(text, "5abc", "id_5abc").unwrap();
         assert_eq!(out, "<navPoint id='id_5abc'>");
+    }
+
+    fn normalize(text: &str) -> Option<String> {
+        plan_encoding_normalization(text).map(|edits| apply_edits(text, edits))
+    }
+
+    #[test]
+    fn declared_charset_extracts_token() {
+        assert_eq!(
+            declared_charset("text/html; charset=utf-8").as_deref(),
+            Some("utf-8")
+        );
+        assert_eq!(
+            declared_charset("http://www.w3.org/1999/xhtml; charset=utf-8").as_deref(),
+            Some("utf-8")
+        );
+        assert_eq!(declared_charset("text/html").as_deref(), None);
+    }
+
+    #[test]
+    fn rewrites_bogus_http_equiv_to_charset_meta() {
+        let doc = r#"<html xmlns="http://www.w3.org/1999/xhtml"><head><title>t</title><meta content="http://www.w3.org/1999/xhtml; charset=utf-8" http-equiv="Content-Type"/></head><body/></html>"#;
+        let out = normalize(doc).unwrap();
+        assert!(out.contains(r#"<meta charset="utf-8"/>"#));
+        assert!(!out.to_ascii_lowercase().contains("http-equiv"));
+    }
+
+    #[test]
+    fn collapses_two_encoding_metas_into_one() {
+        let doc = r#"<html xmlns="http://www.w3.org/1999/xhtml"><head><meta content="http://www.w3.org/1999/xhtml; charset=utf-8" http-equiv="Content-Type"/><meta content="text/html;charset=utf-8" http-equiv="content-type"/></head><body/></html>"#;
+        let out = normalize(doc).unwrap();
+        assert_eq!(out.matches(r#"<meta charset="utf-8"/>"#).count(), 1);
+        assert!(!out.to_ascii_lowercase().contains("http-equiv"));
+    }
+
+    #[test]
+    fn keeps_existing_charset_meta_and_drops_http_equiv() {
+        let doc = r#"<html xmlns="http://www.w3.org/1999/xhtml"><head><meta charset="utf-8"/><meta content="text/html;charset=utf-8" http-equiv="Content-Type"/></head><body/></html>"#;
+        let out = normalize(doc).unwrap();
+        assert_eq!(out.matches(r#"<meta charset="utf-8"/>"#).count(), 1);
+        assert!(!out.to_ascii_lowercase().contains("http-equiv"));
+    }
+
+    #[test]
+    fn declines_non_utf8_charset() {
+        let doc = r#"<html xmlns="http://www.w3.org/1999/xhtml"><head><meta content="text/html; charset=iso-8859-1" http-equiv="Content-Type"/></head><body/></html>"#;
+        assert!(plan_encoding_normalization(doc).is_none());
+    }
+
+    #[test]
+    fn declines_unparseable_document() {
+        assert!(plan_encoding_normalization("<html><head><meta http-equiv=Content-Type").is_none());
     }
 }
