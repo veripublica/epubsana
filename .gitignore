@@ -11,3 +11,5 @@
 /examples/scan.rs
 /examples/ncx_audit.rs
 /examples/repair_audit.rs
+/examples/residual_audit.rs
+/examples/ncx001_diag.rs

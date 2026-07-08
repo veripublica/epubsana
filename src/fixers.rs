@@ -18,6 +18,7 @@ pub fn plan(report: &Report, ws: &Workspace, _goal: Goal) -> Vec<ProposedFix> {
     fixes.extend(html_entities(report, ws));
     fixes.extend(ncx_ncnames(report, ws));
     fixes.extend(content_type_meta(report, ws));
+    fixes.extend(ncx_dtb_uid(report, ws));
     // Future fixers append here, in a sensible confirm order.
     fixes
 }
@@ -387,8 +388,20 @@ struct MetaEdit {
 /// XHTML document into a single `<meta charset="utf-8"/>`. `None` (decline) if
 /// the document doesn't parse as XML or any encoding meta declares a non-UTF-8
 /// charset. The returned edits are non-overlapping byte ranges over `text`.
+/// Parse XML the way epubveri does — permitting a DTD/DOCTYPE, which NCX files
+/// and many XHTML documents declare and which roxmltree's default parser
+/// rejects. Every structural fixer parses through this so it sees exactly the
+/// documents epubveri did.
+fn parse_xml(text: &str) -> Option<roxmltree::Document<'_>> {
+    let opts = roxmltree::ParsingOptions {
+        allow_dtd: true,
+        ..Default::default()
+    };
+    roxmltree::Document::parse_with_options(text, opts).ok()
+}
+
 fn plan_encoding_normalization(text: &str) -> Option<Vec<MetaEdit>> {
-    let doc = roxmltree::Document::parse(text).ok()?;
+    let doc = parse_xml(text)?;
 
     // (byte range, is this a `charset=` meta?)
     let mut metas: Vec<(Range<usize>, bool)> = Vec::new();
@@ -471,6 +484,151 @@ fn declared_charset(content: &str) -> Option<String> {
         .take_while(|c| !c.is_whitespace() && !matches!(c, ';' | '"' | '\'' | ',' | '>'))
         .collect();
     (!value.is_empty()).then_some(value)
+}
+
+/// `NCX-001`: the NCX `dtb:uid` doesn't match the package's unique identifier.
+/// This finding carries no `rule`/`params`, but the `id` is unambiguous, so we
+/// dispatch on it. The fix sets the NCX `<meta name="dtb:uid">` content to the
+/// exact value of the OPF's unique identifier (the `dc:identifier` referenced by
+/// `package/@unique-identifier`) — deterministic, single-valued, no guessing.
+/// Declines if the package identifier can't be resolved or the NCX won't parse.
+/// `ConfirmNeeded`.
+fn ncx_dtb_uid(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    let mut ncx_files: BTreeSet<String> = BTreeSet::new();
+    for m in &report.messages {
+        if m.id == "NCX-001" {
+            if let Some(loc) = m.location.as_deref() {
+                ncx_files.insert(loc.to_string());
+            }
+        }
+    }
+
+    let mut fixes = Vec::new();
+    for file in ncx_files {
+        let Some((_, old, new)) = compute_dtb_uid_edit(ws, &file) else {
+            continue;
+        };
+        let preview = vec![Change {
+            path: file.clone(),
+            note: format!("set dtb:uid \"{old}\" → \"{new}\" (match the package identifier)"),
+        }];
+        let file_for_apply = file.clone();
+
+        fixes.push(ProposedFix {
+            fix_id: "fix.ncx_dtb_uid",
+            addresses_id: "NCX-001".to_string(),
+            addresses_rule: None,
+            tier: Tier::ConfirmNeeded,
+            title: format!("Sync the NCX dtb:uid to the package identifier in {file}"),
+            rationale: "The NCX `dtb:uid` must equal the package's unique identifier — the \
+                 `dc:identifier` the OPF `unique-identifier` points at. Its content is set to that \
+                 exact value and nothing else in the document changes. Declined when the package \
+                 identifier can't be resolved (a broken OPF), so this never guesses."
+                .to_string(),
+            preview,
+            apply_fn: Box::new(move |ws: &mut Workspace| {
+                if let Some((edit, _, _)) = compute_dtb_uid_edit(ws, &file_for_apply) {
+                    if let Some(text) = ws.get_text(&file_for_apply) {
+                        ws.set_text(&file_for_apply, apply_edits(&text, vec![edit]));
+                    }
+                }
+            }),
+        });
+    }
+    fixes
+}
+
+/// Build the single edit that rewrites the NCX `dtb:uid` to the package
+/// identifier, plus the old and new values (for the preview). `None` (decline)
+/// if the package id can't be resolved, the NCX won't parse / has no dtb:uid,
+/// or it already matches.
+fn compute_dtb_uid_edit(ws: &Workspace, file: &str) -> Option<(MetaEdit, String, String)> {
+    let uid = package_unique_id(ws)?;
+    let text = ws.get_text(file)?;
+    let (range, old) = find_dtb_uid_meta(&text)?;
+    if old.trim() == uid {
+        return None; // already correct
+    }
+    let new_element = set_content_attr(&text[range.clone()], &uid)?;
+    Some((
+        MetaEdit {
+            range,
+            replacement: new_element,
+        },
+        old,
+        uid,
+    ))
+}
+
+/// Resolve the package's unique identifier: `container.xml` → OPF path →
+/// `package/@unique-identifier` → the matching `dc:identifier`'s value (trimmed).
+fn package_unique_id(ws: &Workspace) -> Option<String> {
+    let container = ws.get_text("META-INF/container.xml")?;
+    let opf_path = opf_path_from_container(&container)?;
+    let opf = ws.get_text(&opf_path)?;
+    unique_id_from_opf(&opf)
+}
+
+/// The first rootfile's `full-path` from an OCF `container.xml`.
+fn opf_path_from_container(container: &str) -> Option<String> {
+    parse_xml(container)?
+        .descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "rootfile")
+        .and_then(|n| n.attribute("full-path"))
+        .map(str::to_string)
+}
+
+/// The value of the `dc:identifier` referenced by `package/@unique-identifier`.
+fn unique_id_from_opf(opf: &str) -> Option<String> {
+    let doc = parse_xml(opf)?;
+    // Mirror epubveri's resolution exactly (opf.rs): trim both sides of the
+    // id match, and concatenate ALL descendant text, so our value is byte-for-
+    // byte what epubveri compares dtb:uid against.
+    let uid_id = doc.root_element().attribute("unique-identifier")?.trim();
+    let value: String = doc
+        .descendants()
+        .find(|n| {
+            n.is_element()
+                && n.tag_name().name() == "identifier"
+                && n.attribute("id").map(str::trim) == Some(uid_id)
+        })?
+        .descendants()
+        .filter(|t| t.is_text())
+        .filter_map(|t| t.text())
+        .collect();
+    let value = value.trim().to_string();
+    (!value.is_empty()).then_some(value)
+}
+
+/// The `<meta name="dtb:uid">` element's byte range and current `content`.
+fn find_dtb_uid_meta(ncx: &str) -> Option<(Range<usize>, String)> {
+    let doc = parse_xml(ncx)?;
+    let meta = doc.descendants().find(|n| {
+        n.is_element() && n.tag_name().name() == "meta" && n.attribute("name") == Some("dtb:uid")
+    })?;
+    Some((
+        meta.range(),
+        meta.attribute("content").unwrap_or("").to_string(),
+    ))
+}
+
+/// Rewrite the `content="…"` value inside a single element's source text,
+/// preserving quote style and every other attribute. `None` if there's no
+/// quoted `content` attribute.
+fn set_content_attr(element: &str, value: &str) -> Option<String> {
+    let after = element.to_ascii_lowercase().find("content=")? + "content=".len();
+    let quote = element[after..].chars().next()?;
+    if quote != '"' && quote != '\'' {
+        return None;
+    }
+    let vstart = after + quote.len_utf8();
+    let vend = vstart + element[vstart..].find(quote)?;
+    Some(format!(
+        "{}{}{}",
+        &element[..vstart],
+        value,
+        &element[vend..]
+    ))
 }
 
 #[cfg(test)]
@@ -586,5 +744,43 @@ mod tests {
     #[test]
     fn declines_unparseable_document() {
         assert!(plan_encoding_normalization("<html><head><meta http-equiv=Content-Type").is_none());
+    }
+
+    #[test]
+    fn opf_path_read_from_container() {
+        let c = r#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#;
+        assert_eq!(
+            opf_path_from_container(c).as_deref(),
+            Some("OEBPS/content.opf")
+        );
+    }
+
+    #[test]
+    fn unique_id_resolves_the_referenced_identifier() {
+        let opf = r#"<package xmlns="http://www.idpf.org/2007/opf" unique-identifier="pub-id"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="other">wrong</dc:identifier><dc:identifier id="pub-id">urn:uuid:ABC</dc:identifier></metadata></package>"#;
+        assert_eq!(unique_id_from_opf(opf).as_deref(), Some("urn:uuid:ABC"));
+    }
+
+    #[test]
+    fn find_dtb_uid_reads_current_content() {
+        let ncx = r#"<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/"><head><meta name="dtb:uid" content="OLD-UID"/></head></ncx>"#;
+        let (_, old) = find_dtb_uid_meta(ncx).unwrap();
+        assert_eq!(old, "OLD-UID");
+    }
+
+    #[test]
+    fn set_content_attr_swaps_value_and_keeps_other_attrs() {
+        let el = r#"<meta name="dtb:uid" content="OLD" scheme="uuid"/>"#;
+        let out = set_content_attr(el, "NEW").unwrap();
+        assert_eq!(out, r#"<meta name="dtb:uid" content="NEW" scheme="uuid"/>"#);
+    }
+
+    #[test]
+    fn set_content_attr_single_quotes() {
+        let el = "<meta name='dtb:uid' content='OLD'/>";
+        assert_eq!(
+            set_content_attr(el, "NEW").as_deref(),
+            Some("<meta name='dtb:uid' content='NEW'/>")
+        );
     }
 }
