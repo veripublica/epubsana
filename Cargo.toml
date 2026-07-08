@@ -1,0 +1,28 @@
+[package]
+name = "epubsana"
+version = "0.1.0"
+edition = "2021"
+description = "Repairs the EPUB defects epubveri detects — a pure-Rust, JVM-free, confirm-each-step EPUB fixer."
+license = "AGPL-3.0-only OR LicenseRef-veripublica-Commercial"
+repository = "https://github.com/veripublica/epubsana"
+homepage = "https://github.com/veripublica/epubsana"
+readme = "README.md"
+keywords = ["epub", "epubcheck", "repair", "fix", "ebook"]
+categories = ["command-line-utilities", "parser-implementations"]
+
+# Not published yet. Bootstrap in progress.
+publish = false
+
+[dependencies]
+# The detector this repairs the output of — consumed from crates.io like any
+# external user (dogfooding). Pinned to 0.4.4, the version whose `rule`/`params`
+# sub-codes + fixes epubsana's fixers dispatch on. For local co-development of
+# epubveri, add an uncommitted override:
+#   [patch.crates-io] epubveri = { path = "../epubveri" }
+epubveri = "0.4.4"
+# Pure-Rust only (no C deps), same philosophy as epubveri: zip's "deflate"
+# feature uses flate2 -> miniz_oxide (Rust); bzip2/zstd (C) stay disabled.
+zip = { version = "2.2", default-features = false, features = ["deflate"] }
+
+[profile.release]
+opt-level = 2

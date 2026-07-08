@@ -1,0 +1,7 @@
+/target
+
+# Local-only project context / internal design — not for publication yet
+# (owner decision; mirrors epubveri's CLAUDE.md/PROGRESS_LOG handling).
+/CLAUDE.md
+/docs/SPIKE.md
+/docs/API.md
