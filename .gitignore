@@ -5,3 +5,8 @@
 /CLAUDE.md
 /docs/SPIKE.md
 /docs/API.md
+
+# Local-only dev scaffolding: corpus scanner for grounding fixer ROI in real
+# books (not product; keeps the published crate lean).
+/examples/scan.rs
+/examples/ncx_audit.rs
