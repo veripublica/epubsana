@@ -116,6 +116,7 @@ epubsana <book.epub> [OPTIONS]
 | `--yes` | Apply every proposed fix without prompting. |
 | `--auto-safe` | Auto-apply provably-safe fixes; prompt for the rest. |
 | `--goal <openable\|valid>` | How far to repair. Default: `valid`. |
+| `-v`, `--verbose` | Show each fix's rationale (why it's safe). |
 | `-V`, `--version` | Print version and exit. |
 | `-h`, `--help` | Print help and exit. |
 

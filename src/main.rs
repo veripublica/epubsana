@@ -23,8 +23,16 @@ OPTIONS:
     --yes                    apply every proposed fix without prompting
     --auto-safe              auto-apply safe fixes, prompt for the rest
     --goal <openable|valid>  how far to repair (default: valid)
-    -V, --version            print version and exit
+    -v, --verbose            show each fix's rationale (why it is safe)
+    -V, --version            print the version and exit
     -h, --help               print this help and exit
+
+EXAMPLES:
+    epubsana -i book.epub --dry-run       # preview the fixes, change nothing
+    epubsana -i book.epub                 # repair, approving each fix
+    epubsana -i book.epub --yes           # apply every proposed fix, no prompts
+    epubsana -i book.epub -o fixed.epub   # write to a specific output path
+    epubsana -V                           # print the version
 
 The original is never modified in place: repairs go to a separate file, and
 epubsana refuses to run if the output path is the input.
@@ -53,6 +61,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let mut dry_run = false;
     let mut yes = false;
     let mut auto_safe = false;
+    let mut verbose = false;
     let mut goal = Goal::Valid;
 
     let mut args = std::env::args().skip(1);
@@ -75,6 +84,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             "--dry-run" => dry_run = true,
             "--yes" => yes = true,
             "--auto-safe" => auto_safe = true,
+            "-v" | "--verbose" => verbose = true,
             "--goal" => {
                 goal = match args.next().as_deref() {
                     Some("openable") => Goal::Openable,
@@ -83,7 +93,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 }
             }
             other if !other.starts_with('-') => input = Some(PathBuf::from(other)),
-            other => return Err(format!("unknown option '{other}'").into()),
+            other => return Err(format!("unknown option '{other}' (try --help)").into()),
         }
     }
 
@@ -106,7 +116,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
         } else {
             println!("\nProposed fixes ({}):", proposals.len());
             for fix in &proposals {
-                println!("\n{}", format_fix(fix));
+                println!("\n{}", format_fix(fix, verbose));
             }
         }
         return Ok(exit_code(before.errors()));
@@ -130,7 +140,7 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let mut confirmer: Box<dyn Confirmer> = if yes {
         Box::new(YesConfirmer)
     } else {
-        Box::new(TtyConfirmer)
+        Box::new(TtyConfirmer { verbose })
     };
 
     let report = repair(&mut ws, goal, policy, confirmer.as_mut())?;
@@ -199,8 +209,12 @@ fn same_path(input: &Path, output: &Path) -> bool {
 }
 
 /// Render a proposed fix and its preview (shared by `--dry-run` and prompts).
-fn format_fix(fix: &ProposedFix) -> String {
+/// With `verbose`, also show the fix's rationale.
+fn format_fix(fix: &ProposedFix, verbose: bool) -> String {
     let mut lines = vec![format!("[{:?}] {}", fix.tier, fix.title)];
+    if verbose {
+        lines.push(format!("    why: {}", fix.rationale));
+    }
     for c in &fix.preview {
         lines.push(format!("    - {}", c.note));
     }
@@ -217,10 +231,12 @@ impl Confirmer for YesConfirmer {
 
 /// Prompts on the terminal for each fix. Prompts go to stderr so stdout carries
 /// only the report (per the convention's stream rules).
-struct TtyConfirmer;
+struct TtyConfirmer {
+    verbose: bool,
+}
 impl Confirmer for TtyConfirmer {
     fn decide(&mut self, fix: &ProposedFix) -> Decision {
-        eprintln!("\n{}", format_fix(fix));
+        eprintln!("\n{}", format_fix(fix, self.verbose));
         eprint!("  Apply this fix? [y/N] ");
         io::stderr().flush().ok();
         let mut line = String::new();
