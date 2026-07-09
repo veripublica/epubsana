@@ -12,14 +12,21 @@ changed**. It never guesses, and it preserves everything it doesn't touch.
 
 ## Status
 
-Early bootstrap. The core contract (`Workspace` → detect → propose → confirm →
-apply → report) works, with the first and highest-impact fixer:
+Early but working. The core contract (`Workspace` → detect → propose → confirm →
+apply → report) is solid, with four fixers so far:
 
-- **`RSC-016` — undeclared HTML entities** (`&nbsp;`, `&mdash;`, `&eacute;`, …
-  used in XHTML without a DTD): replaced with the exact character each denotes.
+- **`RSC-016`** — undeclared HTML entities (`&nbsp;`, `&mdash;`, …) → the exact
+  character each denotes.
+- **`RSC-005` / `ncx.ids.invalid_ncname`** — invalid NCX ids → valid XML NCNames.
+- **`RSC-005` / `invalid_content_type_meta`** — legacy encoding declarations →
+  the HTML5 `<meta charset="utf-8">`.
+- **`NCX-001`** — NCX `dtb:uid` synced to the package's unique identifier.
 
-More fixers (invalid NCX ids, media-type mismatches, content properties, OCF
-packaging, metadata, …) land next, in real-world impact order.
+Measured on a 171-book corpus, they clear ~79% of all errors with zero
+regressions. More fixers land next, in real-world impact order.
+
+See **[docs/USAGE.md](docs/USAGE.md)** for the full guide — CLI reference, the
+confirm-each-step workflow, the fixer catalogue, exit codes, and library usage.
 
 ## Usage
 
