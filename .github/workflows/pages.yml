@@ -1,0 +1,64 @@
+name: Deploy WASM demo to GitHub Pages
+
+# Builds epubsana-wasm (--target web) and deploys epubsana-wasm/demo/ + the
+# freshly-built pkg/ to GitHub Pages, so anyone can repair an EPUB entirely
+# client-side with zero install (no Rust, no binary download) — the bytes
+# never leave the browser. Runs on every push to main so the demo always
+# reflects the latest code; workflow_dispatch allows a manual re-deploy.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v5
+
+      - name: Add wasm target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Build epubsana-wasm (web target)
+        run: wasm-pack build epubsana-wasm --target web
+
+      - name: Assemble Pages site
+        run: |
+          set -euo pipefail
+          mkdir -p site
+          cp -r epubsana-wasm/demo site/demo
+          cp -r epubsana-wasm/pkg site/pkg
+          # Land the demo at the site root too, so the root URL works without
+          # needing /demo/. The demo's import path ("../pkg/…") only resolves
+          # one level down, so rewrite it to "./pkg/…" for the root copy — a
+          # bare "pkg/…" is not a valid ES module specifier.
+          sed 's#\.\./pkg/#./pkg/#' epubsana-wasm/demo/index.html > site/index.html
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
