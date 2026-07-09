@@ -32,14 +32,18 @@ confirm-each-step workflow, the fixer catalogue, exit codes, and library usage.
 
 ```sh
 # See what would be fixed, change nothing:
-epubsana book.epub --dry-run
+epubsana -i book.epub --dry-run
 
-# Repair, confirming each fix, writing book.fixed.epub:
-epubsana book.epub
+# Repair, confirming each fix, writing book_fixed.epub:
+epubsana -i book.epub
 
 # Apply every proposed fix without prompting:
-epubsana book.epub --yes -o repaired.epub
+epubsana -i book.epub --yes -o repaired.epub
 ```
+
+The CLI conforms to the [veripublica conventions](https://github.com/veripublica/conventions)
+(`-i`/`-o`, `<name>_fixed.epub` output, exit `0`/`1`/`2`), so it behaves like the
+other veripublica tools. Full guide: **[docs/USAGE.md](docs/USAGE.md)**.
 
 ## Design
 

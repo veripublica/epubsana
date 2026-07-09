@@ -66,17 +66,18 @@ cargo install --path .
 
 ```sh
 # 1. See what would be fixed — changes nothing:
-epubsana book.epub --dry-run
+epubsana -i book.epub --dry-run
 
-# 2. Repair interactively, approving each fix (writes book.fixed.epub):
-epubsana book.epub
+# 2. Repair interactively, approving each fix (writes book_fixed.epub):
+epubsana -i book.epub
 
 # 3. Apply every proposed fix without prompting, to a chosen path:
-epubsana book.epub --yes -o repaired.epub
+epubsana -i book.epub --yes -o repaired.epub
 ```
 
-The original file is never modified in place; a repaired copy is written only if
-at least one fix was applied.
+A positional path also works (`epubsana book.epub`). The original file is never
+modified in place; a repaired copy is written to `<name>_fixed.epub` (or your
+`-o`) only if at least one fix was applied.
 
 ---
 
@@ -101,17 +102,22 @@ CLI, a future in-browser WASM page, and library consumers such as epublift):
 
 ## CLI reference
 
+epubsana conforms to the **[veripublica CLI convention v1](https://github.com/veripublica/conventions/blob/main/CLI.md)**,
+so its flags, output naming, and exit codes match the other veripublica tools.
+
 ```
+epubsana -i <book.epub> [OPTIONS]
 epubsana <book.epub> [OPTIONS]
 ```
 
 | Option | Description |
 | --- | --- |
+| `-i`, `--input <path>` | The EPUB to repair. A positional path also works. |
+| `-o`, `--output <path>` | Where to write the repaired EPUB. Default: `<name>_fixed.epub`, next to the input. Must not be the input. |
 | `--dry-run` | Show the fixes that would be proposed and change nothing. |
 | `--yes` | Apply every proposed fix without prompting. |
 | `--auto-safe` | Auto-apply provably-safe fixes; prompt for the rest. |
 | `--goal <openable\|valid>` | How far to repair. Default: `valid`. |
-| `-o`, `--output <path>` | Where to write the repaired EPUB. Default: `<name>.fixed.epub`. |
 | `-V`, `--version` | Print version and exit. |
 | `-h`, `--help` | Print help and exit. |
 
@@ -167,7 +173,7 @@ APPLIED Normalize the encoding declaration in chapter1.xhtml to HTML5 <meta char
     - normalize to a single <meta charset="utf-8"/> (1 encoding <meta> rewritten/removed)
 Skipped 0 fix(es).
 errors: 150 → 0
-wrote book.fixed.epub
+wrote book_fixed.epub
 ```
 
 - **APPLIED** blocks list every fix that was applied and its concrete edits.
@@ -180,14 +186,17 @@ wrote book.fixed.epub
 
 ## Exit codes
 
+Per the [convention](https://github.com/veripublica/conventions/blob/main/CLI.md#6-exit-codes):
+
 | Code | Meaning |
 | --- | --- |
-| `0` | The run completed (whether or not the book is now fully valid). |
-| `2` | An error prevented the run (bad arguments, unreadable/corrupt EPUB, I/O failure). |
+| `0` | The book is valid after repair (or was already). |
+| `1` | Repair ran, but some errors remain (epubsana cleared what it safely could). |
+| `2` | The tool could not run (bad arguments, unreadable/corrupt EPUB, `-o` equal to the input, I/O failure). |
 
-Note that a completed run exits `0` even if errors remain — epubsana clears what
-it *safely can* and reports the residual. Check the `errors: N → M` line (or, for
-scripts, re-run epubveri on the output) to see whether the book is fully valid.
+This lets a script branch on the result: `epubsana -i book.epub --yes && echo "fully valid"`.
+The `errors: N → M` line shows the same thing in human form. In `--dry-run`, the
+code reflects the book's *current* state (`0` clean, `1` has errors).
 
 ---
 
