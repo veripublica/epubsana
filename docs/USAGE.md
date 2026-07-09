@@ -13,11 +13,6 @@ guesses, and it preserves — byte-for-byte — everything it doesn't touch.
   serves publishers who still ship EPUB 2 for older readers, so it fixes a book
   *in place* without changing its version.
 
-> This guide is kept in step with the tool. When a fixer is added or changed,
-> update [What epubsana can fix today](#what-epubsana-can-fix-today) and, if the
-> CLI changes, [CLI reference](#cli-reference). See
-> [Maintaining this document](#maintaining-this-document).
-
 ---
 
 ## Table of contents
