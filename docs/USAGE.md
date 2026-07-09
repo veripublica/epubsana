@@ -34,7 +34,6 @@ guesses, and it preserves — byte-for-byte — everything it doesn't touch.
 - [Reference standard](#reference-standard)
 - [Using epubsana as a Rust library](#using-epubsana-as-a-rust-library)
 - [Known limitations](#known-limitations)
-- [Maintaining this document](#maintaining-this-document)
 
 ---
 
@@ -318,32 +317,10 @@ Key types:
 
 - **Coverage is partial and honest.** epubsana fixes the safely-fixable
   findings and reports the rest; a repaired book is not guaranteed fully valid.
-  It clears a large share of real-world errors with zero regressions — measured
-  on a 171-book corpus, the current fixers clear ~79% of all errors (18,348 →
-  3,904) and bring 22 of the 145 invalid books (~15%) to fully valid — but your
-  mileage varies by book.
+  How much a given library improves varies — the tool clears what it can
+  *safely* and leaves the rest reported, untouched.
 - **Fixes are planned once, up front.** All proposals are built from the initial
   detection. A structural fixer that can't parse a document *before* an earlier
   fixer would have cleaned it up may decline it. (Re-planning after each fix is
   on the roadmap.)
 - **`--goal` doesn't gate fixers yet** (see [CLI reference](#cli-reference)).
-
----
-
-## Maintaining this document
-
-When you add or change a fixer:
-
-1. Add/update its row in
-   [What epubsana can fix today](#what-epubsana-can-fix-today) — ID, `rule`,
-   tier, and a one-line description.
-2. Add a section to the [fix catalogue](./FIXERS.md) using its template —
-   **Finding**, **Fix**, **Why it's safe**, **When it declines** — plus a
-   Summary row. This is the spec reviewers check the code against.
-3. If it introduces a new CLI flag or changes behaviour, update
-   [CLI reference](#cli-reference).
-4. If measured coverage changes materially, update the figure in
-   [Known limitations](#known-limitations) (keep it honest — cite the corpus).
-
-Keep this in sync with `README.md`'s short status blurb.
-```
