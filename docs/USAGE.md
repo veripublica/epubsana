@@ -195,7 +195,8 @@ scripts, re-run epubveri on the output) to see whether the book is fully valid.
 
 Each fixer targets a specific epubveri finding — by epubcheck ID and, where
 available, the stable `rule` sub-code — and only proposes an edit when a safe,
-content-preserving one exists.
+content-preserving one exists. For exactly *how* each fix is made, why it's
+safe, and when epubsana declines, see the **[fix catalogue](./FIXERS.md)**.
 
 | epubcheck ID | rule sub-code | Tier | What it does |
 | --- | --- | --- | --- |
@@ -323,9 +324,12 @@ When you add or change a fixer:
 1. Add/update its row in
    [What epubsana can fix today](#what-epubsana-can-fix-today) — ID, `rule`,
    tier, and a one-line description.
-2. If it introduces a new CLI flag or changes behaviour, update
+2. Add a section to the [fix catalogue](./FIXERS.md) using its template —
+   **Finding**, **Fix**, **Why it's safe**, **When it declines** — plus a
+   Summary row. This is the spec reviewers check the code against.
+3. If it introduces a new CLI flag or changes behaviour, update
    [CLI reference](#cli-reference).
-3. If measured coverage changes materially, update the figure in
+4. If measured coverage changes materially, update the figure in
    [Known limitations](#known-limitations) (keep it honest — cite the corpus).
 
 Keep this in sync with `README.md`'s short status blurb.
