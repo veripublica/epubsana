@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs on the same ref (e.g. rapid pushes to a PR).
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v5
+
+      # ubuntu-latest ships stable Rust + rustfmt; we only add the wasm target
+      # for the smoke builds below. All deps (epubveri, zip, roxmltree, and the
+      # wasm crate's wasm-bindgen/tsify) come from crates.io — no sibling checkout.
+      - name: Add wasm target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Format (cargo fmt --check)
+        run: cargo fmt --all --check
+
+      - name: Build (workspace)
+        run: cargo build --workspace --locked
+
+      - name: Test (workspace)
+        run: cargo test --workspace --locked
+
+      # Prove the repairer still compiles to WebAssembly: the core library and
+      # the epubsana-wasm bindings crate (which exercises the wasm-bindgen /
+      # tsify codegen). A full `wasm-pack build` runs in the Pages workflow;
+      # this is the lighter, tooling-free CI smoke test.
+      - name: Build core lib for wasm32
+        run: cargo build --lib --target wasm32-unknown-unknown --locked
+
+      - name: Build epubsana-wasm for wasm32
+        run: cargo build -p epubsana-wasm --target wasm32-unknown-unknown --locked
