@@ -13,3 +13,7 @@
 /examples/repair_audit.rs
 /examples/residual_audit.rs
 /examples/ncx001_diag.rs
+
+# wasm-pack output
+/epubsana-wasm/pkg/
+/examples/roundtrip_diag.rs

@@ -1,0 +1,26 @@
+[package]
+name = "epubsana-wasm"
+version = "0.1.0"
+edition = "2021"
+description = "WebAssembly bindings for epubsana — repair EPUB defects in the browser, no upload."
+license = "AGPL-3.0-only OR LicenseRef-veripublica-Commercial"
+# npm's canonical repository.url form (git+….git). This crate isn't published to
+# crates.io (publish = false); its only consumer is wasm-pack → the generated
+# npm package under the @veripublica scope.
+repository = "git+https://github.com/veripublica/epubsana.git"
+homepage = "https://github.com/veripublica/epubsana"
+readme = "README.md"
+keywords = ["epub", "repair", "fix", "wasm", "ebook"]
+publish = false
+
+# A thin JS boundary over epubsana's public API; no repair logic of its own.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+epubsana = { path = ".." }
+wasm-bindgen = "0.2"
+serde = { version = "1", features = ["derive"] }
+# tsify-next derives both serde (de)serialization and a real TypeScript .d.ts
+# for the returned types, and pulls in serde-wasm-bindgen transitively.
+tsify-next = { version = "0.5", features = ["js"] }

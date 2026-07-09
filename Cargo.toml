@@ -10,6 +10,12 @@ readme = "README.md"
 keywords = ["epub", "epubcheck", "repair", "fix", "ebook"]
 categories = ["command-line-utilities", "parser-implementations"]
 
+# The WASM/JS boundary lives in a separate workspace member so its
+# wasm-bindgen/serde/tsify deps never leak into this core crate (same pattern
+# as epubveri-wasm). It reuses the core; it adds no repair logic of its own.
+[workspace]
+members = ["epubsana-wasm"]
+
 [dependencies]
 # The detector this repairs the output of — consumed from crates.io like any
 # external user (dogfooding). Pinned to 0.4.4, the version whose `rule`/`params`
