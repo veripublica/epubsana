@@ -145,13 +145,3 @@ nothing else is affected.
 **When it declines.** If the package identifier can't be resolved (a broken or
 missing OPF `unique-identifier` / `dc:identifier`), or the NCX won't parse, the
 fixer leaves it untouched rather than invent a value.
-
----
-
-## Adding a fixer
-
-When you add a fixer, add a section here using the same shape — **Finding**,
-**Fix** (with its `fix_id` and tier), **Why it's safe**, **When it declines** —
-and a row in the [Summary](#summary) table. Then update the capability table in
-[USAGE.md](./USAGE.md#what-epubsana-can-fix-today). Keep the safety argument
-concrete: what exactly changes, and why that can't corrupt the book.
