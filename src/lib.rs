@@ -1,7 +1,7 @@
 //! epubsana — repairs the EPUB defects [epubveri](https://crates.io/crates/epubveri)
 //! detects.
 //!
-//! A pure-Rust, JVM-free companion to epubveri. epubveri *finds* what's wrong
+//! A pure-Rust companion to epubveri. epubveri *finds* what's wrong
 //! (by epubcheck-compatible message ID, with a stable `rule` sub-code and exact
 //! position); epubsana turns the safely-fixable findings into **proposed edits
 //! the caller approves one by one**, applies the approved ones, and emits a

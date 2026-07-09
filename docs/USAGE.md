@@ -40,25 +40,29 @@ guesses, and it preserves — byte-for-byte — everything it doesn't touch.
 
 ## Install
 
-epubsana is pure Rust with no C dependencies and no JVM. You need a recent
-stable [Rust toolchain](https://rustup.rs/).
+epubsana is pure Rust with no C dependencies.
 
-**From source (current):**
+**The CLI** — from [crates.io](https://crates.io/crates/epubsana):
+
+```sh
+cargo install epubsana
+```
+
+**In the browser** — no install at all: repair an EPUB with the
+[in-browser demo](https://veripublica.github.io/epubsana/) (your file never
+leaves the page). For a JS project, add the WASM bindings from npm:
+
+```sh
+npm install @veripublica/epubsana-wasm
+```
+
+**From source** (optional):
 
 ```sh
 git clone https://github.com/veripublica/epubsana
 cd epubsana
-cargo build --release
-# binary at target/release/epubsana
-```
-
-To put it on your `PATH`:
-
-```sh
 cargo install --path .
 ```
-
-> Publishing to crates.io (`cargo install epubsana`) is planned but not done yet.
 
 ---
 

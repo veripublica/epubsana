@@ -2,7 +2,7 @@
 
 WebAssembly bindings for [**epubsana**](https://github.com/veripublica/epubsana) — a
 pure-Rust EPUB repairer. Repair an `.epub` **entirely in the browser** (or any JS
-runtime): no JVM, no server round-trip, no native dependencies. **The bytes never
+runtime): no server round-trip, no native dependencies. **The bytes never
 leave the page** — a real privacy guarantee for unpublished manuscripts.
 
 It reuses the exact core epubsana uses on the command line, so the behaviour is

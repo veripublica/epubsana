@@ -1,7 +1,7 @@
 # epubsana
 
 **Repairs the EPUB defects [epubveri](https://github.com/veripublica/epubveri)
-detects** — a fast, pure-Rust, JVM-free EPUB fixer.
+detects** — a fast, pure-Rust EPUB fixer.
 
 epubveri *finds* what's wrong in an EPUB (with epubcheck-compatible message
 IDs and exact positions); **epubsana** turns the safely-fixable findings into
@@ -22,11 +22,20 @@ apply → report) is solid, with four fixers so far:
   the HTML5 `<meta charset="utf-8">`.
 - **`NCX-001`** — NCX `dtb:uid` synced to the package's unique identifier.
 
-Measured on a 171-book corpus, they clear ~79% of all errors with zero
-regressions. More fixers land next, in real-world impact order.
+More fixers land next, in real-world impact order.
 
 See **[docs/USAGE.md](docs/USAGE.md)** for the full guide — CLI reference, the
 confirm-each-step workflow, the fixer catalogue, exit codes, and library usage.
+
+## Install
+
+```sh
+cargo install epubsana                  # the CLI (crates.io)
+npm install @veripublica/epubsana-wasm  # WASM bindings for the browser
+```
+
+Or repair a book right in your browser — no install, no upload, your file never
+leaves the page: **https://veripublica.github.io/epubsana/**
 
 ## Usage
 
@@ -47,7 +56,7 @@ other veripublica tools. Full guide: **[docs/USAGE.md](docs/USAGE.md)**.
 
 ## Design
 
-Every frontend (this CLI, a future in-browser WASM page, and
+Every frontend (this CLI, the [in-browser WASM demo](https://veripublica.github.io/epubsana/), and
 [epublift](https://github.com/ePubLift/epublift) integration) shares one core
 contract so behavior never diverges: fixes are proposed as data, the caller
 decides per fix (`Confirmer`), and the run ends with a `ChangeReport`. Nothing

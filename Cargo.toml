@@ -2,7 +2,7 @@
 name = "epubsana"
 version = "0.1.0"
 edition = "2021"
-description = "Repairs the EPUB defects epubveri detects — a pure-Rust, JVM-free, confirm-each-step EPUB fixer."
+description = "Repairs the EPUB defects epubveri detects — a pure-Rust, confirm-each-step EPUB fixer."
 license = "AGPL-3.0-only OR LicenseRef-veripublica-Commercial"
 repository = "https://github.com/veripublica/epubsana"
 homepage = "https://github.com/veripublica/epubsana"

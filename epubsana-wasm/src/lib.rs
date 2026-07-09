@@ -1,5 +1,5 @@
 //! WebAssembly bindings for [`epubsana`] — repair an EPUB's defects entirely in
-//! the browser: no JVM, no server round-trip, no upload. The bytes never leave
+//! the browser: no server round-trip, no upload. The bytes never leave
 //! the page.
 //!
 //! A stateful [`Session`] is where "confirm each step" lives for the web

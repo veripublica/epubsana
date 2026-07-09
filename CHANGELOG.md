@@ -10,7 +10,7 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
 ## [0.1.0] - 2026-07-09
 
-Initial release. A pure-Rust, JVM-free EPUB repairer — the fixer half of the
+Initial release. A pure-Rust EPUB repairer — the fixer half of the
 [epubveri](https://github.com/veripublica/epubveri) (detect) → epubsana (repair)
 pair. It turns the safely-fixable defects epubveri reports into edits you approve
 one at a time, applies the approved ones, and reports exactly what changed. It
