@@ -10,9 +10,6 @@ readme = "README.md"
 keywords = ["epub", "epubcheck", "repair", "fix", "ebook"]
 categories = ["command-line-utilities", "parser-implementations"]
 
-# Not published yet. Bootstrap in progress.
-publish = false
-
 [dependencies]
 # The detector this repairs the output of — consumed from crates.io like any
 # external user (dogfooding). Pinned to 0.4.4, the version whose `rule`/`params`
