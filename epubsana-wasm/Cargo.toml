@@ -1,6 +1,6 @@
 [package]
 name = "epubsana-wasm"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "WebAssembly bindings for epubsana — repair EPUB defects in the browser, no upload."
 license = "AGPL-3.0-only OR LicenseRef-veripublica-Commercial"

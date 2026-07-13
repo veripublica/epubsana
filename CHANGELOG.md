@@ -8,15 +8,36 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [0.2.1] - 2026-07-13
+
+### Fixed
+
+- **The `epubveri` version requirement was too low, and 0.2.0 shipped with it.**
+  `Cargo.toml` declared `epubveri = "0.5"` while the code needs **0.5.3** — the
+  release where the envelope types became reusable (`Envelope::for_tool`,
+  `Item::fix`). Against 0.5.0–0.5.2 epubsana does not compile, so a consumer
+  whose lockfile held an earlier 0.5.x got a compile error out of a released
+  crate. The requirement is now `epubveri = "0.5.3"`.
+
+  Nothing else changed: same behaviour, same API, same output. If your build of
+  0.2.0 worked, it resolved epubveri to 0.5.3 already.
+
+### Changed
+
+- CI now builds against the **declared minimum** epubveri, so the promise a
+  version requirement makes — *"this crate builds against anything from here
+  up"* — is checked rather than assumed. That is the bug above, caught by a
+  machine next time.
+
 ## [0.2.0] - 2026-07-13
 
 Adopts **[veripublica conventions v0.4](https://github.com/veripublica/conventions)**
-and **epubveri 0.5**. Breaking, on purpose: the severity vocabulary grew from
+and **epubveri 0.5.3**. Breaking, on purpose: the severity vocabulary grew from
 three values to five, and a `fatal` is no longer folded into an `error` — which
 changes what "valid" means, and it changes it for the better.
 
 **The trap this release closes:** epubsana's flagship fixer clears *undeclared
-HTML entities*, and epubveri 0.5 correctly reports those as **fatal** (a document
+HTML entities*, and epubveri 0.5.3 correctly reports those as **fatal** (a document
 that is not well-formed XML does not open). Every count epubsana printed came
 from `errors()`, which no longer counts fatals. Left alone, a book with 774 fatal
 entity references would have reported `0 error(s)` and been called **valid**.
@@ -134,5 +155,6 @@ never guesses, and it preserves — byte-for-byte — everything it doesn't touc
 How much a given library improves varies — epubsana clears what it can *safely*
 and leaves the rest reported, untouched.
 
+[0.2.1]: https://github.com/veripublica/epubsana/releases/tag/v0.2.1
 [0.2.0]: https://github.com/veripublica/epubsana/releases/tag/v0.2.0
 [0.1.0]: https://github.com/veripublica/epubsana/releases/tag/v0.1.0

@@ -36,6 +36,22 @@ jobs:
       # the epubsana-wasm bindings crate (which exercises the wasm-bindgen /
       # tsify codegen). A full `wasm-pack build` runs in the Pages workflow;
       # this is the lighter, tooling-free CI smoke test.
+      # A version requirement is a promise: "this crate builds against anything
+      # from here up". It was broken once — `epubveri = "0.5"` was declared while
+      # the code needed 0.5.3's envelope types, so a consumer whose lockfile held
+      # 0.5.2 got a compile error out of a released crate. Build against the
+      # *declared minimum* to keep the promise honest. epubveri is the dependency
+      # whose API epubsana tracks release by release, so it is the one that earns
+      # this check.
+      - name: Build against the declared minimum epubveri
+        run: |
+          set -euo pipefail
+          min=$(grep -E '^epubveri = "' Cargo.toml | sed -E 's/.*"([0-9]+\.[0-9]+\.[0-9]+)".*/\1/')
+          echo "declared minimum: $min"
+          cargo update -p epubveri --precise "$min"
+          cargo check --workspace
+          git checkout -- Cargo.lock
+
       - name: Build core lib for wasm32
         run: cargo build --lib --target wasm32-unknown-unknown --locked
 
