@@ -96,10 +96,39 @@ jobs:
             epubsana-${{ matrix.target }}.zip
           if-no-files-found: ignore
 
+      # Populate the GitHub Release body from this version's CHANGELOG.md
+      # section, so the release notes are never filled in by hand — which is the
+      # step that gets forgotten (epubveri's v0.5.0/0.5.1/0.5.2 shipped with
+      # blank release pages while their CHANGELOG entries existed; see
+      # veripublica/epubveri, "ci: auto-fill GitHub Release notes"). Every matrix
+      # job writes the same file and sets the same body — idempotent. `bash` is
+      # available on all runners, Windows included.
+      - name: Extract release notes from CHANGELOG
+        shell: bash
+        run: |
+          tag="${{ inputs.tag || github.ref_name }}"
+          ver="${tag#v}"
+          awk -v ver="$ver" '
+            $0 ~ "^## \\[" ver "\\]" {inblk=1; next}
+            inblk && /^## \[/ {exit}
+            inblk { if (!started && $0 ~ /^[[:space:]]*$/) next; started=1; buf[n++]=$0 }
+            END { last=n-1; while (last>=0 && buf[last] ~ /^[[:space:]]*$/) last--; for (i=0;i<=last;i++) print buf[i] }
+          ' CHANGELOG.md > RELEASE_NOTES.md
+          # A tag whose version has no CHANGELOG section would otherwise publish
+          # an empty release body — the very failure this step exists to prevent.
+          if [ ! -s RELEASE_NOTES.md ]; then
+            echo "error: no '## [$ver]' section in CHANGELOG.md — add it before tagging" >&2
+            exit 1
+          fi
+          printf '\n\nFull notes: [CHANGELOG.md](https://github.com/veripublica/epubsana/blob/main/CHANGELOG.md). Also on [crates.io](https://crates.io/crates/epubsana/%s).\n' "$ver" >> RELEASE_NOTES.md
+          echo "----- extracted release notes -----"
+          cat RELEASE_NOTES.md
+
       - name: Attach to release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
+          body_path: RELEASE_NOTES.md
           files: |
             epubsana-${{ matrix.target }}.tar.gz
             epubsana-${{ matrix.target }}.zip
