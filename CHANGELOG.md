@@ -8,6 +8,61 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [0.3.0] - 2026-07-15
+
+Adds three corpus-chosen fixers and realigns the foundation to the epubveri
+family (edition 2024, `zip` 8.x, `roxmltree` 0.21).
+
+### Added — three fixers, chosen from a census of the real corpus
+
+- **`RSC-005` / `opf.content_document.empty_title`** *(ConfirmNeeded)* — fills an
+  empty `<title></title>`. This is the **most widespread defect in the corpus**:
+  more books carry it than carry undeclared entities. The text is never invented
+  — it is the label the book's **own table of contents** gives that document
+  (NCX `navLabel`, or the nav document's `<a>` text), or failing that the
+  document's **own first heading**. When the book names the document nowhere, the
+  fixer declines and the finding stays reported; it deliberately does *not* fall
+  back to the book's `dc:title`, because stamping the book's name onto every
+  chapter is a guess about intent, not a repair.
+- **`RSC-020` / `opf.manifest_item.unencoded_space_in_href`** *(AutoSafe)* —
+  percent-encodes a raw space in a manifest `href`. The file keeps its name; only
+  the URL is spelled legally, and `%20` resolves to the very same entry.
+- **`OPF-014` / `opf.content_document.property_used_undeclared`** *(AutoSafe)* —
+  declares a property the content document demonstrably uses (`scripted`, `svg`,
+  `remote-resources`, `switch`) on its manifest item. epubveri proved the usage,
+  so the declaration is not a guess: the manifest is made to tell the truth about
+  a document that is not itself modified.
+
+### Changed — foundation aligned with the epubveri family
+
+- **`epubveri` 0.5.3 → 0.5.7**, which is itself edition-2024 / MSRV-1.88, so the
+  crate follows: **edition 2021 → 2024** and **`rust-version = 1.88`**. No source
+  change was needed to compile on the new edition.
+- **`zip` 2.x → 8.6** (a `zlib-rs` deflate backend). The family shares one `zip`
+  major because epubsana re-emits the containers epubveri reads. **Repaired
+  files' bytes change as a result** — same content, and output is still
+  byte-for-byte deterministic.
+- **`roxmltree` 0.20 → 0.21**, which now matches attributes by local name and
+  ignores namespace. A local `NodeExt::attr_no_ns` restores the exact,
+  no-namespace lookups the fixers rely on, so `attribute("id")` never also
+  matches `xml:id`.
+
+### Verified
+
+Across the corpus (171 books), applying every proposed fix introduces **no new
+defect**, and the proposal set is **byte-identical between the 0.5.3 and 0.5.7
+stacks** — the foundation bump changed nothing about what epubsana proposes or
+applies. Some findings do appear afterwards that were not reported before: they
+are *unmasked*, not caused — a document that was not well-formed could not be
+schema-checked at all, so clearing its entities lets epubveri see, for the first
+time, defects that were always there. Each traces to a file that was fatal before
+the repair.
+
+The known plan-once ceiling is measured: fixes are planned from the original
+report, so a defect that only becomes visible *after* an earlier fix is not
+proposed in the same run. A second pass proposes further fixes across a handful of
+books (though it changes no book's overall verdict).
+
 ## [0.2.1] - 2026-07-13
 
 ### Fixed

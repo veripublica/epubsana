@@ -1,6 +1,6 @@
 [package]
 name = "epubsana"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Repairs the EPUB defects epubveri detects — a pure-Rust, confirm-each-step EPUB fixer."

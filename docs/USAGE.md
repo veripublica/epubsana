@@ -292,6 +292,9 @@ safe, and when epubsana declines, see the **[fix catalogue](./FIXERS.md)**.
 | `RSC-005` | `ncx.ids.invalid_ncname` | ConfirmNeeded | Makes an invalid NCX `id` a valid XML NCName (e.g. a digit-leading UUID `51100e1e-…` → `id_51100e1e-…`, or a brace-wrapped GUID `{0F57…}` → `id_0F57…`), keeping it unique. Only rewrites an `id` whose attribute is unambiguous. |
 | `RSC-005` | `opf.content_document.invalid_content_type_meta` | ConfirmNeeded | Normalizes a content document's encoding declaration to the EPUB 3.3 / HTML5 form: collapses every legacy `<meta http-equiv="Content-Type">` (and any duplicate) into a single `<meta charset="utf-8"/>`. Declines if the document declares a non-UTF-8 charset. |
 | `NCX-001` | *(none)* | ConfirmNeeded | Sets the NCX `dtb:uid` to the package's unique identifier (the `dc:identifier` the OPF `unique-identifier` points at), so the two agree. |
+| `RSC-005` | `opf.content_document.empty_title` | ConfirmNeeded | Fills an empty `<title></title>` with text **from the book itself**: the label its table of contents gives that document, or failing that the document's own first heading. Declines when the book names the document nowhere — it never invents a title, and never falls back to the book's own `dc:title`. |
+| `RSC-020` | `opf.manifest_item.unencoded_space_in_href` | AutoSafe | Percent-encodes a raw space in a manifest `href` (`ch 1.xhtml` → `ch%201.xhtml`). The file keeps its name; only the URL is spelled legally. |
+| `OPF-014` | `opf.content_document.property_used_undeclared` | AutoSafe | Adds the property a content document demonstrably uses (`scripted`, `svg`, `remote-resources`, `switch`) to its manifest item's `properties`. The document itself is not touched — the manifest is made to tell the truth about it. |
 
 Findings not in this table — missing resources, dangling links, arbitrary schema
 violations, and anything requiring content epubsana would have to invent — are

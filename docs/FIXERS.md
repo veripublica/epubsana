@@ -27,6 +27,9 @@ grows one carefully-argued entry at a time.
 | `RSC-005` | `ncx.ids.invalid_ncname` | ConfirmNeeded | An NCX `id` isn't a valid XML NCName | [Sanitize it to a valid, unique NCName](#rsc-005--invalid-ncx-id-ncname) |
 | `RSC-005` | `opf.content_document.invalid_content_type_meta` | ConfirmNeeded | A legacy `<meta http-equiv="Content-Type">` has the wrong value | [Normalize to a single HTML5 `<meta charset="utf-8">`](#rsc-005--content-type-encoding-declaration) |
 | `NCX-001` | *(none)* | ConfirmNeeded | The NCX `dtb:uid` disagrees with the package identifier | [Set `dtb:uid` to the package's unique identifier](#ncx-001--ncx-dtbuid-mismatch) |
+| `RSC-005` | `opf.content_document.empty_title` | ConfirmNeeded | An XHTML `<title>` element is empty | [Fill it from the book's own TOC label, else its first heading](#rsc-005--empty-title) |
+| `RSC-020` | `opf.manifest_item.unencoded_space_in_href` | AutoSafe | A manifest `href` contains a raw space | [Percent-encode the space as `%20`](#rsc-020--unencoded-space-in-a-manifest-href) |
+| `OPF-014` | `opf.content_document.property_used_undeclared` | AutoSafe | A content document uses a feature its manifest item doesn't declare | [Add the token to that item's `properties`](#opf-014--undeclared-content-property) |
 
 **A note on structural fixers.** Fixers that must locate an element (rather than
 match a token) parse the document with `roxmltree` using `allow_dtd: true`, the
@@ -150,3 +153,81 @@ nothing else is affected.
 **When it declines.** If the package identifier can't be resolved (a broken or
 missing OPF `unique-identifier` / `dc:identifier`), or the NCX won't parse, the
 fixer leaves it untouched rather than invent a value.
+
+---
+
+## RSC-005 — empty `<title>`
+
+**Finding.** `opf.content_document.empty_title`. An XHTML content document has a
+`<title></title>` with no text. HTML requires a non-empty title, and this is the
+**most widespread defect in the real-world corpus** — whole libraries ship
+generated documents whose title element is empty.
+
+**Fix** (`fix.empty_title`, ConfirmNeeded). Fill the title with text **taken from
+the book itself**, in this order:
+
+1. the **label the book's own table of contents gives this document** — its NCX
+   `navLabel/text`, or the EPUB 3 nav document's `<a>` text, for the entry whose
+   target resolves to this document (the fragment is ignored: an entry pointing
+   *into* a document still names it);
+2. failing that, the **document's own first heading** (`h1`–`h6`), whitespace
+   collapsed to one line.
+
+The text is XML-escaped and only the empty `<title>` element is rewritten.
+
+**Why it's safe.** The title is never *invented*: both sources are the book's own
+words for that document, authored by whoever made the book. The title element is
+document metadata — it is not part of the rendered text — so filling it changes
+nothing a reader sees in the content, and it clears a genuine content-model
+violation. It is `ConfirmNeeded` rather than `AutoSafe` precisely because it adds
+visible metadata: the user sees the exact text before approving it.
+
+**When it declines.** When the book names the document **nowhere** — no TOC entry
+and no heading (measured: ~7% of the corpus's empty titles, typically image-only
+cover and divider pages) — the fixer leaves it alone and the finding stays
+reported. epubsana deliberately does **not** fall back to the book's `dc:title`:
+stamping the book's name onto every chapter is a guess about intent, not a
+repair. It also declines a document that won't parse, or whose title turns out
+not to be empty after all (a stale finding never overwrites real text).
+
+---
+
+## RSC-020 — unencoded space in a manifest `href`
+
+**Finding.** `opf.manifest_item.unencoded_space_in_href`. A manifest `<item>`'s
+`href` contains a raw space; epubveri reports the offending href in `params[0]`.
+
+**Fix** (`fix.manifest_href_spaces`, AutoSafe). In that one manifest item,
+percent-encode each space in the `href` as `%20`. The quote style and every other
+attribute of the element are preserved.
+
+**Why it's safe.** An `href` is a URL, and a space is not a legal URL character —
+`%20` is its one correct spelling. The **file is not renamed**: a space in a ZIP
+entry name is perfectly valid, and `%20` resolves back to exactly the same entry,
+so every reference still points where it did. Only the spaces epubveri flagged
+are encoded; nothing else in the href is touched.
+
+**When it declines.** If the OPF won't parse, or no manifest item carries the
+reported href verbatim, no edit is made.
+
+---
+
+## OPF-014 — undeclared content property
+
+**Finding.** `opf.content_document.property_used_undeclared`. A content document
+uses a feature — `scripted`, `svg`, `remote-resources`, or `switch` — that its
+manifest `<item>` does not declare. epubveri names the property in `params[0]`.
+
+**Fix** (`fix.content_properties`, AutoSafe). Add the token to the `properties`
+attribute of the manifest item whose `href` resolves to that document (existing
+tokens are kept; the attribute is created if absent). The item's href is resolved
+the way a reading system resolves it — relative to the OPF's directory,
+percent-decoded, with `.`/`..` normalized.
+
+**Why it's safe.** epubveri has already *proven* the usage by finding it in the
+document, so the declaration is not a guess — it is the manifest being made to
+tell the truth about a document that is not itself modified. EPUB 3.3 requires
+exactly this declaration.
+
+**When it declines.** If the OPF won't parse, no manifest item resolves to the
+document, or the property is already declared, nothing is changed.

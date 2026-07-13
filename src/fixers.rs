@@ -2,8 +2,9 @@
 //!
 //! Each fixer keys off an epubveri message `rule` (or an unambiguous `id`) and
 //! builds a proposal, or declines (returns nothing) when it can't fix a finding
-//! safely. v1 ships one fixer — HTML-entity mapping (`RSC-016`), the highest-ROI
-//! defect from the feasibility spike — and the registry grows from there.
+//! safely. The registry grows one carefully-argued entry at a time, in the order
+//! real books ask for: what a fixer changes, why that is content-preserving, and
+//! when it declines is specified in `docs/FIXERS.md` before it is coded.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ops::Range;
@@ -19,6 +20,9 @@ pub fn plan(report: &Report, ws: &Workspace, _goal: Goal) -> Vec<ProposedFix> {
     fixes.extend(ncx_ncnames(report, ws));
     fixes.extend(content_type_meta(report, ws));
     fixes.extend(ncx_dtb_uid(report, ws));
+    fixes.extend(manifest_href_spaces(report, ws));
+    fixes.extend(content_properties(report, ws));
+    fixes.extend(empty_titles(report, ws));
     // Future fixers append here, in a sensible confirm order.
     fixes
 }
@@ -683,6 +687,554 @@ fn set_content_attr(element: &str, value: &str) -> Option<String> {
     ))
 }
 
+/// `RSC-020` / `opf.manifest_item.unencoded_space_in_href`: a manifest `item`
+/// whose `href` contains a raw space. An `href` is a URL, and a space is not a
+/// legal URL character — it must be percent-encoded. The **file keeps its name**
+/// (spaces in ZIP entry names are fine); only the reference is spelled
+/// correctly, and `%20` resolves back to exactly the same entry. Nothing else in
+/// the href is touched — we encode the reported defect, not everything that
+/// *could* be encoded. `AutoSafe`.
+fn manifest_href_spaces(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    // opf path -> the hrefs epubveri flagged in it (params[0]), deduplicated.
+    let mut by_opf: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for m in &report.messages {
+        if m.rule != Some("opf.manifest_item.unencoded_space_in_href") {
+            continue;
+        }
+        let (Some(opf), Some(href)) = (m.location.as_deref(), m.params.first()) else {
+            continue;
+        };
+        by_opf
+            .entry(opf.to_string())
+            .or_default()
+            .insert(href.clone());
+    }
+
+    let mut fixes = Vec::new();
+    for (opf, hrefs) in by_opf {
+        let Some(text) = ws.get_text(&opf) else {
+            continue;
+        };
+        let edits = plan_href_encoding(&text, &hrefs);
+        if edits.is_empty() {
+            continue; // nothing we could locate — decline rather than guess
+        }
+
+        let preview: Vec<Change> = hrefs
+            .iter()
+            .filter(|h| h.contains(' '))
+            .map(|h| Change {
+                path: opf.clone(),
+                note: format!("encode href \"{h}\" → \"{}\"", h.replace(' ', "%20")),
+            })
+            .collect();
+        let n = edits.len();
+        let opf_for_apply = opf.clone();
+        let hrefs_for_apply = hrefs.clone();
+
+        fixes.push(ProposedFix {
+            fix_id: "fix.manifest_href_spaces",
+            addresses_id: "RSC-020".to_string(),
+            addresses_rule: Some("opf.manifest_item.unencoded_space_in_href"),
+            addresses_severity: addressed_severity(
+                report,
+                "RSC-020",
+                Some("opf.manifest_item.unencoded_space_in_href"),
+            ),
+            tier: Tier::AutoSafe,
+            title: format!(
+                "Percent-encode {n} manifest href{} containing spaces in {opf}",
+                if n == 1 { "" } else { "s" }
+            ),
+            rationale: "A manifest `href` is a URL, and a raw space is not a legal URL character. \
+                 Each flagged space becomes `%20`, which resolves to the very same file — the \
+                 entry's name in the container is not changed. Only the spaces epubveri flagged \
+                 are encoded; nothing else in the href is touched."
+                .to_string(),
+            preview,
+            apply_fn: Box::new(move |ws: &mut Workspace| {
+                if let Some(text) = ws.get_text(&opf_for_apply) {
+                    let edits = plan_href_encoding(&text, &hrefs_for_apply);
+                    ws.set_text(&opf_for_apply, apply_edits(&text, edits));
+                }
+            }),
+        });
+    }
+    fixes
+}
+
+/// One edit per manifest `item` whose `href` is exactly one of `hrefs`: the same
+/// element with its href's spaces percent-encoded. Items we can't locate are
+/// skipped (no edit), never guessed at.
+fn plan_href_encoding(opf: &str, hrefs: &BTreeSet<String>) -> Vec<MetaEdit> {
+    let Some(doc) = parse_xml(opf) else {
+        return Vec::new();
+    };
+    let mut edits = Vec::new();
+    for n in doc
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "item")
+    {
+        let Some(href) = n.attr_no_ns("href") else {
+            continue;
+        };
+        if !hrefs.contains(href) || !href.contains(' ') {
+            continue;
+        }
+        let range = n.range();
+        if let Some(replacement) =
+            set_attr_value(&opf[range.clone()], "href", &href.replace(' ', "%20"))
+        {
+            edits.push(MetaEdit { range, replacement });
+        }
+    }
+    edits
+}
+
+/// `OPF-014` / `opf.content_document.property_used_undeclared`: a content
+/// document uses a feature (`scripted`, `svg`, `remote-resources`, `switch`)
+/// that its manifest `item` does not declare. epubveri has already *proven* the
+/// usage — it reports the property name in `params[0]` — so the fix is to make
+/// the manifest say what the document demonstrably does: add the token to that
+/// item's `properties`. It adds a declaration; it never touches the content.
+/// Declines when the manifest item can't be located. `AutoSafe`.
+fn content_properties(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    // content-document path -> the property tokens it uses but doesn't declare.
+    let mut by_doc: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for m in &report.messages {
+        if m.rule != Some("opf.content_document.property_used_undeclared") {
+            continue;
+        }
+        let (Some(doc), Some(prop)) = (m.location.as_deref(), m.params.first()) else {
+            continue;
+        };
+        by_doc
+            .entry(doc.to_string())
+            .or_default()
+            .insert(prop.clone());
+    }
+    if by_doc.is_empty() {
+        return Vec::new();
+    }
+
+    let Some(opf_path) = opf_path(ws) else {
+        return Vec::new();
+    };
+
+    let mut fixes = Vec::new();
+    for (doc, props) in by_doc {
+        let Some((_, before, after)) = compute_properties_edit(ws, &opf_path, &doc, &props) else {
+            continue;
+        };
+
+        let preview = vec![Change {
+            path: opf_path.clone(),
+            note: match &before {
+                Some(b) => format!("manifest item for {doc}: properties \"{b}\" → \"{after}\""),
+                None => format!("manifest item for {doc}: add properties=\"{after}\""),
+            },
+        }];
+        let opf_for_apply = opf_path.clone();
+        let doc_for_apply = doc.clone();
+        let props_for_apply = props.clone();
+        let listed = props.iter().cloned().collect::<Vec<_>>().join(", ");
+
+        fixes.push(ProposedFix {
+            fix_id: "fix.content_properties",
+            addresses_id: "OPF-014".to_string(),
+            addresses_rule: Some("opf.content_document.property_used_undeclared"),
+            addresses_severity: addressed_severity(
+                report,
+                "OPF-014",
+                Some("opf.content_document.property_used_undeclared"),
+            ),
+            tier: Tier::AutoSafe,
+            title: format!("Declare the \"{listed}\" property in the manifest item for {doc}"),
+            rationale:
+                "EPUB 3.3 requires a manifest item to declare the features its content document \
+                 uses. epubveri found the usage in the document itself, so the declaration is not \
+                 a guess: the token is added to that item's `properties` (existing tokens are \
+                 kept). The content document is not touched — only the manifest is made to tell \
+                 the truth about it."
+                    .to_string(),
+            preview,
+            apply_fn: Box::new(move |ws: &mut Workspace| {
+                if let Some((edit, _, _)) =
+                    compute_properties_edit(ws, &opf_for_apply, &doc_for_apply, &props_for_apply)
+                    && let Some(text) = ws.get_text(&opf_for_apply)
+                {
+                    ws.set_text(&opf_for_apply, apply_edits(&text, vec![edit]));
+                }
+            }),
+        });
+    }
+    fixes
+}
+
+/// The edit that adds `props` to the `properties` of the manifest item for
+/// `doc`, plus the old value (if any) and the new one. `None` (decline) when the
+/// OPF won't parse, no item resolves to `doc`, or every token is already there.
+fn compute_properties_edit(
+    ws: &Workspace,
+    opf_path: &str,
+    doc: &str,
+    props: &BTreeSet<String>,
+) -> Option<(MetaEdit, Option<String>, String)> {
+    let opf = ws.get_text(opf_path)?;
+    let parsed = parse_xml(&opf)?;
+    let base = dir_of(opf_path);
+
+    let item = parsed
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "item")
+        .find(|n| {
+            n.attr_no_ns("href")
+                .map(|h| resolve_href(&base, h))
+                .as_deref()
+                == Some(doc)
+        })?;
+
+    let existing = item.attr_no_ns("properties").map(str::to_string);
+    let mut tokens: Vec<String> = existing
+        .as_deref()
+        .unwrap_or("")
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
+    let mut added = false;
+    for p in props {
+        if !tokens.iter().any(|t| t == p) {
+            tokens.push(p.clone());
+            added = true;
+        }
+    }
+    if !added {
+        return None; // already declared — nothing to do
+    }
+
+    let new_value = tokens.join(" ");
+    let range = item.range();
+    let replacement = match existing {
+        Some(_) => set_attr_value(&opf[range.clone()], "properties", &new_value)?,
+        None => insert_attr(&opf[range.clone()], "properties", &new_value)?,
+    };
+    Some((
+        MetaEdit { range, replacement },
+        item.attr_no_ns("properties").map(str::to_string),
+        new_value,
+    ))
+}
+
+/// `RSC-005` / `opf.content_document.empty_title`: an XHTML `<title>` element
+/// with no text. HTML requires a non-empty title, and it is the **most common
+/// defect in the corpus** — whole libraries ship generated documents whose title
+/// is `<title></title>`.
+///
+/// The text is never invented: it comes from the book itself, in this order —
+/// the **TOC label** the book already gives this document (its NCX `navLabel`
+/// or nav `<a>` text), else the document's **own first heading**. When neither
+/// exists, the fixer **declines** and the finding stays reported. We do not fall
+/// back to the book's `dc:title`: stamping the book's name onto every chapter is
+/// a guess about intent, not a repair. `ConfirmNeeded` — it adds visible
+/// metadata, so the user sees the text before it goes in.
+fn empty_titles(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    let mut docs: BTreeSet<String> = BTreeSet::new();
+    for m in &report.messages {
+        if m.rule == Some("opf.content_document.empty_title")
+            && let Some(loc) = m.location.as_deref()
+        {
+            docs.insert(loc.to_string());
+        }
+    }
+    if docs.is_empty() {
+        return Vec::new();
+    }
+
+    let labels = toc_labels(ws);
+
+    let mut fixes = Vec::new();
+    for doc in docs {
+        let Some(text) = ws.get_text(&doc) else {
+            continue;
+        };
+        // The book's own name for this document first; its own first heading
+        // second; otherwise decline.
+        let (title, source) = match labels.get(&doc) {
+            Some(label) => (label.clone(), "the book's table of contents"),
+            None => match first_heading_text(&text) {
+                Some(h) => (h, "the document's first heading"),
+                None => continue, // nothing in the book names it — never invent
+            },
+        };
+        if plan_title_fill(&text, &title).is_none() {
+            continue; // no empty <title> found (or it won't parse) — decline
+        }
+
+        let preview = vec![Change {
+            path: doc.clone(),
+            note: format!("set <title> to \"{title}\" (from {source})"),
+        }];
+        let doc_for_apply = doc.clone();
+        let title_for_apply = title.clone();
+
+        fixes.push(ProposedFix {
+            fix_id: "fix.empty_title",
+            addresses_id: "RSC-005".to_string(),
+            addresses_rule: Some("opf.content_document.empty_title"),
+            addresses_severity: addressed_severity(
+                report,
+                "RSC-005",
+                Some("opf.content_document.empty_title"),
+            ),
+            tier: Tier::ConfirmNeeded,
+            title: format!("Fill the empty <title> in {doc} with \"{title}\""),
+            rationale: "An XHTML `<title>` must not be empty. The text is taken from the book \
+                 itself — the label its table of contents already gives this document, or, \
+                 failing that, the document's own first heading — so nothing is invented. When \
+                 the book names the document nowhere, the fix is declined and the finding stays \
+                 reported."
+                .to_string(),
+            preview,
+            apply_fn: Box::new(move |ws: &mut Workspace| {
+                if let Some(text) = ws.get_text(&doc_for_apply)
+                    && let Some(edit) = plan_title_fill(&text, &title_for_apply)
+                {
+                    ws.set_text(&doc_for_apply, apply_edits(&text, vec![edit]));
+                }
+            }),
+        });
+    }
+    fixes
+}
+
+/// The edit that replaces an empty `<title>` element with one carrying `title`.
+/// `None` when the document won't parse or its title isn't actually empty (the
+/// caller's finding is stale — decline rather than overwrite real text).
+fn plan_title_fill(text: &str, title: &str) -> Option<MetaEdit> {
+    let doc = parse_xml(text)?;
+    let node = doc
+        .descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "title")?;
+    let has_text = node
+        .descendants()
+        .filter(|n| n.is_text())
+        .filter_map(|n| n.text())
+        .any(|t| !t.trim().is_empty());
+    if has_text {
+        return None; // not empty — never overwrite existing content
+    }
+    Some(MetaEdit {
+        range: node.range(),
+        replacement: format!("<title>{}</title>", escape_xml_text(title)),
+    })
+}
+
+/// The label the book's own table of contents gives each content document:
+/// container path → label. Read from the NCX (`navPoint` → `navLabel/text`) and
+/// from an EPUB 3 nav document (`<a href>` text). A document listed twice keeps
+/// the **first** label, and only non-empty labels are kept.
+pub fn toc_labels(ws: &Workspace) -> BTreeMap<String, String> {
+    let mut labels: BTreeMap<String, String> = BTreeMap::new();
+
+    let toc_files: Vec<String> = ws
+        .names()
+        .filter(|n| n.ends_with(".ncx") || n.ends_with(".xhtml") || n.ends_with(".html"))
+        .cloned()
+        .collect();
+
+    for toc in toc_files {
+        let Some(text) = ws.get_text(&toc) else {
+            continue;
+        };
+        let Some(doc) = parse_xml(&text) else {
+            continue;
+        };
+        let base = dir_of(&toc);
+
+        // NCX: <navPoint><navLabel><text>Label</text></navLabel><content src="…"/>
+        for np in doc
+            .descendants()
+            .filter(|n| n.is_element() && n.tag_name().name() == "navPoint")
+        {
+            let src = np
+                .descendants()
+                .find(|n| n.is_element() && n.tag_name().name() == "content")
+                .and_then(|n| n.attr_no_ns("src"));
+            let label = np
+                .descendants()
+                .find(|n| n.is_element() && n.tag_name().name() == "text")
+                .and_then(|n| n.text());
+            if let (Some(src), Some(label)) = (src, label) {
+                insert_label(&mut labels, &base, src, label);
+            }
+        }
+
+        // EPUB 3 nav document: <nav …><ol><li><a href="…">Label</a>
+        for a in doc
+            .descendants()
+            .filter(|n| n.is_element() && n.tag_name().name() == "a")
+        {
+            let Some(href) = a.attr_no_ns("href") else {
+                continue;
+            };
+            let label: String = a
+                .descendants()
+                .filter(|n| n.is_text())
+                .filter_map(|n| n.text())
+                .collect();
+            insert_label(&mut labels, &base, href, &label);
+        }
+    }
+    labels
+}
+
+/// Record `label` for the container path `href` resolves to, keeping the first
+/// label seen and ignoring empty ones. The fragment is dropped: a TOC entry that
+/// points *into* a document still names that document.
+fn insert_label(labels: &mut BTreeMap<String, String>, base: &str, href: &str, label: &str) {
+    let label = collapse_ws(label);
+    if label.is_empty() {
+        return;
+    }
+    let path = resolve_href(base, href);
+    labels.entry(path).or_insert(label);
+}
+
+/// The label the book gives one document, if any (the audit's entry point).
+pub fn toc_label_for(ws: &Workspace, doc: &str) -> Option<String> {
+    toc_labels(ws).get(doc).cloned()
+}
+
+/// The text of a document's first heading (`h1`–`h6`), collapsed to one line.
+/// `None` when it won't parse, has no heading, or the heading is empty (a purely
+/// decorative one, e.g. a heading holding only an image).
+pub fn first_heading_text(text: &str) -> Option<String> {
+    let doc = parse_xml(text)?;
+    let h = doc.descendants().find(|n| {
+        n.is_element() && matches!(n.tag_name().name(), "h1" | "h2" | "h3" | "h4" | "h5" | "h6")
+    })?;
+    let s: String = h
+        .descendants()
+        .filter(|n| n.is_text())
+        .filter_map(|n| n.text())
+        .collect();
+    let s = collapse_ws(&s);
+    (!s.is_empty()).then_some(s)
+}
+
+/// Trim and collapse every run of whitespace to a single space — a title is one
+/// line, and generated markup indents its headings across several.
+fn collapse_ws(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The container path of the OPF (via `container.xml`).
+fn opf_path(ws: &Workspace) -> Option<String> {
+    opf_path_from_container(&ws.get_text("META-INF/container.xml")?)
+}
+
+/// The directory part of a container path, `""` for a top-level entry.
+fn dir_of(path: &str) -> String {
+    match path.rfind('/') {
+        Some(i) => path[..=i].to_string(),
+        None => String::new(),
+    }
+}
+
+/// Resolve a document-relative `href` against `base` (a directory ending in `/`)
+/// into a container path: drop any fragment/query, percent-decode, and normalize
+/// `.`/`..` segments — the same resolution a reading system does.
+fn resolve_href(base: &str, href: &str) -> String {
+    let href = href.split(['#', '?']).next().unwrap_or("");
+    let joined = format!("{base}{}", percent_decode(href));
+    let mut out: Vec<&str> = Vec::new();
+    for seg in joined.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                out.pop();
+            }
+            s => out.push(s),
+        }
+    }
+    out.join("/")
+}
+
+/// Decode `%XX` escapes (a manifest href may legitimately spell a space `%20`).
+/// Invalid escapes are left as written — we decode what we understand and never
+/// mangle the rest.
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%'
+            && i + 2 < b.len()
+            && let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16)
+        {
+            out.push(v);
+            i += 3;
+            continue;
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Rewrite an existing quoted attribute's value inside one element's source,
+/// preserving quote style and every other attribute. `None` if the attribute
+/// isn't there in quoted form.
+fn set_attr_value(element: &str, name: &str, value: &str) -> Option<String> {
+    let lower = element.to_ascii_lowercase();
+    let needle = format!("{name}=");
+    let mut from = 0;
+    let after = loop {
+        let i = lower[from..].find(&needle)? + from;
+        if is_attr_boundary(element, i) {
+            break i + needle.len();
+        }
+        from = i + needle.len();
+    };
+    let quote = element[after..].chars().next()?;
+    if quote != '"' && quote != '\'' {
+        return None;
+    }
+    let vstart = after + quote.len_utf8();
+    let vend = vstart + element[vstart..].find(quote)?;
+    Some(format!(
+        "{}{}{}",
+        &element[..vstart],
+        escape_xml_attr(value),
+        &element[vend..]
+    ))
+}
+
+/// Insert a new attribute into an element's start tag, just before its closing
+/// `/>` or `>`. `None` if the element's source has no closing bracket (it always
+/// does — this keeps `apply` defensive).
+fn insert_attr(element: &str, name: &str, value: &str) -> Option<String> {
+    let end = element.find("/>").or_else(|| element.find('>'))?;
+    let head = element[..end].trim_end();
+    Some(format!(
+        "{head} {name}=\"{}\"{}",
+        escape_xml_attr(value),
+        &element[end..]
+    ))
+}
+
+/// XML-escape text content: only the three characters that can end it.
+fn escape_xml_text(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// XML-escape a double-quoted attribute value.
+fn escape_xml_attr(s: &str) -> String {
+    escape_xml_text(s).replace('"', "&quot;")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -744,6 +1296,82 @@ mod tests {
         let text = "<navPoint id='5abc'>";
         let out = replace_id_attr(text, "5abc", "id_5abc").unwrap();
         assert_eq!(out, "<navPoint id='id_5abc'>");
+    }
+
+    #[test]
+    fn set_attr_value_rewrites_only_that_attribute() {
+        let item = r#"<item id="c1" href="Text/ch 1.xhtml" media-type="application/xhtml+xml"/>"#;
+        let out = set_attr_value(item, "href", "Text/ch%201.xhtml").unwrap();
+        assert_eq!(
+            out,
+            r#"<item id="c1" href="Text/ch%201.xhtml" media-type="application/xhtml+xml"/>"#
+        );
+    }
+
+    #[test]
+    fn set_attr_value_ignores_a_name_that_only_ends_with_the_attribute() {
+        // `xlink:href=` must not be mistaken for `href=`.
+        let el = r#"<item xlink:href="a b.xhtml" href="c d.xhtml"/>"#;
+        let out = set_attr_value(el, "href", "c%20d.xhtml").unwrap();
+        assert_eq!(out, r#"<item xlink:href="a b.xhtml" href="c%20d.xhtml"/>"#);
+    }
+
+    #[test]
+    fn insert_attr_adds_before_the_closing_bracket() {
+        let item = r#"<item id="c1" href="c1.xhtml"/>"#;
+        assert_eq!(
+            insert_attr(item, "properties", "scripted").unwrap(),
+            r#"<item id="c1" href="c1.xhtml" properties="scripted"/>"#
+        );
+    }
+
+    #[test]
+    fn resolve_href_normalizes_relative_paths_and_drops_the_fragment() {
+        assert_eq!(
+            resolve_href("OEBPS/Text/", "../Styles/../Text/ch1.xhtml#p3"),
+            "OEBPS/Text/ch1.xhtml"
+        );
+        assert_eq!(
+            resolve_href("OEBPS/", "Text/ch%201.xhtml"),
+            "OEBPS/Text/ch 1.xhtml"
+        );
+        assert_eq!(resolve_href("", "toc.ncx"), "toc.ncx");
+    }
+
+    #[test]
+    fn percent_decode_leaves_an_invalid_escape_alone() {
+        assert_eq!(percent_decode("a%20b"), "a b");
+        assert_eq!(percent_decode("100%zz"), "100%zz");
+    }
+
+    #[test]
+    fn title_fill_replaces_an_empty_title_and_escapes_the_text() {
+        let doc = "<html><head><title></title></head><body/></html>";
+        let edit = plan_title_fill(doc, "Tom & Jerry <1>").unwrap();
+        assert_eq!(
+            apply_edits(doc, vec![edit]),
+            "<html><head><title>Tom &amp; Jerry &lt;1&gt;</title></head><body/></html>"
+        );
+    }
+
+    #[test]
+    fn title_fill_declines_when_the_title_already_has_text() {
+        // Never overwrite real content, even if a stale finding says otherwise.
+        let doc = "<html><head><title>Chapter 1</title></head><body/></html>";
+        assert!(plan_title_fill(doc, "Something Else").is_none());
+    }
+
+    #[test]
+    fn first_heading_is_collapsed_to_one_line() {
+        let doc = "<html><body><h2>\n  Bölüm\n  Bir\n</h2></body></html>";
+        assert_eq!(first_heading_text(doc).as_deref(), Some("Bölüm Bir"));
+    }
+
+    #[test]
+    fn first_heading_declines_on_a_decorative_heading() {
+        // A heading holding only an image names nothing — decline, don't invent.
+        let doc = r#"<html><body><h1><img src="t.jpg"/></h1></body></html>"#;
+        assert_eq!(first_heading_text(doc), None);
     }
 
     fn normalize(text: &str) -> Option<String> {

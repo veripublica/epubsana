@@ -17,3 +17,9 @@
 # wasm-pack output
 /epubsana-wasm/pkg/
 /examples/roundtrip_diag.rs
+/examples/rule_census.rs
+/examples/title_sources.rs
+/examples/regression_audit.rs
+/examples/regress_diag.rs
+/examples/one_file_diag.rs
+/examples/second_pass.rs
