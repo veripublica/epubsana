@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ops::Range;
 
-use epubveri::report::Report;
+use epubveri::report::{Report, Severity};
 
 use crate::{entities, Change, Goal, ProposedFix, Tier, Workspace};
 
@@ -21,6 +21,20 @@ pub fn plan(report: &Report, ws: &Workspace, _goal: Goal) -> Vec<ProposedFix> {
     fixes.extend(ncx_dtb_uid(report, ws));
     // Future fixers append here, in a sensible confirm order.
     fixes
+}
+
+/// The severity epubveri gave the finding a fixer addresses — a fix inherits it
+/// verbatim (FORMATS.md §1.3). epubveri pushes a given `rule` at one severity,
+/// so the first matching message speaks for the whole group; the fallback never
+/// fires in practice (a fixer is only built from findings that are present) and
+/// is deliberately the invalidating value, never a flattering one.
+fn addressed_severity(report: &Report, id: &str, rule: Option<&str>) -> Severity {
+    report
+        .messages
+        .iter()
+        .find(|m| m.id == id && m.rule == rule)
+        .map(|m| m.severity)
+        .unwrap_or(Severity::Error)
 }
 
 /// `RSC-016` / `htm.entity.undeclared`: XHTML referencing HTML named entities
@@ -81,7 +95,12 @@ fn html_entities(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
         fixes.push(ProposedFix {
             fix_id: "fix.html_entities",
             addresses_id: "RSC-016".to_string(),
-            addresses_rule: Some("htm.entity.undeclared".to_string()),
+            addresses_rule: Some("htm.entity.undeclared"),
+            addresses_severity: addressed_severity(
+                report,
+                "RSC-016",
+                Some("htm.entity.undeclared"),
+            ),
             tier: Tier::AutoSafe,
             title: format!(
                 "Map {distinct} undeclared HTML entit{} ({total}×) to characters in {file} ({summary})",
@@ -170,7 +189,12 @@ fn ncx_ncnames(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
         fixes.push(ProposedFix {
             fix_id: "fix.ncx_ncnames",
             addresses_id: "RSC-005".to_string(),
-            addresses_rule: Some("ncx.ids.invalid_ncname".to_string()),
+            addresses_rule: Some("ncx.ids.invalid_ncname"),
+            addresses_severity: addressed_severity(
+                report,
+                "RSC-005",
+                Some("ncx.ids.invalid_ncname"),
+            ),
             tier: Tier::ConfirmNeeded,
             title: format!(
                 "Make {n} invalid NCX id{} a valid XML NCName in {file}",
@@ -354,7 +378,12 @@ fn content_type_meta(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
         fixes.push(ProposedFix {
             fix_id: "fix.content_type_meta",
             addresses_id: "RSC-005".to_string(),
-            addresses_rule: Some("opf.content_document.invalid_content_type_meta".to_string()),
+            addresses_rule: Some("opf.content_document.invalid_content_type_meta"),
+            addresses_severity: addressed_severity(
+                report,
+                "RSC-005",
+                Some("opf.content_document.invalid_content_type_meta"),
+            ),
             tier: Tier::ConfirmNeeded,
             title: format!(
                 "Normalize the encoding declaration in {file} to HTML5 <meta charset=\"utf-8\">"
@@ -518,6 +547,7 @@ fn ncx_dtb_uid(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
             fix_id: "fix.ncx_dtb_uid",
             addresses_id: "NCX-001".to_string(),
             addresses_rule: None,
+            addresses_severity: addressed_severity(report, "NCX-001", None),
             tier: Tier::ConfirmNeeded,
             title: format!("Sync the NCX dtb:uid to the package identifier in {file}"),
             rationale: "The NCX `dtb:uid` must equal the package's unique identifier — the \

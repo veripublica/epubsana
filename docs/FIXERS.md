@@ -39,10 +39,15 @@ still won't parse, the fixer declines.
 
 ## RSC-016 — undeclared HTML entities
 
-**Finding.** `htm.entity.undeclared`. An XHTML document references an HTML named
-entity — `&nbsp;`, `&mdash;`, `&eacute;`, … — without a DTD that declares it.
-epubveri reports the entity's name (in `params[0]`) and the file. Grouped per
-file (a single book can have thousands).
+**Finding.** `htm.entity.undeclared`, at **fatal** severity. An XHTML document
+references an HTML named entity — `&nbsp;`, `&mdash;`, `&eacute;`, … — without a
+DTD that declares it. epubveri reports the entity's name (in `params[0]`) and the
+file. Grouped per file (a single book can have thousands).
+
+It is fatal, not merely an error, because an undeclared entity makes the document
+**not well-formed XML**: a reading system does not render it at all. This is the
+single most common reason a real book fails to open — and it is why clearing it
+is exactly what `--goal openable` is for.
 
 **Fix** (`fix.html_entities`, AutoSafe). For each recognized entity, replace
 every `&name;` occurrence in the file with the exact Unicode character that
@@ -52,7 +57,7 @@ table). Example: `&nbsp;` → U+00A0, `&mdash;` → `—`.
 **Why it's safe.** These are standard HTML named entities; substituting the
 character they denote changes only the *encoding* of that character, not the
 rendered content. The result no longer relies on an undeclared entity, so the
-error clears.
+document becomes well-formed and the finding clears.
 
 **When it declines.** Any entity **not** in the curated table is left untouched
 (and stays reported). The table is deliberately conservative — an unknown or

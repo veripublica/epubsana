@@ -48,11 +48,23 @@ epubsana -i book.epub
 
 # Apply every proposed fix without prompting:
 epubsana -i book.epub --yes -o repaired.epub
+
+# Machine-readable report (the shared veripublica envelope):
+epubsana -i book.epub --format json --dry-run
 ```
 
-The CLI conforms to the [veripublica conventions](https://github.com/veripublica/conventions)
-(`-i`/`-o`, `<name>_fixed.epub` output, exit `0`/`1`/`2`), so it behaves like the
-other veripublica tools. Full guide: **[docs/USAGE.md](docs/USAGE.md)**.
+The CLI conforms to the [veripublica conventions
+v0.4](https://github.com/veripublica/conventions) (`-i`/`-o`/`-f`,
+`<input-stem>_fixed.epub` output, `--format json`, exit `0`/`1`/`2`), so it
+behaves like the other veripublica tools. Full guide:
+**[docs/USAGE.md](docs/USAGE.md)**.
+
+**Two goals, two questions.** `--goal valid` (the default) asks *"is the book
+valid?"* — exit `0` when no fatal- and no error-severity findings remain, the
+same line epubveri draws. `--goal openable` asks the e-reader's question — *"does
+it open?"* — and exits `0` when no **fatal** findings remain, even if errors do.
+The exit code answers the question the invocation asked, and the goal is always
+printed alongside it.
 
 ## Design
 

@@ -46,6 +46,10 @@ jobs:
           # one level down, so rewrite it to "./pkg/…" for the root copy — a
           # bare "pkg/…" is not a valid ES module specifier.
           sed 's#\.\./pkg/#./pkg/#' epubsana-wasm/demo/index.html > site/index.html
+          # The root copy's stylesheets are relative too ("./tokens.css"), and
+          # they live beside the demo — so the root needs its own copy or it
+          # renders unstyled.
+          cp epubsana-wasm/demo/tokens.css epubsana-wasm/demo/demo.css site/
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3

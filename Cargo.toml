@@ -1,6 +1,6 @@
 [package]
 name = "epubsana"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Repairs the EPUB defects epubveri detects — a pure-Rust, confirm-each-step EPUB fixer."
 license = "AGPL-3.0-only OR LicenseRef-veripublica-Commercial"
@@ -18,11 +18,14 @@ members = ["epubsana-wasm"]
 
 [dependencies]
 # The detector this repairs the output of — consumed from crates.io like any
-# external user (dogfooding). Pinned to 0.4.4, the version whose `rule`/`params`
-# sub-codes + fixes epubsana's fixers dispatch on. For local co-development of
-# epubveri, add an uncommitted override:
+# external user (dogfooding). 0.5 is the conventions-v0.4 line: five-value
+# `Severity` (a fatal is no longer folded into an error), the `rule`/`params`
+# sub-codes epubsana's fixers dispatch on, and — since 0.5.3 — the family's
+# *reference* envelope types, which epubsana's `--format json` builds on rather
+# than re-declaring (one skeleton, one place to change it). For local
+# co-development of epubveri, add an uncommitted override:
 #   [patch.crates-io] epubveri = { path = "../epubveri" }
-epubveri = "0.4.4"
+epubveri = "0.5"
 # Pure-Rust only (no C deps), same philosophy as epubveri: zip's "deflate"
 # feature uses flate2 -> miniz_oxide (Rust); bzip2/zstd (C) stay disabled.
 zip = { version = "2.2", default-features = false, features = ["deflate"] }
@@ -31,6 +34,11 @@ zip = { version = "2.2", default-features = false, features = ["deflate"] }
 # else). Pure-Rust, and already epubveri's own XML parser — no new transitive
 # weight, and byte ranges line up with the positions epubveri reports.
 roxmltree = "0.20"
+# `--format json`: the shared veripublica envelope (FORMATS.md). serde_json is
+# the CLI's only user, but the envelope types are public so the wasm binding and
+# any embedder emit the identical shape.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [profile.release]
 opt-level = 2

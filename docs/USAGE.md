@@ -73,9 +73,11 @@ epubsana -i book.epub
 epubsana -i book.epub --yes -o repaired.epub
 ```
 
-A positional path also works (`epubsana book.epub`). The original file is never
-modified in place; a repaired copy is written to `<name>_fixed.epub` (or your
-`-o`) only if at least one fix was applied.
+`-i` is the only input form — a positional path is a usage error, so a typo can
+never be mistaken for a filename. The original is never modified in place; a
+repaired copy is written to `<name>_fixed.epub` (or your `-o`) only if at least
+one fix was applied, and an existing output file is never silently replaced
+(pass `-f` to allow it).
 
 ---
 
@@ -93,46 +95,52 @@ CLI, a future in-browser WASM page, and library consumers such as epublift):
    exact edits. Findings epubsana can't safely fix are left alone.
 4. **Confirm** — you decide, per fix, whether to apply it. Nothing mutates
    without your approval (subject to the [policy](#cli-reference) you choose).
-5. **Report** — the run ends with a record of every fix applied, every fix
-   skipped, and the error count before vs. after.
+5. **Report** — the run ends with a record of what became of every proposed fix
+   (applied, skipped, or — in a dry run — merely proposed), the fatal and error
+   counts before vs. after, and whether the goal was met.
 
 ---
 
 ## CLI reference
 
-epubsana conforms to the **[veripublica CLI convention v1](https://github.com/veripublica/conventions/blob/main/CLI.md)**,
+epubsana conforms to the **[veripublica CLI convention v0.4](https://github.com/veripublica/conventions/blob/main/CLI.md)**,
 so its flags, output naming, and exit codes match the other veripublica tools.
 
 ```
-epubsana -i <book.epub> [OPTIONS]
-epubsana <book.epub> [OPTIONS]
+epubsana -i <PATH> [OPTIONS]
 ```
 
 | Option | Description |
 | --- | --- |
-| `-i`, `--input <path>` | The EPUB to repair. A positional path also works. |
-| `-o`, `--output <path>` | Where to write the repaired EPUB. Default: `<name>_fixed.epub`, next to the input. Must not be the input. |
-| `--dry-run` | Show the fixes that would be proposed and change nothing. |
-| `--yes` | Apply every proposed fix without prompting. |
-| `--auto-safe` | Auto-apply provably-safe fixes; prompt for the rest. |
-| `--goal <openable\|valid>` | How far to repair. Default: `valid`. |
+| `-i`, `--input <PATH>` | The input. The only input form; positional paths are not accepted. |
+| `-o`, `--output <PATH>` | Where to write the output. Default: `<input-stem>_fixed.epub`, beside the input. Must not be the input. |
+| `-f`, `--force` | Permit replacing existing output files. Never lifts the output-equals-input refusal. |
+| `--format <FORMAT>` | Report format: `human` (the default) or `json` — the shared machine envelope. |
+| `--dry-run` | Report what would happen; change nothing on disk. |
+| `-y`, `--yes` | Assume "yes" for every prompt; run non-interactively. Not permission to overwrite files — that is `-f`. |
+| `--auto-safe` | Apply the provably-safe fixes without asking; still prompt for the rest. |
+| `--goal <valid\|openable>` | How far to repair. Default: `valid`. See [Exit codes](#exit-codes). |
 | `-v`, `--verbose` | Show each fix's rationale (why it's safe). |
-| `-V`, `--version` | Print version and exit. |
-| `-h`, `--help` | Print help and exit. |
+| `-V`, `--version` | Print `epubsana <version>` and exit `0`. |
+| `-h`, `--help` | Print help and exit `0`. |
 
 **Behaviour of the three modes**
 
 - **Default (no flag):** prompt for *every* proposed fix (`[y/N]`).
 - **`--auto-safe`:** apply fixes tiered *AutoSafe* automatically; prompt for
   *ConfirmNeeded* fixes. See [tiers](#the-interactive-workflow).
-- **`--yes`:** approve everything, no prompts. Good for batch/CI use — but read
-  [Safety guarantees](#safety-guarantees) first, and prefer `--dry-run` to
+- **`-y`/`--yes`:** approve everything, no prompts. Good for batch/CI use — but
+  read [Safety guarantees](#safety-guarantees) first, and prefer `--dry-run` to
   preview.
 
-**`--goal`** is accepted today but does not yet change which fixers run
-(`openable` is the "at least it opens in an e-reader" bar; `valid` targets full
-epubcheck validity). The distinction will gate fixer selection as the registry
-grows; for now both propose the same fixes.
+A prompt epubsana cannot ask is a decision it cannot obtain: when stdin is not a
+terminal and fixes would need approval, it **stops** (exit `2`) and names the
+flag that would let it proceed, rather than silently assuming "no" and returning
+an exit code that looks like an ordinary result.
+
+**`--goal`** does not yet change which fixers run (both goals propose the same
+fixes; the distinction will gate fixer selection as the registry grows) — but it
+**does** decide what counts as success, and therefore the exit code. See below.
 
 ---
 
@@ -165,37 +173,109 @@ Every run (except `--dry-run`) ends with a report:
 
 ```
 — repair report —
-APPLIED Make 55 invalid NCX ids a valid XML NCName in toc.ncx
+APPLIED Map 1 undeclared HTML entity (657×) to characters in OEBPS/Text/bolum2.xhtml (nbsp)
+    - replace &nbsp; → ' ' (657×)
+SKIPPED Make 55 invalid NCX ids a valid XML NCName in toc.ncx
     - rename NCX id "51100e1e-…" → "id_51100e1e-…"
-    …
-APPLIED Normalize the encoding declaration in chapter1.xhtml to HTML5 <meta charset="utf-8">
-    - normalize to a single <meta charset="utf-8"/> (1 encoding <meta> rewritten/removed)
-Skipped 0 fix(es).
-errors: 150 → 0
+
+774 fatal(s), 5 error(s) → 0 fatal(s), 4 error(s)
 wrote book_fixed.epub
+goal 'valid': NOT MET
 ```
 
-- **APPLIED** blocks list every fix that was applied and its concrete edits.
-- **Skipped** counts the fixes you declined (or that `--dry-run` left).
-- **errors: N → M** is epubveri's error count before repair vs. after — the
-  book is re-validated at the end, so this is an independent check, not a claim.
+- Each fix line says what became of it: **APPLIED**, **SKIPPED** (you declined),
+  or **WOULD APPLY** (a `--dry-run`). The indented lines are its concrete edits.
+- **N fatal(s), N error(s) → …** is epubveri's own count before repair vs. after
+  — the book is re-validated at the end, so this is an independent check, not a
+  claim.
+- **Fatals are counted apart from errors**, exactly as epubveri reports them. A
+  fatal is a defect that stops the book from being processed at all (an
+  unreadable ZIP, a missing `container.xml`, XHTML that is not well-formed, an
+  unterminated entity reference). A book whose defects are all fatal has *zero
+  errors* and is not remotely valid — so the fatal count is stated first, and
+  always.
 - **wrote …** appears only if at least one fix was applied.
+- **goal '…': MET / NOT MET** is the line the exit code mirrors.
 
 ---
 
 ## Exit codes
 
-Per the [convention](https://github.com/veripublica/conventions/blob/main/CLI.md#6-exit-codes):
+Per the [convention](https://github.com/veripublica/conventions/blob/main/CLI.md#6-exit-codes),
+a transformer's `0` means *the run's goal was met* — and epubsana has two goals:
 
 | Code | Meaning |
 | --- | --- |
-| `0` | The book is valid after repair (or was already). |
-| `1` | Repair ran, but some errors remain (epubsana cleared what it safely could). |
-| `2` | The tool could not run (bad arguments, unreadable/corrupt EPUB, `-o` equal to the input, I/O failure). |
+| `0` | The run's goal was met. With `--goal valid` (the default): no fatal- and no error-severity findings remain — the book is valid. With `--goal openable`: no fatal-severity findings remain — the book opens. |
+| `1` | The goal was not met: fixes were declined, or defects epubsana cannot fix remain. |
+| `2` | epubsana could not run: a usage error, an unreadable EPUB, `-o` equal to the input, an existing output file without `-f`, an unanswerable prompt, or an I/O failure. |
 
-This lets a script branch on the result: `epubsana -i book.epub --yes && echo "fully valid"`.
-The `errors: N → M` line shows the same thing in human form. In `--dry-run`, the
-code reflects the book's *current* state (`0` clean, `1` has errors).
+The default goal is the *verifier's* threshold, so `epubsana -i book.epub -y &&
+echo "valid"` means what `epubveri -i book.epub && echo "valid"` means — the two
+tools agree by construction.
+
+`--goal openable` is the explicitly-requested **lesser** goal the convention
+allows: the e-reader / fix-on-import bar. Under it, **exit `0` can coexist with
+errors in the report** — the book opens, which is what the invocation asked. The
+errors are still reported; they simply do not move the exit code. The goal is
+always printed (and carried in `--format json`'s `summary.goal`), so a `0` is
+never read without the bar it was measured against.
+
+---
+
+## Machine output (`--format json`)
+
+`--format json` emits the shared veripublica envelope
+([FORMATS.md](https://github.com/veripublica/conventions/blob/main/FORMATS.md)) —
+exactly one JSON object on stdout, the same shape epubveri emits, so one parser
+reads both:
+
+```json
+{
+  "tool": "epubsana",
+  "tool_version": "0.2.0",
+  "convention": "0.4",
+  "status": "problems",
+  "inputs": [
+    {
+      "path": "book.epub",
+      "status": "problems",
+      "output": "book_fixed.epub",
+      "summary": {
+        "fatals_before": 774, "fatals_after": 0,
+        "errors_before": 5, "errors_after": 4,
+        "applied": 2, "skipped": 0, "goal": "valid"
+      },
+      "items": [
+        {
+          "type": "fix",
+          "outcome": "applied",
+          "code": "RSC-016",
+          "rule": "htm.entity.undeclared",
+          "severity": "fatal",
+          "location": "OEBPS/Text/bolum2.xhtml",
+          "message": "Map 1 undeclared HTML entity (657×) to characters …",
+          "data": { "fix_id": "fix.html_entities", "tier": "auto_safe", "changes": ["…"] }
+        }
+      ]
+    }
+  ]
+}
+```
+
+Two fields carry epubsana's half of the contract:
+
+- **`outcome`** — `applied`, `skipped`, or `proposed` — is on **every** fix item.
+  A confirm-each-step run routinely applies one fix and declines the next; a
+  report that cannot say which is not a report of what changed. Under
+  `--dry-run` every item is `"proposed"` (and `dry_run: true` is a summary of
+  that, never a contradiction of it).
+- **`severity`** is **inherited** from the finding the fix addresses, verbatim
+  from epubveri — it describes the *defect*, never epubsana's opinion of its own
+  fix. How much judgement the fix needs is a different axis, and lives in
+  `data.tier`.
+
+A usage error produces **no envelope**: a short message on stderr and exit `2`.
 
 ---
 
@@ -234,11 +314,12 @@ These invariants hold for every fixer:
 - **Never guess.** If a finding has no safe, determinate fix, epubsana declines
   it rather than risk the content.
 - **Independently re-validated.** After applying fixes, the whole book is
-  re-checked with epubveri for the `errors: N → M` count — the tool proves its
+  re-checked with epubveri for the before → after counts — the tool proves its
   own result rather than asserting it.
 - **The original isn't modified in place.** Repairs are written to a separate
-  output file (by default `<name>.fixed.epub`; overridden only if you point
-  `-o` at another path).
+  output file (by default `<input-stem>_fixed.epub`; overridden only if you
+  point `-o` at another path), and an existing file there is never silently
+  replaced — epubsana refuses until you pass `-f`.
 
 ---
 
@@ -280,13 +361,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut confirmer = ApproveAll;
     let report = repair(&mut ws, Goal::Valid, Policy::AskEach, &mut confirmer)?;
 
-    println!("errors: {} → {}", report.errors_before, report.errors_after);
-    for applied in &report.applied {
-        println!("applied: {}", applied.title);
+    println!(
+        "fatal {} → {}, error {} → {}",
+        report.fatals_before, report.fatals_after,
+        report.errors_before, report.errors_after,
+    );
+    for fix in &report.fixes {
+        println!("{}: {}", fix.outcome.as_str(), fix.title);
     }
 
-    if !report.applied.is_empty() {
-        std::fs::write("book.fixed.epub", ws.serialize()?)?;
+    if report.changed() {
+        std::fs::write("book_fixed.epub", ws.serialize()?)?;
     }
     Ok(())
 }
@@ -303,7 +388,17 @@ Key types:
   (propose and report, apply nothing).
 - **`Confirmer`** — implement `decide(&mut self, fix: &ProposedFix) -> Decision`
   (`Approve` / `Reject`).
-- **`ChangeReport`** — `applied`, `skipped`, `errors_before`, `errors_after`.
+- **`ChangeReport`** — `fixes` (each a `ReportedFix` carrying its `Outcome`:
+  `Applied` / `Skipped` / `Proposed`), `fatals_before`/`fatals_after`,
+  `errors_before`/`errors_after`, `goal`, and `goal_met` — the tool's `0`/`1`
+  line. `applied()` / `skipped()` / `changed()` are conveniences over `fixes`.
+- **`Goal::is_met(&report)`** — `Valid` = no fatals and no errors; `Openable` =
+  no fatals (the book opens).
+- **`envelope`** — the shared machine shape. The skeleton is epubveri's
+  reference type (`epubveri::envelope`, generic over the two tool-owned slots);
+  epubsana supplies its own `Summary` and `Data` and maps a `ChangeReport` into
+  it, so a library consumer emits exactly the JSON the CLI does — and the family
+  keeps one copy of the envelope, not one per tool.
 - **`fixers::plan(&report, &ws, goal)`** — build the proposals directly (what
   `--dry-run` uses) without applying anything.
 
@@ -319,4 +414,6 @@ Key types:
   detection. A structural fixer that can't parse a document *before* an earlier
   fixer would have cleaned it up may decline it. (Re-planning after each fix is
   on the roadmap.)
-- **`--goal` doesn't gate fixers yet** (see [CLI reference](#cli-reference)).
+- **`--goal` decides success, not yet fixer selection.** Both goals propose the
+  same fixes today; what differs is the bar the result is measured against (see
+  [Exit codes](#exit-codes)).
