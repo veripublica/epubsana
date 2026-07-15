@@ -1,7 +1,8 @@
 [package]
 name = "epubsana"
 version = "0.2.1"
-edition = "2021"
+edition = "2024"
+rust-version = "1.88"
 description = "Repairs the EPUB defects epubveri detects — a pure-Rust, confirm-each-step EPUB fixer."
 license = "AGPL-3.0-only OR LicenseRef-veripublica-Commercial"
 repository = "https://github.com/veripublica/epubsana"
@@ -22,22 +23,27 @@ members = ["epubsana-wasm"]
 # `Severity` (a fatal is no longer folded into an error) and the `rule`/`params`
 # sub-codes epubsana's fixers dispatch on.
 #
-# The minimum is **0.5.3**, not 0.5: that is the release where the envelope types
-# became generic over the two tool-owned slots (`Envelope::for_tool`, `Item::fix`),
-# which `src/envelope.rs` builds on. Against 0.5.0–0.5.2 this crate does not
-# compile, so the patch level is part of the requirement, not decoration.
+# The minimum is **0.5.7**: that release is edition-2024 / MSRV-1.88 (which is why
+# this crate matches both above) and carries the `data.element_path` additions.
+# The envelope types epubsana builds on in `src/envelope.rs` have been generic
+# over the two tool-owned slots (`Envelope::for_tool`, `Item::fix`) since 0.5.3.
 #
 # For local co-development of epubveri, add an uncommitted override:
 #   [patch.crates-io] epubveri = { path = "../epubveri" }
-epubveri = "0.5.3"
+epubveri = "0.5.7"
 # Pure-Rust only (no C deps), same philosophy as epubveri: zip's "deflate"
-# feature uses flate2 -> miniz_oxide (Rust); bzip2/zstd (C) stay disabled.
-zip = { version = "2.2", default-features = false, features = ["deflate"] }
+# feature uses zlib-rs (Rust) on the 8.x line; bzip2/zstd (C) stay disabled.
+# Aligned to epubveri's zip major — the family shares one zip version because
+# epubsana re-emits containers epubveri reads. NB: 8.x's deflate backend differs
+# from 2.x, so repaired files' bytes change (same content, still deterministic).
+zip = { version = "8.6", default-features = false, features = ["deflate"] }
 # Structural editing for content-model fixers: parse an XHTML document to find
 # a node's exact byte range and edit it surgically (preserving everything
 # else). Pure-Rust, and already epubveri's own XML parser — no new transitive
 # weight, and byte ranges line up with the positions epubveri reports.
-roxmltree = "0.20"
+# 0.21 matches attributes by local name (ignoring namespace); see the
+# `attr_no_ns` helper in src/fixers.rs for how no-namespace lookups stay exact.
+roxmltree = "0.21"
 # `--format json`: the shared veripublica envelope (FORMATS.md). serde_json is
 # the CLI's only user, but the envelope types are public so the wasm binding and
 # any embedder emit the identical shape.

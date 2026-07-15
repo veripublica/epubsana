@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use epubsana::envelope;
-use epubsana::{repair, ChangeReport, Confirmer, Decision, Goal, Outcome, Policy, ProposedFix};
+use epubsana::{ChangeReport, Confirmer, Decision, Goal, Outcome, Policy, ProposedFix, repair};
 use epubsana::{Tier, Workspace};
 
 const HELP: &str = "\
@@ -228,15 +228,15 @@ fn parse(args: &[String]) -> Cli {
 
     // Reject an out-of-set value for an enum option (§3.5) — after the scan, so
     // a `-h` anywhere still short-circuits to help rather than this error.
-    if let Some(f) = &format {
-        if !["human", "json"].contains(&f.as_str()) {
-            fail!("invalid value '{f}' for --format; supported values: human, json");
-        }
+    if let Some(f) = &format
+        && !["human", "json"].contains(&f.as_str())
+    {
+        fail!("invalid value '{f}' for --format; supported values: human, json");
     }
-    if let Some(g) = &goal {
-        if !["valid", "openable"].contains(&g.as_str()) {
-            fail!("invalid value '{g}' for --goal; supported values: valid, openable");
-        }
+    if let Some(g) = &goal
+        && !["valid", "openable"].contains(&g.as_str())
+    {
+        fail!("invalid value '{g}' for --goal; supported values: valid, openable");
     }
 
     // Precedence: help short-circuits even a malformed line; a usage error

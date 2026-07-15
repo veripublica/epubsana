@@ -20,10 +20,10 @@ fn main() {
     // with no `.git` simply watches nothing and stays on the plain version.
     watch(".git/HEAD");
     watch(".git/index");
-    if let Ok(head) = std::fs::read_to_string(".git/HEAD") {
-        if let Some(refname) = head.strip_prefix("ref:") {
-            watch(&format!(".git/{}", refname.trim()));
-        }
+    if let Ok(head) = std::fs::read_to_string(".git/HEAD")
+        && let Some(refname) = head.strip_prefix("ref:")
+    {
+        watch(&format!(".git/{}", refname.trim()));
     }
 }
 

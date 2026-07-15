@@ -10,7 +10,7 @@ use std::ops::Range;
 
 use epubveri::report::{Report, Severity};
 
-use crate::{entities, Change, Goal, ProposedFix, Tier, Workspace};
+use crate::{Change, Goal, ProposedFix, Tier, Workspace, entities};
 
 /// Build the ordered list of proposals for a detection [`Report`].
 pub fn plan(report: &Report, ws: &Workspace, _goal: Goal) -> Vec<ProposedFix> {
@@ -347,10 +347,10 @@ fn is_attr_boundary(text: &str, start: usize) -> bool {
 fn content_type_meta(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
     let mut files: BTreeSet<String> = BTreeSet::new();
     for m in &report.messages {
-        if m.rule == Some("opf.content_document.invalid_content_type_meta") {
-            if let Some(loc) = m.location.as_deref() {
-                files.insert(loc.to_string());
-            }
+        if m.rule == Some("opf.content_document.invalid_content_type_meta")
+            && let Some(loc) = m.location.as_deref()
+        {
+            files.insert(loc.to_string());
         }
     }
 
@@ -396,10 +396,10 @@ fn content_type_meta(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
                 .to_string(),
             preview,
             apply_fn: Box::new(move |ws: &mut Workspace| {
-                if let Some(text) = ws.get_text(&file_for_apply) {
-                    if let Some(edits) = plan_encoding_normalization(&text) {
-                        ws.set_text(&file_for_apply, apply_edits(&text, edits));
-                    }
+                if let Some(text) = ws.get_text(&file_for_apply)
+                    && let Some(edits) = plan_encoding_normalization(&text)
+                {
+                    ws.set_text(&file_for_apply, apply_edits(&text, edits));
                 }
             }),
         });
@@ -429,6 +429,28 @@ fn parse_xml(text: &str) -> Option<roxmltree::Document<'_>> {
     roxmltree::Document::parse_with_options(text, opts).ok()
 }
 
+/// A namespace-exact attribute lookup.
+///
+/// roxmltree 0.21 changed `Node::attribute(name)` to match by **local name,
+/// ignoring namespace**, so `attribute("id")` now also returns `xml:id` and
+/// `attribute("href")` also returns `xlink:href`. Every attribute epubsana's
+/// fixers read is unqualified (a manifest `href`, an NCX `id`, a `meta`'s
+/// `content`, …) — never a namespaced twin — so this restores the pre-0.21
+/// behaviour: match only an attribute whose name carries no namespace. (Mirrors
+/// epubveri's own `xmlext::NodeExt::attr_no_ns`, kept local to avoid depending
+/// on epubveri's non-public helper.)
+trait NodeExt<'a> {
+    fn attr_no_ns(&self, name: &str) -> Option<&'a str>;
+}
+
+impl<'a> NodeExt<'a> for roxmltree::Node<'a, '_> {
+    fn attr_no_ns(&self, name: &str) -> Option<&'a str> {
+        self.attributes()
+            .find(|a| a.namespace().is_none() && a.name() == name)
+            .map(|a| a.value())
+    }
+}
+
 fn plan_encoding_normalization(text: &str) -> Option<Vec<MetaEdit>> {
     let doc = parse_xml(text)?;
 
@@ -439,9 +461,9 @@ fn plan_encoding_normalization(text: &str) -> Option<Vec<MetaEdit>> {
         .filter(|n| n.is_element() && n.tag_name().name() == "meta")
     {
         let is_http_ct = n
-            .attribute("http-equiv")
+            .attr_no_ns("http-equiv")
             .is_some_and(|v| v.eq_ignore_ascii_case("content-type"));
-        let charset_attr = n.attribute("charset");
+        let charset_attr = n.attr_no_ns("charset");
         if !is_http_ct && charset_attr.is_none() {
             continue; // not an encoding declaration
         }
@@ -449,11 +471,11 @@ fn plan_encoding_normalization(text: &str) -> Option<Vec<MetaEdit>> {
         // must be UTF-8; a non-UTF-8 declaration means we'd risk a re-encode.
         let declared = charset_attr
             .map(str::to_string)
-            .or_else(|| n.attribute("content").and_then(declared_charset));
-        if let Some(cs) = &declared {
-            if !cs.eq_ignore_ascii_case("utf-8") {
-                return None;
-            }
+            .or_else(|| n.attr_no_ns("content").and_then(declared_charset));
+        if let Some(cs) = &declared
+            && !cs.eq_ignore_ascii_case("utf-8")
+        {
+            return None;
         }
         metas.push((n.range(), charset_attr.is_some()));
     }
@@ -525,10 +547,10 @@ fn declared_charset(content: &str) -> Option<String> {
 fn ncx_dtb_uid(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
     let mut ncx_files: BTreeSet<String> = BTreeSet::new();
     for m in &report.messages {
-        if m.id == "NCX-001" {
-            if let Some(loc) = m.location.as_deref() {
-                ncx_files.insert(loc.to_string());
-            }
+        if m.id == "NCX-001"
+            && let Some(loc) = m.location.as_deref()
+        {
+            ncx_files.insert(loc.to_string());
         }
     }
 
@@ -557,10 +579,10 @@ fn ncx_dtb_uid(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
                 .to_string(),
             preview,
             apply_fn: Box::new(move |ws: &mut Workspace| {
-                if let Some((edit, _, _)) = compute_dtb_uid_edit(ws, &file_for_apply) {
-                    if let Some(text) = ws.get_text(&file_for_apply) {
-                        ws.set_text(&file_for_apply, apply_edits(&text, vec![edit]));
-                    }
+                if let Some((edit, _, _)) = compute_dtb_uid_edit(ws, &file_for_apply)
+                    && let Some(text) = ws.get_text(&file_for_apply)
+                {
+                    ws.set_text(&file_for_apply, apply_edits(&text, vec![edit]));
                 }
             }),
         });
@@ -604,7 +626,7 @@ fn opf_path_from_container(container: &str) -> Option<String> {
     parse_xml(container)?
         .descendants()
         .find(|n| n.is_element() && n.tag_name().name() == "rootfile")
-        .and_then(|n| n.attribute("full-path"))
+        .and_then(|n| n.attr_no_ns("full-path"))
         .map(str::to_string)
 }
 
@@ -614,13 +636,13 @@ fn unique_id_from_opf(opf: &str) -> Option<String> {
     // Mirror epubveri's resolution exactly (opf.rs): trim both sides of the
     // id match, and concatenate ALL descendant text, so our value is byte-for-
     // byte what epubveri compares dtb:uid against.
-    let uid_id = doc.root_element().attribute("unique-identifier")?.trim();
+    let uid_id = doc.root_element().attr_no_ns("unique-identifier")?.trim();
     let value: String = doc
         .descendants()
         .find(|n| {
             n.is_element()
                 && n.tag_name().name() == "identifier"
-                && n.attribute("id").map(str::trim) == Some(uid_id)
+                && n.attr_no_ns("id").map(str::trim) == Some(uid_id)
         })?
         .descendants()
         .filter(|t| t.is_text())
@@ -634,11 +656,11 @@ fn unique_id_from_opf(opf: &str) -> Option<String> {
 fn find_dtb_uid_meta(ncx: &str) -> Option<(Range<usize>, String)> {
     let doc = parse_xml(ncx)?;
     let meta = doc.descendants().find(|n| {
-        n.is_element() && n.tag_name().name() == "meta" && n.attribute("name") == Some("dtb:uid")
+        n.is_element() && n.tag_name().name() == "meta" && n.attr_no_ns("name") == Some("dtb:uid")
     })?;
     Some((
         meta.range(),
-        meta.attribute("content").unwrap_or("").to_string(),
+        meta.attr_no_ns("content").unwrap_or("").to_string(),
     ))
 }
 

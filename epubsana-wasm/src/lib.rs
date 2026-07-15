@@ -28,7 +28,7 @@ use serde::Serialize;
 use tsify_next::Tsify;
 use wasm_bindgen::prelude::*;
 
-use epubsana::{fixers, Goal, Outcome, ProposedFix, Tier, Workspace};
+use epubsana::{Goal, Outcome, ProposedFix, Tier, Workspace, fixers};
 
 /// One concrete edit a fix would make (mirrors `epubsana::Change`).
 #[derive(Clone, Serialize, Tsify)]
@@ -217,12 +217,12 @@ impl Session {
     pub fn apply_auto_safe(&mut self) -> usize {
         let mut applied = 0;
         for i in 0..self.fixes.len() {
-            if self.infos[i].tier == "AutoSafe" {
-                if let Some(fix) = self.fixes[i].take() {
-                    fix.apply(&mut self.ws);
-                    self.infos[i].outcome = Outcome::Applied.as_str().to_string();
-                    applied += 1;
-                }
+            if self.infos[i].tier == "AutoSafe"
+                && let Some(fix) = self.fixes[i].take()
+            {
+                fix.apply(&mut self.ws);
+                self.infos[i].outcome = Outcome::Applied.as_str().to_string();
+                applied += 1;
             }
         }
         applied
