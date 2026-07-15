@@ -8,6 +8,29 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [0.3.1] - 2026-07-15
+
+Tracks `epubveri` 0.5.8. No epubsana source changed — the fixers key on the
+stable `rule`/`params` contract, which held — but one upstream detection fix is
+user-visible, so it ships as its own release.
+
+### Changed
+
+- **`epubveri` 0.5.7 → 0.5.8.** Two upstream detection changes flow through
+  without any epubsana code change:
+  - epubveri no longer reports the ~250 DTD-declared HTML named entities
+    (`&nbsp;`, `&eacute;`, `&copy;`, …) as undeclared (`RSC-016`) in **EPUB 2**,
+    where the DOCTYPE's DTD does declare them — it was a false positive. epubsana
+    therefore stops proposing to convert those entities in EPUB 2 books: they
+    were never broken, so this is repair burden correctly removed, not lost
+    coverage. Genuinely undeclared entities still report, and **EPUB 3** (which
+    wants numeric character references) is unchanged. Expect fewer
+    `html_entities` proposals on EPUB 2 books.
+  - `RSC-005` content-model findings now carry the offending element's name in
+    `params` (previously empty). No behavior change here — epubsana's `RSC-005`
+    consumer keys on the NCX-NCName rule, not the content-model one — but the
+    forthcoming content-model fixer gets the element name for free.
+
 ## [0.3.0] - 2026-07-15
 
 Adds three corpus-chosen fixers and realigns the foundation to the epubveri

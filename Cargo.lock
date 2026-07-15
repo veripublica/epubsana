@@ -31,7 +31,7 @@ dependencies = [
 
 [[package]]
 name = "epubsana"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "epubveri",
  "roxmltree",
@@ -42,7 +42,7 @@ dependencies = [
 
 [[package]]
 name = "epubsana-wasm"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "epubsana",
  "serde",
@@ -52,9 +52,9 @@ dependencies = [
 
 [[package]]
 name = "epubveri"
-version = "0.5.7"
+version = "0.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "228369907eee8be384f2160942e75aa4335f6805703adcc7b5f37e2ac24ba980"
+checksum = "915cd2732950ca733758fa9386909cd70dc49637f895039b1de19566c1d8fbec"
 dependencies = [
  "roxmltree",
  "serde",
