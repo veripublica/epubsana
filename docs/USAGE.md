@@ -84,7 +84,7 @@ one fix was applied, and an existing output file is never silently replaced
 ## How it works
 
 epubsana follows a strict five-step contract, the same in every frontend (this
-CLI, a future in-browser WASM page, and library consumers such as epublift):
+CLI, the in-browser WASM demo, and library consumers such as epublift):
 
 1. **Load** the EPUB into a fidelity-preserving in-memory container. Untouched
    entries round-trip byte-for-byte.
@@ -233,7 +233,7 @@ reads both:
 ```json
 {
   "tool": "epubsana",
-  "tool_version": "0.2.0",
+  "tool_version": "0.3.1",
   "convention": "0.4",
   "status": "problems",
   "inputs": [
