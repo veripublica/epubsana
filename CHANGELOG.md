@@ -8,6 +8,35 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [0.3.2] - 2026-07-16
+
+Tracks `epubveri` 0.5.9. No epubsana source changed — the fixers key on the
+stable `rule` contract, which held — but the upstream detection fix removes a
+whole class of proposal epubsana should never have made, so it ships as its own
+release. Re-audited on the 171-book corpus with every fix approved: **no
+regressions** (no finding appears that was not there before), errors 4078 →
+1206, 21 books become fully valid.
+
+### Changed
+
+- **`epubveri` 0.5.9 → `content_type_meta` no longer fires on EPUB 2.** Upstream
+  fixed a false positive: the rule requiring `<meta http-equiv="Content-Type">`
+  to read exactly `text/html; charset=utf-8` is an HTML5 rule and applies to
+  **EPUB 3** only. EPUB 2 content is XHTML 1.1, where
+  `content="application/xhtml+xml; charset=utf-8"` is the correct form. Because
+  epubsana's `content_type_meta` fixer keys on that finding, it was proposing to
+  rewrite those valid EPUB 2 declarations into the HTML5
+  `<meta charset="utf-8"/>` form — a form XHTML 1.1 does not want. Those
+  proposals are now gone: on the 171-book corpus the fixer drops from **18 books
+  / 845 proposals to zero**, and books reporting errors fall from 128 to 125.
+  Every activation it had was a false positive. The fixer is unchanged and still
+  correct for EPUB 3; this corpus simply contains no EPUB 3 book that needs it.
+  Repair burden correctly removed, not lost coverage.
+- **`RSC-011` findings now anchor at the source `<a>` element** rather than the
+  OPF package root, and carry a `data.element_path` in JSON. epubsana has no
+  `RSC-011` fixer today, so there is no behavior change — but a future one would
+  have been blocked by the old location, the same way `OPF-073` still is.
+
 ## [0.3.1] - 2026-07-15
 
 Tracks `epubveri` 0.5.8. No epubsana source changed — the fixers key on the
