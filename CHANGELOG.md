@@ -8,7 +8,16 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
-## [Unreleased]
+## [0.4.0] - 2026-07-16
+
+Two new fixers, and the writer stops quietly rewriting your container.
+
+**Why this is `0.4.0` and not `0.3.3`:** `serialize()`'s output changes for every
+book. Entries are no longer decompressed and recompressed, so a repaired file's
+bytes differ from what 0.3.x produced, and packaging — including a `mimetype`
+entry that violates OCF — is now preserved rather than normalized on the way out.
+Anything downstream that relied on writing output to quietly correct packaging
+must now approve `fix.mimetype_packaging` instead. No API was removed.
 
 ### Added
 
