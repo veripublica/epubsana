@@ -36,6 +36,23 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
   takes both books from invalid to **fully valid** — 26 → 28 books that epubsana
   brings all the way to valid. No book gains a finding.
 
+- **A fixer for a duplicated spine entry** — the same manifest item listed twice,
+  so a chapter appears twice in the reading order
+  ([#2](https://github.com/veripublica/epubsana/issues/2)). The first occurrence
+  is kept and the repeats dropped: the repeat carries no information the first
+  doesn't, and the first is where the document belongs in the sequence.
+
+  epubveri reports this condition under **two ids** — `OPF-034` in EPUB 2,
+  `RSC-005` in EPUB 3 — with one shared `rule`, so the fixer keys on the `rule`
+  and inherits the id from the finding. A fixer written against `OPF-034` alone
+  would have done nothing on every EPUB 3 book.
+
+  Declines rather than guessing when the duplicate's `linear` disagrees with the
+  first's (the book means "in the reading order *and* reachable out-of-line",
+  which is deliberate), or when a repeat carries an `id` that a `<meta refines>`
+  targets. Not present in the reference corpus, which contains no Kindle→EPUB
+  conversions — it lands on `epublift`'s reproduction of it in the wild.
+
 ## [0.4.0] - 2026-07-16
 
 Two new fixers, and the writer stops quietly rewriting your container.

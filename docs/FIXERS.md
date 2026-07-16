@@ -34,6 +34,7 @@ grows one carefully-argued entry at a time.
 | `RSC-005` | `htm.epub2_dom.bare_text_in_body` | ConfirmNeeded | EPUB 2 text sits directly in `<body>` with no block-level element around it | [Wrap the text in a `<div>`, leaving whitespace alone](#rsc-005--bare-text-directly-in-body-epub-2) |
 | `RSC-001` | `opf.manifest_item.missing_resource` | ConfirmNeeded | A manifest `<item>` declares a resource the container doesn't hold | [Drop the item, and every reference that named it](#rsc-001--dangling-manifest-item) |
 | `OPF-049` | `opf.spine.itemref_idref_not_in_manifest` | ConfirmNeeded | A spine `<itemref>` names a manifest id that doesn't exist | [Drop the itemref](#opf-049--dangling-spine-itemref) |
+| `OPF-034` / `RSC-005` | `opf.spine.duplicate_itemref` | ConfirmNeeded | The spine lists the same manifest item more than once | [Keep the first occurrence, drop the later ones](#opf-034--rsc-005--duplicate-spine-itemref) |
 
 **A note on structural fixers.** Fixers that must locate an element (rather than
 match a token) parse the document with `roxmltree` using `allow_dtd: true`, the
@@ -413,3 +414,60 @@ construction, so plan-once is sound here rather than merely lucky.
 at all; verified by injection only. It lands regardless of its own frequency
 because `fix.manifest_dangling_item` needs the concept to exist and the invariant
 to be shared — the two were specified as one unit.
+
+---
+
+## OPF-034 / RSC-005 — duplicate spine itemref
+
+**Finding.** `opf.spine.duplicate_itemref`. The `<spine>` lists the same manifest
+item twice — `<itemref idref="id43"/>` more than once — so a chapter appears twice
+in the reading order. epubveri reports the `idref` in `params[0]`, at the
+**later** occurrence. It shows up in tool-converted books (Kindle→EPUB especially),
+where a conversion step appends an itemref that already exists.
+
+**This finding has two ids, and the fixer dispatches on the `rule`.** epubveri
+reports the identical condition as `OPF-034` in EPUB 2 and `RSC-005` in EPUB 3 —
+version-scoped, because that is what each epubcheck fixture expects. The `rule` is
+the same for both, which is exactly what the `rule` sub-code exists for: a fixer
+keyed on `OPF-034` would silently do nothing on every EPUB 3 book. The proposal
+therefore inherits its `addresses_id` from the message rather than hard-coding one.
+
+**Fix** (`fix.spine_duplicate_itemref`, ConfirmNeeded). Keep the **first**
+occurrence, drop the later ones. Deletion only; no attribute is rewritten.
+
+**Why it's safe.** The duplicate carries no information the first occurrence
+doesn't already carry: same `idref`, therefore same document. The reading order is
+preserved exactly, because the first occurrence is where the document actually
+belongs in the sequence — dropping a later copy removes a repeat, not a position.
+The spine can never be emptied by this fix, since the occurrence it keeps is by
+definition still there, so it needs no empty-spine guard (unlike its dangling
+siblings above).
+
+`ConfirmNeeded`: it is a deletion, and it changes what a reader sees — a chapter
+stops appearing twice.
+
+**When it declines.**
+
+- **When the duplicate's `linear` disagrees with the first's.** Two entries with
+  the same `idref` but different `linear` are not a duplicate in the sense that
+  matters: the book is saying "this document sits in the reading order *and* is
+  reachable out-of-line", which is a real authored intent, and deleting one
+  destroys it. `linear` is compared **normalized** — an absent `linear` means
+  `yes`, so `<itemref idref="x"/>` and `<itemref idref="x" linear="yes"/>` are
+  the same entry and the fix still applies. If any duplicate of an `idref`
+  disagrees, the whole group is declined rather than half-repaired: mixed
+  `linear` means the author was doing something deliberate with that document,
+  and epubsana is not the one to guess what.
+- **When the duplicate carries an `id` that the package refines.** An
+  `<itemref id="x">` can be the target of a `<meta refines="#x">`, so dropping it
+  would orphan that metadata — a finding epubsana would have created itself.
+  Declined; the same principle as the `RSC-001` cascade, but here the referent is
+  metadata we have no mandate to rewrite.
+- If the OPF won't parse, or fewer than two itemrefs carry the reported `idref`
+  (a stale finding never deletes anything).
+
+**Measured.** **0 of 171 books** in the reference corpus, which contains no
+Kindle→EPUB conversions — the shelf structurally cannot see this defect class.
+Reproduced by epublift on a real book outside it (a Kindle conversion of *Project
+Hail Mary*), and cheap and provably safe, so it lands on that evidence rather than
+on ours. The guards are argued and unit-tested, not corpus-tested.

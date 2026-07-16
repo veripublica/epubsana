@@ -26,6 +26,7 @@ pub fn plan(report: &Report, ws: &Workspace, _goal: Goal) -> Vec<ProposedFix> {
     fixes.extend(bare_text_in_body(report, ws));
     fixes.extend(manifest_dangling_items(report, ws));
     fixes.extend(spine_dangling_itemrefs(report, ws));
+    fixes.extend(spine_duplicate_itemrefs(report, ws));
     fixes.extend(mimetype_packaging(report, ws));
     // Future fixers append here, in a sensible confirm order.
     fixes
@@ -1205,6 +1206,152 @@ fn compute_dangling_itemref_edits(opf: &str, idref: &str) -> Option<Vec<MetaEdit
     (!edits.is_empty()).then_some(edits)
 }
 
+/// `opf.spine.duplicate_itemref`: the spine lists the same manifest item twice,
+/// so a chapter appears twice in the reading order. Keep the **first**
+/// occurrence, drop the later ones — the duplicate carries no information the
+/// first doesn't already carry (same `idref`, same document), and the first is
+/// where the document actually belongs in the sequence.
+///
+/// **Dispatches on the `rule`, not the `id`, and that is load-bearing.** epubveri
+/// reports the identical condition as `OPF-034` in EPUB 2 but `RSC-005` in EPUB 3
+/// (version-scoped, matching each epubcheck fixture). A fixer keyed on `OPF-034`
+/// would silently do nothing on every EPUB 3 book — which is precisely what the
+/// `rule` sub-code exists to prevent. The proposal inherits `addresses_id` from
+/// the message rather than hard-coding one.
+///
+/// Needs no empty-spine guard, unlike its dangling siblings: the occurrence it
+/// keeps is by definition still there.
+///
+/// `ConfirmNeeded`: a deletion, and one a reader sees — a chapter stops
+/// appearing twice.
+fn spine_duplicate_itemrefs(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    // idref -> the id epubveri filed it under (OPF-034 or RSC-005).
+    let mut dupes: BTreeMap<String, String> = BTreeMap::new();
+    for m in &report.messages {
+        if m.rule != Some("opf.spine.duplicate_itemref") {
+            continue;
+        }
+        let Some(idref) = m.params.first() else {
+            continue;
+        };
+        dupes.insert(idref.clone(), m.id.to_string());
+    }
+    if dupes.is_empty() {
+        return Vec::new();
+    }
+    let Some(opf_path) = opf_path(ws) else {
+        return Vec::new();
+    };
+    let Some(opf) = ws.get_text(&opf_path) else {
+        return Vec::new();
+    };
+
+    let mut fixes = Vec::new();
+    for (idref, id) in dupes {
+        let Some(edits) = compute_duplicate_itemref_edits(&opf, &idref) else {
+            continue;
+        };
+        let n = edits.len();
+
+        let opf_for_apply = opf_path.clone();
+        let idref_for_apply = idref.clone();
+        let addresses_id = id.clone();
+        fixes.push(ProposedFix {
+            fix_id: "fix.spine_duplicate_itemref",
+            addresses_id: id.clone(),
+            addresses_rule: Some("opf.spine.duplicate_itemref"),
+            addresses_severity: addressed_severity(
+                report,
+                &addresses_id,
+                Some("opf.spine.duplicate_itemref"),
+            ),
+            tier: Tier::ConfirmNeeded,
+            title: format!(
+                "Drop {n} repeat spine entr{} for \"{idref}\" — keep the first",
+                if n == 1 { "y" } else { "ies" }
+            ),
+            rationale:
+                "The spine lists this manifest item more than once, so the document appears twice \
+                 in the reading order. A later entry carries no information the first doesn't \
+                 already carry — same idref, same document — and the first occurrence is where \
+                 the document actually belongs in the sequence, so dropping the repeats removes a \
+                 repetition, not a position. Nothing else in the spine moves."
+                    .to_string(),
+            preview: vec![Change {
+                path: opf_path.clone(),
+                note: format!("spine: drop {n} repeat itemref(s) with idref=\"{idref}\""),
+            }],
+            apply_fn: Box::new(move |ws: &mut Workspace| {
+                if let Some(text) = ws.get_text(&opf_for_apply)
+                    && let Some(edits) = compute_duplicate_itemref_edits(&text, &idref_for_apply)
+                {
+                    ws.set_text(&opf_for_apply, apply_edits(&text, edits));
+                }
+            }),
+        });
+    }
+    fixes
+}
+
+/// A spine entry's `linear`, normalized: absent means `yes`, so a bare
+/// `<itemref idref="x"/>` and `<itemref idref="x" linear="yes"/>` are the same
+/// entry and one may be dropped for the other.
+fn linear_of(ir: &roxmltree::Node<'_, '_>) -> String {
+    ir.attr_no_ns("linear")
+        .map(str::trim)
+        .unwrap_or("yes")
+        .to_ascii_lowercase()
+}
+
+/// The edits that drop every spine `<itemref>` for `idref` **after the first**.
+///
+/// `None` (decline) when the OPF won't parse, fewer than two entries carry the
+/// `idref` (a stale finding deletes nothing), or a repeat is not really a
+/// duplicate:
+///
+/// - **its `linear` disagrees with the first's** — the book is saying "in the
+///   reading order *and* reachable out-of-line", a real authored intent that
+///   deleting would destroy. If any repeat disagrees the whole group is
+///   declined rather than half-repaired;
+/// - **it carries an `id` the package refines** — an `<itemref id="x">` can be
+///   the target of a `<meta refines="#x">`, and dropping it would orphan that
+///   metadata: a finding epubsana would have created itself.
+fn compute_duplicate_itemref_edits(opf: &str, idref: &str) -> Option<Vec<MetaEdit>> {
+    let doc = parse_xml(opf)?;
+    let all = spine_itemrefs(&doc);
+    let mut hits = all
+        .iter()
+        .filter(|ir| ir.attr_no_ns("idref") == Some(idref));
+
+    let first = hits.next()?;
+    let repeats: Vec<_> = hits.collect();
+    if repeats.is_empty() {
+        return None; // stale finding — nothing is duplicated
+    }
+
+    let keep_linear = linear_of(first);
+    for r in &repeats {
+        if linear_of(r) != keep_linear {
+            return None; // deliberate: one linear, one not
+        }
+        if let Some(id) = r.attr_no_ns("id")
+            && opf.contains(&format!("refines=\"#{id}\""))
+        {
+            return None; // dropping it would orphan a <meta refines>
+        }
+    }
+
+    Some(
+        repeats
+            .iter()
+            .map(|r| MetaEdit {
+                range: r.range(),
+                replacement: String::new(),
+            })
+            .collect(),
+    )
+}
+
 /// `PKG-006`: the archive carries a `mimetype` entry, but not first. OCF wants
 /// it first and stored so a reader can identify the file from its opening bytes.
 ///
@@ -1727,6 +1874,99 @@ fn escape_xml_attr(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A spine that lists `ch1` twice — the Kindle→EPUB conversion artifact.
+    const DUPE_OPF: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="uid">
+  <manifest>
+    <item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="ch2" href="ch2.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine>
+    <itemref idref="ch1"/>
+    <itemref idref="ch2"/>
+    <itemref idref="ch1"/>
+  </spine>
+</package>"#;
+
+    #[test]
+    fn duplicate_itemref_keeps_the_first_and_drops_the_repeat() {
+        let edits = compute_duplicate_itemref_edits(DUPE_OPF, "ch1").expect("fix");
+        assert_eq!(edits.len(), 1);
+        let out = apply_edits(DUPE_OPF, edits);
+        // The kept entry is the FIRST: ch1 must still precede ch2.
+        let ch1 = out.find("idref=\"ch1\"").expect("ch1 survives");
+        let ch2 = out.find("idref=\"ch2\"").expect("ch2 untouched");
+        assert!(ch1 < ch2, "the first occurrence is the one kept");
+        assert_eq!(out.matches("idref=\"ch1\"").count(), 1, "no repeat left");
+    }
+
+    #[test]
+    fn duplicate_itemref_declines_a_stale_finding() {
+        assert!(compute_duplicate_itemref_edits(DUPE_OPF, "ch2").is_none());
+    }
+
+    /// An absent `linear` means `yes`, so these two entries really are the same
+    /// entry and the repeat may go.
+    #[test]
+    fn duplicate_itemref_treats_absent_linear_as_yes() {
+        let opf = DUPE_OPF.replace(
+            "<itemref idref=\"ch1\"/>\n    <itemref idref=\"ch2\"/>",
+            "<itemref idref=\"ch1\" linear=\"yes\"/>\n    <itemref idref=\"ch2\"/>",
+        );
+        assert!(
+            compute_duplicate_itemref_edits(&opf, "ch1").is_some(),
+            "linear=\"yes\" and an absent linear are the same entry"
+        );
+    }
+
+    /// One linear, one not, is an authored intent — not a duplicate to delete.
+    #[test]
+    fn duplicate_itemref_declines_when_linear_disagrees() {
+        let opf = DUPE_OPF.replace(
+            "<itemref idref=\"ch1\"/>\n  </spine>",
+            "<itemref idref=\"ch1\" linear=\"no\"/>\n  </spine>",
+        );
+        assert!(
+            compute_duplicate_itemref_edits(&opf, "ch1").is_none(),
+            "in the reading order AND reachable out-of-line is deliberate"
+        );
+    }
+
+    /// Dropping an itemref a `<meta refines>` points at would orphan metadata —
+    /// a finding epubsana would have created itself.
+    #[test]
+    fn duplicate_itemref_declines_when_the_repeat_is_refined() {
+        let opf = DUPE_OPF
+            .replace(
+                "<itemref idref=\"ch1\"/>\n  </spine>",
+                "<itemref idref=\"ch1\" id=\"sp1\"/>\n  </spine>",
+            )
+            .replace(
+                "<manifest>",
+                "<metadata><meta refines=\"#sp1\" property=\"x\">v</meta></metadata>\n  <manifest>",
+            );
+        assert!(compute_duplicate_itemref_edits(&opf, "ch1").is_none());
+    }
+
+    /// Isolates the guard above: it is the `<meta refines>` that declines the
+    /// fix, not the mere presence of an `id`. An unreferenced id is just a label
+    /// on a repeat, and the repeat still goes.
+    #[test]
+    fn duplicate_itemref_with_an_unreferenced_id_is_still_dropped() {
+        let opf = DUPE_OPF.replace(
+            "<itemref idref=\"ch1\"/>\n  </spine>",
+            "<itemref idref=\"ch1\" id=\"sp1\"/>\n  </spine>",
+        );
+        assert!(compute_duplicate_itemref_edits(&opf, "ch1").is_some());
+    }
+
+    #[test]
+    fn linear_is_normalized_not_compared_raw() {
+        let doc = parse_xml(DUPE_OPF).expect("parse");
+        let irs = spine_itemrefs(&doc);
+        assert_eq!(linear_of(&irs[0]), "yes", "absent linear defaults to yes");
+    }
 
     /// A package with one dangling item (`gone`), one live chapter, and a cover
     /// meta naming a live image — enough to exercise the cascade and its guards.

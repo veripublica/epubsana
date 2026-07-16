@@ -13,7 +13,7 @@ changed**. It never guesses, and it preserves everything it doesn't touch.
 ## Status
 
 Early but working. The core contract (`Workspace` → detect → propose → confirm →
-apply → report) is solid, with eleven fixers so far:
+apply → report) is solid, with twelve fixers so far:
 
 - **`RSC-016`** — undeclared HTML entities (`&nbsp;`, `&mdash;`, …) → the exact
   character each denotes.
@@ -35,6 +35,10 @@ apply → report) is solid, with eleven fixers so far:
   would orphan, and a legacy cover `<meta>`), in one edit you approve once.
 - **`OPF-049`** — a spine `itemref` naming a manifest id that doesn't exist →
   dropped. Neither fixer will leave a book with an empty spine; it declines.
+- **`OPF-034` / `RSC-005`** — the same manifest item listed twice in the spine
+  (a chapter appearing twice) → the first occurrence kept, the repeats dropped.
+  Declines when the entries differ in `linear`: that is an authored intent, not
+  a duplicate.
 
 More fixers land next, in real-world impact order.
 
