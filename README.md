@@ -13,7 +13,7 @@ changed**. It never guesses, and it preserves everything it doesn't touch.
 ## Status
 
 Early but working. The core contract (`Workspace` → detect → propose → confirm →
-apply → report) is solid, with eight fixers so far:
+apply → report) is solid, with nine fixers so far:
 
 - **`RSC-016`** — undeclared HTML entities (`&nbsp;`, `&mdash;`, …) → the exact
   character each denotes.
@@ -28,6 +28,8 @@ apply → report) is solid, with eight fixers so far:
   its manifest item.
 - **`PKG-006`** — a `mimetype` entry that isn't first in the ZIP → moved to the
   front, stored, with no content touched at all.
+- **`RSC-005` / `bare_text_in_body`** — EPUB 2 text sitting directly in `<body>`
+  → wrapped in a `<div>`; the text and the whitespace around it are untouched.
 
 More fixers land next, in real-world impact order.
 

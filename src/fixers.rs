@@ -23,6 +23,7 @@ pub fn plan(report: &Report, ws: &Workspace, _goal: Goal) -> Vec<ProposedFix> {
     fixes.extend(manifest_href_spaces(report, ws));
     fixes.extend(content_properties(report, ws));
     fixes.extend(empty_titles(report, ws));
+    fixes.extend(bare_text_in_body(report, ws));
     fixes.extend(mimetype_packaging(report, ws));
     // Future fixers append here, in a sensible confirm order.
     fixes
@@ -762,6 +763,142 @@ fn manifest_href_spaces(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
         });
     }
     fixes
+}
+
+/// The byte range of the non-whitespace span within `range`, or `None` when it
+/// is all whitespace. Wrapping this span rather than the whole node is what
+/// keeps a document's existing line breaks and indentation outside the new
+/// element.
+///
+/// `raw` must be the node's **source** slice (`&text[range]`), never roxmltree's
+/// decoded `text()`: the two differ in length wherever an entity reference
+/// appears, and offsets measured against the decoded form would land in the
+/// wrong place in the document.
+fn trimmed_span(range: Range<usize>, raw: &str) -> Option<Range<usize>> {
+    let lead = raw.len() - raw.trim_start().len();
+    let trail = raw.len() - raw.trim_end().len();
+    if lead + trail >= raw.len() {
+        return None; // whitespace only — not the defect, never wrap it
+    }
+    Some((range.start + lead)..(range.end - trail))
+}
+
+/// `RSC-005` / `htm.epub2_dom.bare_text_in_body`: an EPUB 2 content document
+/// with text sitting directly in `<body>`, which XHTML 1.1 forbids (it wants
+/// block-level content there; EPUB 3 is HTML5 and allows it, hence the rule's
+/// EPUB-2 scope). `params` is empty, so — like `content_type_meta` — we parse
+/// the document and find the text nodes ourselves.
+///
+/// Wraps each run of bare text in a `<div>`, grouped per document. `<div>` and
+/// not `<p>` on purpose: it claims nothing about what the text *is* (the corpus
+/// shows chapter titles and converter leftovers alike), and it reproduces the
+/// anonymous block a reading system already lays the text out in, so nothing
+/// moves on the page. That choice of default is what makes this `ConfirmNeeded`
+/// rather than `AutoSafe`.
+///
+/// **Whitespace-only text nodes are never wrapped** — they are the line breaks
+/// between sibling elements, epubveri does not report them, and they outnumber
+/// the real findings 7594 to 54 on the corpus. Wrapping them would add thousands
+/// of empty `<div>`s per book.
+fn bare_text_in_body(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    let mut docs: BTreeSet<String> = BTreeSet::new();
+    for m in &report.messages {
+        if m.rule == Some("htm.epub2_dom.bare_text_in_body")
+            && let Some(loc) = m.location.as_deref()
+        {
+            docs.insert(loc.to_string());
+        }
+    }
+
+    let mut fixes = Vec::new();
+    for doc in docs {
+        let Some(text) = ws.get_text(&doc) else {
+            continue;
+        };
+        let Some(spans) = plan_body_text_wrapping(&text) else {
+            continue; // won't parse, or has no body — decline
+        };
+        if spans.is_empty() {
+            continue;
+        }
+
+        let preview: Vec<Change> = spans
+            .iter()
+            .take(8)
+            .map(|r| {
+                let snippet: String = text[r.clone()].chars().take(48).collect();
+                Change {
+                    path: doc.clone(),
+                    note: format!("wrap in <div>: \"{snippet}\""),
+                }
+            })
+            .collect();
+        let n = spans.len();
+        let doc_for_apply = doc.clone();
+
+        fixes.push(ProposedFix {
+            fix_id: "fix.bare_text_in_body",
+            addresses_id: "RSC-005".to_string(),
+            addresses_rule: Some("htm.epub2_dom.bare_text_in_body"),
+            addresses_severity: addressed_severity(
+                report,
+                "RSC-005",
+                Some("htm.epub2_dom.bare_text_in_body"),
+            ),
+            tier: Tier::ConfirmNeeded,
+            title: format!(
+                "Wrap {n} run{} of bare text in <div> in {doc}",
+                if n == 1 { "" } else { "s" }
+            ),
+            rationale:
+                "XHTML 1.1 requires `<body>` to hold block-level content, so text sitting directly \
+                 in it is invalid in EPUB 2. The text itself is not altered — a `<div>` is placed \
+                 around it and nothing else is touched. `<div>` rather than `<p>` because it \
+                 claims nothing about what the text is, and because a reading system already lays \
+                 bare text out in an anonymous block — which is what a `<div>` is — so the page \
+                 does not move. Whitespace between elements is left exactly as it is."
+                    .to_string(),
+            preview,
+            apply_fn: Box::new(move |ws: &mut Workspace| {
+                if let Some(text) = ws.get_text(&doc_for_apply)
+                    && let Some(spans) = plan_body_text_wrapping(&text)
+                {
+                    let edits = spans
+                        .into_iter()
+                        .map(|r| MetaEdit {
+                            replacement: format!("<div>{}</div>", &text[r.clone()]),
+                            range: r,
+                        })
+                        .collect();
+                    ws.set_text(&doc_for_apply, apply_edits(&text, edits));
+                }
+            }),
+        });
+    }
+    fixes
+}
+
+/// The non-whitespace spans of every text node sitting directly in `<body>`.
+/// `None` (decline) if the document doesn't parse or has no `<body>`; an empty
+/// vec means there was nothing bare to wrap.
+fn plan_body_text_wrapping(text: &str) -> Option<Vec<Range<usize>>> {
+    let doc = parse_xml(text)?;
+    let body = doc.descendants().find(|n| n.tag_name().name() == "body")?;
+    let mut spans = Vec::new();
+    for child in body.children() {
+        if !child.is_text() {
+            continue;
+        }
+        let range = child.range();
+        // The node's own source, so entity references keep their real width.
+        let Some(raw) = text.get(range.clone()) else {
+            continue;
+        };
+        if let Some(span) = trimmed_span(range, raw) {
+            spans.push(span);
+        }
+    }
+    Some(spans)
 }
 
 /// `PKG-006`: the archive carries a `mimetype` entry, but not first. OCF wants
@@ -1510,5 +1647,80 @@ mod tests {
             set_content_attr(el, "NEW").as_deref(),
             Some("<meta name='dtb:uid' content='NEW'/>")
         );
+    }
+
+    /// Apply the wrapping the way the fixer does, so these tests exercise the
+    /// real planner rather than a paraphrase of it.
+    fn wrap_body_text(doc: &str) -> Option<String> {
+        let spans = plan_body_text_wrapping(doc)?;
+        let edits = spans
+            .into_iter()
+            .map(|r| MetaEdit {
+                replacement: format!("<div>{}</div>", &doc[r.clone()]),
+                range: r,
+            })
+            .collect();
+        Some(apply_edits(doc, edits))
+    }
+
+    #[test]
+    fn bare_text_is_wrapped_and_surrounding_whitespace_stays_put() {
+        let doc = "<html><body>\n\n\nBiRiNCi BÖLÜM\n<p>x</p></body></html>";
+        assert_eq!(
+            wrap_body_text(doc).unwrap(),
+            "<html><body>\n\n\n<div>BiRiNCi BÖLÜM</div>\n<p>x</p></body></html>"
+        );
+    }
+
+    /// The one that matters: `<body>` holds 7594 whitespace-only text nodes to
+    /// 54 real ones on the corpus. Wrapping them would add thousands of empty
+    /// `<div>`s per book.
+    #[test]
+    fn whitespace_between_elements_is_never_wrapped() {
+        let doc = "<html><body>\n  <p>a</p>\n\n  <p>b</p>\n</body></html>";
+        assert!(plan_body_text_wrapping(doc).unwrap().is_empty());
+        assert_eq!(wrap_body_text(doc).unwrap(), doc);
+    }
+
+    /// `range()` is the source span but `text()` is decoded — measuring the trim
+    /// against the decoded form would slice at the wrong offset here.
+    #[test]
+    fn entity_references_keep_their_source_width_and_survive_verbatim() {
+        let doc = "<html><body>\n a &amp; b \n<p>x</p></body></html>";
+        assert_eq!(
+            wrap_body_text(doc).unwrap(),
+            "<html><body>\n <div>a &amp; b</div> \n<p>x</p></body></html>"
+        );
+    }
+
+    #[test]
+    fn several_runs_in_one_body_are_all_wrapped() {
+        let doc = "<html><body>one<p>x</p>two<p>y</p>three</body></html>";
+        assert_eq!(
+            wrap_body_text(doc).unwrap(),
+            "<html><body><div>one</div><p>x</p><div>two</div><p>y</p><div>three</div></body></html>"
+        );
+    }
+
+    #[test]
+    fn text_nested_inside_a_block_is_not_our_business() {
+        let doc = "<html><body><p>already wrapped</p></body></html>";
+        assert!(plan_body_text_wrapping(doc).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_document_without_a_body_declines() {
+        assert!(plan_body_text_wrapping("<html><head/></html>").is_none());
+    }
+
+    #[test]
+    fn a_document_that_does_not_parse_declines() {
+        assert!(plan_body_text_wrapping("<html><body>unclosed").is_none());
+    }
+
+    #[test]
+    fn whitespace_only_span_is_none_but_real_text_is_trimmed() {
+        assert_eq!(trimmed_span(0..3, "   "), None);
+        assert_eq!(trimmed_span(10..17, "\n abc \n"), Some(12..15));
     }
 }

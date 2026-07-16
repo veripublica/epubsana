@@ -296,6 +296,7 @@ safe, and when epubsana declines, see the **[fix catalogue](./FIXERS.md)**.
 | `RSC-020` | `opf.manifest_item.unencoded_space_in_href` | AutoSafe | Percent-encodes a raw space in a manifest `href` (`ch 1.xhtml` → `ch%201.xhtml`). The file keeps its name; only the URL is spelled legally. |
 | `OPF-014` | `opf.content_document.property_used_undeclared` | AutoSafe | Adds the property a content document demonstrably uses (`scripted`, `svg`, `remote-resources`, `switch`) to its manifest item's `properties`. The document itself is not touched — the manifest is made to tell the truth about it. |
 | `PKG-006` | *(none)* | AutoSafe | Moves the `mimetype` entry to the front of the ZIP, stored uncompressed, as OCF requires. Changes no content at all — not one byte of any entry, `mimetype` included; only where it sits and how it's compressed. Declines if there is no `mimetype` entry to move. |
+| `RSC-005` | `htm.epub2_dom.bare_text_in_body` | ConfirmNeeded | Wraps EPUB 2 text sitting directly in `<body>` in a `<div>`, which XHTML 1.1 requires. The text is not altered and the whitespace around it stays put — only a wrapper appears. `<div>` rather than `<p>`: it claims nothing about what the text is, and matches the anonymous block the text already renders as, so the page doesn't move. |
 
 Findings not in this table — missing resources, dangling links, arbitrary schema
 violations, and anything requiring content epubsana would have to invent — are

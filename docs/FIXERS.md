@@ -31,6 +31,7 @@ grows one carefully-argued entry at a time.
 | `RSC-020` | `opf.manifest_item.unencoded_space_in_href` | AutoSafe | A manifest `href` contains a raw space | [Percent-encode the space as `%20`](#rsc-020--unencoded-space-in-a-manifest-href) |
 | `OPF-014` | `opf.content_document.property_used_undeclared` | AutoSafe | A content document uses a feature its manifest item doesn't declare | [Add the token to that item's `properties`](#opf-014--undeclared-content-property) |
 | `PKG-006` | *(none)* | AutoSafe | The `mimetype` entry is not first in the ZIP, as OCF requires | [Re-emit it first and stored, touching no content](#pkg-006--mimetype-is-not-the-first-entry) |
+| `RSC-005` | `htm.epub2_dom.bare_text_in_body` | ConfirmNeeded | EPUB 2 text sits directly in `<body>` with no block-level element around it | [Wrap the text in a `<div>`, leaving whitespace alone](#rsc-005--bare-text-directly-in-body-epub-2) |
 
 **A note on structural fixers.** Fixers that must locate an element (rather than
 match a token) parse the document with `roxmltree` using `allow_dtd: true`, the
@@ -256,6 +257,44 @@ rewritten.
 **When it declines.** If the archive has no `mimetype` entry at all, there is
 nothing to move — epubsana will not create one, because inventing a mimetype is
 asserting what the file *is* rather than repairing how it is packaged.
+
+---
+
+## RSC-005 — bare text directly in `<body>` (EPUB 2)
+
+**Finding.** `htm.epub2_dom.bare_text_in_body`. An EPUB 2 content document has
+text sitting directly inside `<body>`, with no block-level element around it.
+XHTML 1.1 requires `<body>` to contain block-level content, so this is invalid
+there. (EPUB 3 is HTML5, where `<body>` accepts flow content directly — hence the
+rule's EPUB-2 scope.) `params` is empty, so epubsana parses the document and
+locates the text itself.
+
+**Fix** (`fix.bare_text_in_body`, ConfirmNeeded). Wrap each run of bare text in a
+`<div>`, grouped one proposal per document. The wrapper goes around the text's
+**non-whitespace span only**: `"\n\n\n50\n"` becomes `"\n\n\n<div>50</div>\n"`,
+so the document's existing line breaks and indentation are untouched.
+
+**Why it's safe.** The text itself is never altered — not a character is added,
+removed or re-ordered; a wrapper appears around it and nothing else in the
+document is touched. `<div>` is chosen deliberately over `<p>`:
+
+- It makes **no claim about what the text is.** In the real corpus this text is
+  usually a chapter title or a stray paragraph a converter left behind; calling
+  it a paragraph would be a guess about intent, and calling it a heading more so.
+- It **renders where it already rendered.** A reading system already lays bare
+  text out in an anonymous block, which is exactly what a `<div>` is; a `<p>`
+  would add default margins and push the page around.
+
+**When it declines.** If the document doesn't parse, or it has no `<body>`,
+nothing is changed.
+
+**Whitespace is never wrapped.** Text nodes that are only whitespace — the line
+breaks between sibling elements — are left exactly as they are. They are not the
+defect (epubveri does not report them, and XHTML does not object to them), and
+they outnumber the real ones by more than a hundred to one: across the corpus's
+six affected books, `<body>` holds **7,594** whitespace-only text nodes against
+**54** real ones. A fixer that wrapped them all would bloat every book with
+thousands of empty `<div>`s.
 
 **Note — this fix used to happen invisibly.** Through 0.3.2 the writer always
 re-emitted `mimetype` first and stored, so merely producing output repaired this

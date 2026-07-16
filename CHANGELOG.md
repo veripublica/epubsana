@@ -12,6 +12,26 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
 ### Added
 
+- **A ninth fixer: `RSC-005` / `htm.epub2_dom.bare_text_in_body`**
+  (`fix.bare_text_in_body`, ConfirmNeeded). Wraps text sitting directly inside an
+  EPUB 2 `<body>` — which XHTML 1.1 forbids, since it wants block-level content
+  there — in a `<div>`, one proposal per document. The text itself is not
+  altered, and the wrapper goes around its non-whitespace span only, so the
+  document's existing line breaks and indentation stay exactly where they were.
+
+  `<div>` rather than `<p>` on purpose: it claims nothing about what the text
+  *is* (in the corpus it is chapter titles and converter leftovers alike), and it
+  reproduces the anonymous block a reading system already lays bare text out in,
+  so nothing moves on the page. That choice of default is what makes this
+  ConfirmNeeded rather than AutoSafe.
+
+  **Whitespace-only text nodes are never wrapped.** They are the line breaks
+  between sibling elements, epubveri does not report them, and across the six
+  affected corpus books `<body>` holds **7,594** of them against **54** real
+  ones — a fixer that wrapped them all would add thousands of empty `<div>`s per
+  book. Corpus, every fix approved: 12 proposals over 6 books clear all 54
+  findings, **5 more books become fully valid** (21 → 26), no regressions.
+
 - **An eighth fixer: `PKG-006` — `mimetype` is not the first entry**
   (`fix.mimetype_packaging`, AutoSafe). Re-emits the `mimetype` entry first and
   stored uncompressed, as OCF requires so a reading system can identify the file
