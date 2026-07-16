@@ -8,6 +8,34 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [Unreleased]
+
+### Added
+
+- **Two fixers for dangling references in the package document**, contributed as
+  requirements by `epublift`, which carried its own repair for them
+  ([#4](https://github.com/veripublica/epubsana/issues/4),
+  [#3](https://github.com/veripublica/epubsana/issues/3)):
+  - `RSC-001` / `opf.manifest_item.missing_resource` — a manifest `<item>`
+    declaring a resource the container doesn't hold. The declaration is dropped
+    **together with every reference that named it**: the spine `<itemref>`s it
+    would otherwise orphan, and a legacy `<meta name="cover">` pointing at it.
+    Those travel in a single proposal rather than separate ones, because
+    approving the item drop and declining the spine drop would leave you with an
+    `OPF-049` epubsana created itself.
+  - `OPF-049` / `opf.spine.itemref_idref_not_in_manifest` — a spine `<itemref>`
+    naming a manifest id that does not exist. Dropped; every other entry keeps
+    its place in the reading order.
+
+  Both are `ConfirmNeeded` — they are deletions that can shorten the reading
+  order or remove a cover declaration, and epubsana does not delete visible
+  structure unattended. Both decline rather than repair when the deletions would
+  leave `<spine>` with no children: a spine-less EPUB is not a repaired book.
+
+  On the 171-book corpus this clears every `RSC-001` (3 findings in 2 books) and
+  takes both books from invalid to **fully valid** — 26 → 28 books that epubsana
+  brings all the way to valid. No book gains a finding.
+
 ## [0.4.0] - 2026-07-16
 
 Two new fixers, and the writer stops quietly rewriting your container.

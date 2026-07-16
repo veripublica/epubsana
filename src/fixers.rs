@@ -24,6 +24,8 @@ pub fn plan(report: &Report, ws: &Workspace, _goal: Goal) -> Vec<ProposedFix> {
     fixes.extend(content_properties(report, ws));
     fixes.extend(empty_titles(report, ws));
     fixes.extend(bare_text_in_body(report, ws));
+    fixes.extend(manifest_dangling_items(report, ws));
+    fixes.extend(spine_dangling_itemrefs(report, ws));
     fixes.extend(mimetype_packaging(report, ws));
     // Future fixers append here, in a sensible confirm order.
     fixes
@@ -901,6 +903,308 @@ fn plan_body_text_wrapping(text: &str) -> Option<Vec<Range<usize>>> {
     Some(spans)
 }
 
+/// The `<itemref>` children of the package's `<spine>`, in document order.
+fn spine_itemrefs<'a, 'i>(doc: &'a roxmltree::Document<'i>) -> Vec<roxmltree::Node<'a, 'i>> {
+    doc.descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "spine")
+        .map(|s| {
+            s.children()
+                .filter(|n| n.is_element() && n.tag_name().name() == "itemref")
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Every `id` declared by a manifest `<item>`.
+fn manifest_ids<'a>(doc: &'a roxmltree::Document<'_>) -> HashSet<&'a str> {
+    doc.descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "item")
+        .filter_map(|n| n.attr_no_ns("id"))
+        .collect()
+}
+
+/// The manifest ids epubveri reported as declaring a missing resource.
+fn dangling_item_ids(report: &Report) -> BTreeSet<&str> {
+    report
+        .messages
+        .iter()
+        .filter(|m| m.rule == Some("opf.manifest_item.missing_resource"))
+        .filter_map(|m| m.params.first().map(String::as_str))
+        .collect()
+}
+
+/// Would the book still have a reading order if **every** spine deletion this
+/// pair of fixers could propose were approved?
+///
+/// The guard is shared, and computed against the whole book rather than one fix
+/// at a time, because that is the only way it holds: two dangling items with one
+/// spine entry each pass an individual check and empty the spine together. A
+/// spine-less EPUB is not a repaired book — it trades these findings for a
+/// differently broken book — so when nothing would survive, both fixers decline
+/// everything and leave it to a human.
+///
+/// An `<itemref>` dies if its `idref` names a dangling manifest item (the
+/// cascade) or names nothing in the manifest at all (a pre-existing `OPF-049`).
+/// Those two sets are disjoint by construction — see `spine_dangling_itemrefs`.
+fn spine_survives_dangling_drops(opf: &str, dangling: &BTreeSet<&str>) -> bool {
+    let Some(doc) = parse_xml(opf) else {
+        return false;
+    };
+    let ids = manifest_ids(&doc);
+    spine_itemrefs(&doc).iter().any(|ir| {
+        // An itemref with no `idref` at all is a different defect and not one we
+        // can count on as a survivor.
+        ir.attr_no_ns("idref")
+            .is_some_and(|idref| !dangling.contains(idref) && ids.contains(idref))
+    })
+}
+
+/// `RSC-001` / `opf.manifest_item.missing_resource`: a manifest `<item>` declares
+/// a resource the container doesn't hold. The declaration is simply false, and
+/// nothing in the book records what it was meant to point at — so the entry
+/// cannot be repaired *into* anything. Drop it, or keep the error; there is no
+/// third option a human would pick, which is what makes the fix determinate.
+///
+/// **The cascade travels with it, in the same proposal.** Dropping the item
+/// orphans every `<itemref>` naming it (an `OPF-049` epubsana would have created
+/// itself) and any legacy `<meta name="cover">` pointing at it. Those are not
+/// separate decisions and are deliberately not offered as separate choices: a
+/// user who approved the item and declined the spine entry would be left with a
+/// worse book than they started with.
+///
+/// We never re-resolve the href — epubveri reports the `id` in `params[0]` and
+/// the fixer finds the element by it. So "is this href remote rather than a
+/// container path?" never arises here: that is epubveri's call (its `RSC-001`
+/// site is guarded by `!is_external`), and a second opinion about what counts as
+/// missing would make epubsana a second detector.
+///
+/// `ConfirmNeeded`: it is a deletion that can shorten the reading order and can
+/// remove the book's cover declaration — both visible in a reading system's UI.
+fn manifest_dangling_items(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    // id -> the missing href, for the proposal text.
+    let mut items: BTreeMap<String, String> = BTreeMap::new();
+    for m in &report.messages {
+        if m.rule != Some("opf.manifest_item.missing_resource") {
+            continue;
+        }
+        let (Some(id), Some(href)) = (m.params.first(), m.params.get(1)) else {
+            continue;
+        };
+        items.insert(id.clone(), href.clone());
+    }
+    if items.is_empty() {
+        return Vec::new();
+    }
+    let Some(opf_path) = opf_path(ws) else {
+        return Vec::new();
+    };
+    let Some(opf) = ws.get_text(&opf_path) else {
+        return Vec::new();
+    };
+    if !spine_survives_dangling_drops(&opf, &dangling_item_ids(report)) {
+        return Vec::new();
+    }
+
+    let mut fixes = Vec::new();
+    for (id, href) in items {
+        let Some((_, spine_drops, cover_meta)) = compute_dangling_item_edits(&opf, &id) else {
+            continue;
+        };
+
+        let mut preview = vec![Change {
+            path: opf_path.clone(),
+            note: format!("manifest: drop item id=\"{id}\" (href=\"{href}\", missing)"),
+        }];
+        if spine_drops > 0 {
+            preview.push(Change {
+                path: opf_path.clone(),
+                note: format!("spine: drop {spine_drops} itemref(s) naming \"{id}\""),
+            });
+        }
+        if cover_meta {
+            preview.push(Change {
+                path: opf_path.clone(),
+                note: format!("metadata: drop <meta name=\"cover\"> naming \"{id}\""),
+            });
+        }
+
+        let opf_for_apply = opf_path.clone();
+        let id_for_apply = id.clone();
+        fixes.push(ProposedFix {
+            fix_id: "fix.manifest_dangling_item",
+            addresses_id: "RSC-001".to_string(),
+            addresses_rule: Some("opf.manifest_item.missing_resource"),
+            addresses_severity: addressed_severity(
+                report,
+                "RSC-001",
+                Some("opf.manifest_item.missing_resource"),
+            ),
+            tier: Tier::ConfirmNeeded,
+            title: format!("Drop the manifest item \"{id}\" — its resource \"{href}\" is missing"),
+            rationale:
+                "A manifest item claims a resource is part of the publication; the bytes are not \
+                 in the container, so the claim is false and nothing in the book records what it \
+                 was meant to point at. Every reference that named the item goes with it in the \
+                 same edit — the spine entries it orphans (a position no reading system could \
+                 render) and any legacy cover meta pointing at it. Nothing readable is lost: the \
+                 resource was already gone before the fix."
+                    .to_string(),
+            preview,
+            apply_fn: Box::new(move |ws: &mut Workspace| {
+                if let Some(text) = ws.get_text(&opf_for_apply)
+                    && let Some((edits, _, _)) = compute_dangling_item_edits(&text, &id_for_apply)
+                {
+                    ws.set_text(&opf_for_apply, apply_edits(&text, edits));
+                }
+            }),
+        });
+    }
+    fixes
+}
+
+/// The edits that drop the manifest `<item>` with `id` **and every reference
+/// that named it**: the spine `<itemref>`s, and the legacy `<meta name="cover">`.
+/// Also returns how many spine entries and whether a cover meta went with it, for
+/// the preview. `None` (decline) when the OPF won't parse or no item has that id.
+///
+/// The ranges are distinct elements and so never overlap. Deleting exactly the
+/// element's own bytes leaves the surrounding whitespace alone, which is the
+/// convention every surgical fixer here follows.
+fn compute_dangling_item_edits(opf: &str, id: &str) -> Option<(Vec<MetaEdit>, usize, bool)> {
+    let doc = parse_xml(opf)?;
+
+    let item = doc
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "item")
+        .find(|n| n.attr_no_ns("id") == Some(id))?;
+
+    let mut edits = vec![MetaEdit {
+        range: item.range(),
+        replacement: String::new(),
+    }];
+
+    let mut spine_drops = 0usize;
+    for ir in spine_itemrefs(&doc) {
+        if ir.attr_no_ns("idref") == Some(id) {
+            edits.push(MetaEdit {
+                range: ir.range(),
+                replacement: String::new(),
+            });
+            spine_drops += 1;
+        }
+    }
+
+    let mut cover_meta = false;
+    for m in doc
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "meta")
+    {
+        if m.attr_no_ns("name") == Some("cover") && m.attr_no_ns("content") == Some(id) {
+            edits.push(MetaEdit {
+                range: m.range(),
+                replacement: String::new(),
+            });
+            cover_meta = true;
+        }
+    }
+
+    Some((edits, spine_drops, cover_meta))
+}
+
+/// `OPF-049` / `opf.spine.itemref_idref_not_in_manifest`: a `<spine>` entry names
+/// a manifest id that doesn't exist. The entry is inert — no item, so no
+/// document, so nothing to render at that position. As with its sibling there is
+/// no information anywhere about what it meant to name, so drop it or keep the
+/// error. Deletion only; the reading order of everything remaining is unchanged.
+///
+/// **Why this cannot collide with `fix.manifest_dangling_item`,** which drops the
+/// itemrefs it orphans itself — a real worry given that epubsana plans every fix
+/// once, from the original report, and never re-plans. This fixer only ever sees
+/// an `OPF-049` *from that original report*, i.e. an `idref` already absent from
+/// the manifest before any fix ran; the cascade only ever touches `idref`s whose
+/// item was present at plan time (the item exists — its file is missing). The two
+/// sets are disjoint by construction, so plan-once is sound here rather than
+/// merely lucky. Anyone adding re-planning should re-check that argument.
+///
+/// `ConfirmNeeded`: a deletion from the reading order, and deletions get looked at.
+fn spine_dangling_itemrefs(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    let idrefs: BTreeSet<String> = report
+        .messages
+        .iter()
+        .filter(|m| m.rule == Some("opf.spine.itemref_idref_not_in_manifest"))
+        .filter_map(|m| m.params.first().cloned())
+        .collect();
+    if idrefs.is_empty() {
+        return Vec::new();
+    }
+    let Some(opf_path) = opf_path(ws) else {
+        return Vec::new();
+    };
+    let Some(opf) = ws.get_text(&opf_path) else {
+        return Vec::new();
+    };
+    if !spine_survives_dangling_drops(&opf, &dangling_item_ids(report)) {
+        return Vec::new();
+    }
+
+    let mut fixes = Vec::new();
+    for idref in idrefs {
+        let Some(edits) = compute_dangling_itemref_edits(&opf, &idref) else {
+            continue;
+        };
+        let n = edits.len();
+
+        let opf_for_apply = opf_path.clone();
+        let idref_for_apply = idref.clone();
+        fixes.push(ProposedFix {
+            fix_id: "fix.spine_dangling_itemref",
+            addresses_id: "OPF-049".to_string(),
+            addresses_rule: Some("opf.spine.itemref_idref_not_in_manifest"),
+            addresses_severity: addressed_severity(
+                report,
+                "OPF-049",
+                Some("opf.spine.itemref_idref_not_in_manifest"),
+            ),
+            tier: Tier::ConfirmNeeded,
+            title: format!("Drop the spine itemref \"{idref}\" — no manifest item declares it"),
+            rationale:
+                "A spine itemref whose idref resolves to nothing is a pointer to a hole: there is \
+                 no manifest item, therefore no document, therefore nothing a reading system can \
+                 render at that position. It cannot be repaired into anything, because nothing in \
+                 the book records what it was supposed to name. Every other spine entry keeps its \
+                 place."
+                    .to_string(),
+            preview: vec![Change {
+                path: opf_path.clone(),
+                note: format!("spine: drop {n} itemref(s) with idref=\"{idref}\""),
+            }],
+            apply_fn: Box::new(move |ws: &mut Workspace| {
+                if let Some(text) = ws.get_text(&opf_for_apply)
+                    && let Some(edits) = compute_dangling_itemref_edits(&text, &idref_for_apply)
+                {
+                    ws.set_text(&opf_for_apply, apply_edits(&text, edits));
+                }
+            }),
+        });
+    }
+    fixes
+}
+
+/// The edits that drop every spine `<itemref>` carrying `idref`. `None`
+/// (decline) when the OPF won't parse or no itemref carries it.
+fn compute_dangling_itemref_edits(opf: &str, idref: &str) -> Option<Vec<MetaEdit>> {
+    let doc = parse_xml(opf)?;
+    let edits: Vec<MetaEdit> = spine_itemrefs(&doc)
+        .iter()
+        .filter(|ir| ir.attr_no_ns("idref") == Some(idref))
+        .map(|ir| MetaEdit {
+            range: ir.range(),
+            replacement: String::new(),
+        })
+        .collect();
+    (!edits.is_empty()).then_some(edits)
+}
+
 /// `PKG-006`: the archive carries a `mimetype` entry, but not first. OCF wants
 /// it first and stored so a reader can identify the file from its opening bytes.
 ///
@@ -1423,6 +1727,134 @@ fn escape_xml_attr(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A package with one dangling item (`gone`), one live chapter, and a cover
+    /// meta naming a live image — enough to exercise the cascade and its guards.
+    const OPF: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="uid">
+  <metadata>
+    <meta name="cover" content="cover-img"/>
+  </metadata>
+  <manifest>
+    <item id="cover-img" href="cover.jpg" media-type="image/jpeg"/>
+    <item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="gone" href="gone.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine>
+    <itemref idref="ch1"/>
+    <itemref idref="gone"/>
+  </spine>
+</package>"#;
+
+    fn dropping(opf: &str, id: &str) -> String {
+        let (edits, _, _) = compute_dangling_item_edits(opf, id).expect("fix");
+        apply_edits(opf, edits)
+    }
+
+    #[test]
+    fn dangling_item_drops_the_item_and_cascades_into_the_spine() {
+        let (_, spine_drops, cover_meta) = compute_dangling_item_edits(OPF, "gone").expect("fix");
+        assert_eq!(spine_drops, 1, "the itemref naming it goes too");
+        assert!(!cover_meta, "it is not the declared cover");
+
+        let out = dropping(OPF, "gone");
+        assert!(!out.contains("id=\"gone\""), "item dropped");
+        assert!(
+            !out.contains("idref=\"gone\""),
+            "the OPF-049 we would have created is dropped in the same edit"
+        );
+        assert!(out.contains("id=\"ch1\"") && out.contains("idref=\"ch1\""));
+    }
+
+    #[test]
+    fn dangling_cover_item_takes_its_cover_meta_with_it() {
+        let (_, spine_drops, cover_meta) =
+            compute_dangling_item_edits(OPF, "cover-img").expect("fix");
+        assert_eq!(spine_drops, 0, "an image is not in the spine");
+        assert!(cover_meta, "the meta that named it points at a hole now");
+
+        let out = dropping(OPF, "cover-img");
+        assert!(
+            !out.contains("name=\"cover\""),
+            "the dangling cover meta goes"
+        );
+        assert!(out.contains("id=\"ch1\""), "nothing else is touched");
+    }
+
+    #[test]
+    fn dangling_item_declines_when_no_item_carries_the_id() {
+        assert!(compute_dangling_item_edits(OPF, "no-such-id").is_none());
+    }
+
+    #[test]
+    fn spine_survives_when_a_live_itemref_remains() {
+        let dangling = BTreeSet::from(["gone"]);
+        assert!(spine_survives_dangling_drops(OPF, &dangling));
+    }
+
+    /// The guard is per book, not per fix, and this is why: two dangling items
+    /// with one spine entry each each pass an individual check and empty the
+    /// spine together.
+    #[test]
+    fn spine_does_not_survive_when_every_entry_is_dangling() {
+        let opf = OPF.replace("<itemref idref=\"ch1\"/>", "<itemref idref=\"gone2\"/>");
+        let dangling = BTreeSet::from(["gone", "gone2"]);
+        assert!(
+            !spine_survives_dangling_drops(&opf, &dangling),
+            "a spine-less EPUB is not a repaired book — decline instead"
+        );
+    }
+
+    /// An itemref naming nothing at all also dies, so it counts against survival
+    /// even though a *different* fixer drops it.
+    #[test]
+    fn spine_survival_counts_pre_existing_dangling_itemrefs_too() {
+        let opf = OPF.replace("<itemref idref=\"ch1\"/>", "<itemref idref=\"never\"/>");
+        assert!(!spine_survives_dangling_drops(
+            &opf,
+            &BTreeSet::from(["gone"])
+        ));
+    }
+
+    #[test]
+    fn dangling_itemref_drops_only_its_own_entry() {
+        let opf = OPF.replace("<itemref idref=\"gone\"/>", "<itemref idref=\"never\"/>");
+        let edits = compute_dangling_itemref_edits(&opf, "never").expect("fix");
+        assert_eq!(edits.len(), 1);
+        let out = apply_edits(&opf, edits);
+        assert!(!out.contains("idref=\"never\""));
+        assert!(
+            out.contains("idref=\"ch1\""),
+            "the reading order keeps its place"
+        );
+    }
+
+    #[test]
+    fn dangling_itemref_declines_when_no_entry_carries_the_idref() {
+        assert!(compute_dangling_itemref_edits(OPF, "no-such-id").is_none());
+    }
+
+    /// The two fixers never contend for the same `<itemref>` — the cascade only
+    /// touches idrefs whose item exists at plan time, the OPF-049 fixer only
+    /// idrefs already absent from the manifest. Plan-once is sound because the
+    /// sets are disjoint, not because we got lucky.
+    #[test]
+    fn the_two_dangling_fixers_touch_disjoint_itemrefs() {
+        let opf = OPF.replace(
+            "<itemref idref=\"ch1\"/>",
+            "<itemref idref=\"ch1\"/>\n    <itemref idref=\"never\"/>",
+        );
+        let (cascade, _, _) = compute_dangling_item_edits(&opf, "gone").expect("fix");
+        let standalone = compute_dangling_itemref_edits(&opf, "never").expect("fix");
+        for a in &cascade {
+            for b in &standalone {
+                assert!(
+                    a.range.end <= b.range.start || b.range.end <= a.range.start,
+                    "the two fixers' edits must never overlap"
+                );
+            }
+        }
+    }
 
     #[test]
     fn sanitize_leading_digit_uuid_gets_prefix() {

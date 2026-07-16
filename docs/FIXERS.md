@@ -32,6 +32,8 @@ grows one carefully-argued entry at a time.
 | `OPF-014` | `opf.content_document.property_used_undeclared` | AutoSafe | A content document uses a feature its manifest item doesn't declare | [Add the token to that item's `properties`](#opf-014--undeclared-content-property) |
 | `PKG-006` | *(none)* | AutoSafe | The `mimetype` entry is not first in the ZIP, as OCF requires | [Re-emit it first and stored, touching no content](#pkg-006--mimetype-is-not-the-first-entry) |
 | `RSC-005` | `htm.epub2_dom.bare_text_in_body` | ConfirmNeeded | EPUB 2 text sits directly in `<body>` with no block-level element around it | [Wrap the text in a `<div>`, leaving whitespace alone](#rsc-005--bare-text-directly-in-body-epub-2) |
+| `RSC-001` | `opf.manifest_item.missing_resource` | ConfirmNeeded | A manifest `<item>` declares a resource the container doesn't hold | [Drop the item, and every reference that named it](#rsc-001--dangling-manifest-item) |
+| `OPF-049` | `opf.spine.itemref_idref_not_in_manifest` | ConfirmNeeded | A spine `<itemref>` names a manifest id that doesn't exist | [Drop the itemref](#opf-049--dangling-spine-itemref) |
 
 **A note on structural fixers.** Fixers that must locate an element (rather than
 match a token) parse the document with `roxmltree` using `allow_dtd: true`, the
@@ -258,6 +260,12 @@ rewritten.
 nothing to move — epubsana will not create one, because inventing a mimetype is
 asserting what the file *is* rather than repairing how it is packaged.
 
+**Note — this fix used to happen invisibly.** Through 0.3.2 the writer always
+re-emitted `mimetype` first and stored, so merely producing output repaired this
+defect with no proposal and no approval. That contradicted epubsana's first
+guarantee, so the writer now preserves packaging exactly and this fixer proposes
+the repair in the open, where you can see it and decline it.
+
 ---
 
 ## RSC-005 — bare text directly in `<body>` (EPUB 2)
@@ -296,8 +304,112 @@ six affected books, `<body>` holds **7,594** whitespace-only text nodes against
 **54** real ones. A fixer that wrapped them all would bloat every book with
 thousands of empty `<div>`s.
 
-**Note — this fix used to happen invisibly.** Through 0.3.2 the writer always
-re-emitted `mimetype` first and stored, so merely producing output repaired this
-defect with no proposal and no approval. That contradicted epubsana's first
-guarantee, so the writer now preserves packaging exactly and this fixer proposes
-the repair in the open, where you can see it and decline it.
+---
+
+## RSC-001 — dangling manifest item
+
+**Finding.** `opf.manifest_item.missing_resource`. A manifest `<item>` declares a
+resource that isn't in the container: `<item id="cover-1" href="cover-1.jpg"/>`
+with no such entry. epubveri reports the item's `id` in `params[0]` and the
+unresolvable `href` in `params[1]`.
+
+**Fix** (`fix.manifest_dangling_item`, ConfirmNeeded). Drop the `<item>` element —
+**and, in the same proposal, every reference in the package that named it**:
+
+1. any `<spine><itemref idref="…"/>` whose `idref` is the dropped item's `id`;
+2. the legacy `<meta name="cover" content="…"/>` if its `content` is that `id`.
+
+These are not separate fixes and are deliberately not offered as separate
+choices. A user who approved the item drop but declined the spine drop would be
+left with an `OPF-049` that epubsana itself created — a book worse than the one
+it started with. One decision, one proposal, one atomic edit.
+
+**Why it's safe.** A manifest item is a claim that a resource is part of the
+publication. When the bytes aren't there, the claim is simply false, and no
+amount of judgement recovers them — the entry cannot be repaired *into* anything,
+because nothing in the book records what it was meant to point at. So the only
+options are "drop it" or "keep the error"; there is no third option a human would
+pick, which is what makes the fix determinate.
+
+Nothing readable is lost by the cascade either. A spine entry naming an item
+whose file is missing is a position in the reading order that no reading system
+can render; dropping it removes a hole, not a chapter. The cover `<meta>` is the
+same argument one level up: it points at a pointer to a hole, and the book had no
+cover before the fix or after it.
+
+It is `ConfirmNeeded` rather than `AutoSafe` because it is a **deletion** that can
+shorten the reading order and can remove the book's cover declaration. Both are
+visible in a reading system's UI, and epubsana does not delete visible structure
+unattended, however sound the argument.
+
+**We do not re-resolve the href — and that is the point.** epubveri hands us the
+`id` in `params[0]`; the fixer finds the element by that id and never touches
+path resolution. So the "is this href a remote URL rather than a container path?"
+question does not arise here: whether a remote `href` is a missing resource is
+epubveri's call, and if it ever answers that wrongly, the fix is an epubveri
+issue, not a guard bolted on here. epubveri detects; epubsana repairs what it
+reports. A second opinion about what counts as missing would make epubsana a
+second detector.
+
+(For the record, epubveri already gets this right: its `RSC-001` site is guarded
+by `if !is_external(href)`, so a remote `href` never reaches us as a missing
+resource. That is a reason to trust the boundary, not a reason to duplicate the
+check — if it ever regressed, a guard here would hide the bug rather than fix it.)
+
+**When it declines.**
+
+- If the OPF won't parse, or no manifest item carries the reported `id`.
+- **If the cascade would empty the `<spine>`.** A book whose every spine entry
+  names a missing resource has no reading order at all, and emitting a spine-less
+  EPUB trades this finding for a different broken book rather than repairing
+  anything. epubsana reports it and leaves it for a human.
+
+**Measured.** 2 books in the 171-book corpus, both the same shape: a conversion
+left `cover-1.jpg`/`cover-2.jpg` declared beside the real, present cover
+(`id="cover"` → `cover.jpeg`, which is what `<meta name="cover">` actually names).
+On this corpus neither guard fires — the dangling items are images, so nothing in
+the spine references them, and they are not the declared cover. Grepping every
+content document, the NCX and the OPF confirms the manifest entry itself is the
+**only** thing in either book that mentions them. The guards above are therefore
+argued rather than corpus-tested, and are covered by unit tests instead.
+
+---
+
+## OPF-049 — dangling spine itemref
+
+**Finding.** `opf.spine.itemref_idref_not_in_manifest`. A `<spine>` entry names a
+manifest id that doesn't exist: `<itemref idref="no-such-id"/>`.
+
+**Fix** (`fix.spine_dangling_itemref`, ConfirmNeeded). Drop the `<itemref>`
+element. Deletion only; no other spine entry is touched and the reading order of
+everything that remains is unchanged.
+
+**Why it's safe.** The entry is inert. There is no manifest item, therefore no
+document, therefore nothing to render at that position — it is a pointer to a
+hole, and as with the dangling manifest item there is no information anywhere in
+the book about what it was supposed to name. Drop it or keep the error; there is
+no better third option.
+
+`ConfirmNeeded` for the same reason as its sibling: it is a deletion from the
+reading order, and deletions get looked at.
+
+**Why it does not collide with `fix.manifest_dangling_item`.** That fixer drops
+the spine entries it orphans itself, so an obvious worry is the two fighting over
+the same `<itemref>` — especially since epubsana plans every fix once, from the
+original report, and never re-plans. They cannot collide, and the reason is worth
+stating: this fixer only ever sees an `OPF-049` **from the original report**,
+i.e. an `idref` that was already absent from the manifest before any fix ran. The
+cascade fixer only ever touches `idref`s that *were* present at plan time (their
+item exists — it is the item's file that is missing). The two sets are disjoint by
+construction, so plan-once is sound here rather than merely lucky.
+
+**When it declines.**
+
+- If the OPF won't parse, or no `<itemref>` carries the reported `idref`.
+- **If dropping it would leave `<spine>` with no children** — same invariant as
+  the sibling fixer, same reason.
+
+**Measured.** 0 books in the 171-book corpus, which carries no spine-level finding
+at all; verified by injection only. It lands regardless of its own frequency
+because `fix.manifest_dangling_item` needs the concept to exist and the invariant
+to be shared — the two were specified as one unit.

@@ -297,10 +297,17 @@ safe, and when epubsana declines, see the **[fix catalogue](./FIXERS.md)**.
 | `OPF-014` | `opf.content_document.property_used_undeclared` | AutoSafe | Adds the property a content document demonstrably uses (`scripted`, `svg`, `remote-resources`, `switch`) to its manifest item's `properties`. The document itself is not touched — the manifest is made to tell the truth about it. |
 | `PKG-006` | *(none)* | AutoSafe | Moves the `mimetype` entry to the front of the ZIP, stored uncompressed, as OCF requires. Changes no content at all — not one byte of any entry, `mimetype` included; only where it sits and how it's compressed. Declines if there is no `mimetype` entry to move. |
 | `RSC-005` | `htm.epub2_dom.bare_text_in_body` | ConfirmNeeded | Wraps EPUB 2 text sitting directly in `<body>` in a `<div>`, which XHTML 1.1 requires. The text is not altered and the whitespace around it stays put — only a wrapper appears. `<div>` rather than `<p>`: it claims nothing about what the text is, and matches the anonymous block the text already renders as, so the page doesn't move. |
+| `RSC-001` | `opf.manifest_item.missing_resource` | ConfirmNeeded | Drops a manifest `<item>` declaring a resource the container doesn't hold — **and, in the same approval, every reference that named it**: the spine `<itemref>`s it would orphan, and a legacy `<meta name="cover">` pointing at it. Nothing readable is lost, because the resource was already gone. Declines if the deletions would empty the `<spine>`. |
+| `OPF-049` | `opf.spine.itemref_idref_not_in_manifest` | ConfirmNeeded | Drops a spine `<itemref>` naming a manifest id that doesn't exist — a position no reading system can render, and one nothing in the book says how to repair. Every other entry keeps its place. Declines if it would empty the `<spine>`. |
 
-Findings not in this table — missing resources, dangling links, arbitrary schema
-violations, and anything requiring content epubsana would have to invent — are
-reported by epubveri but **left untouched**. epubsana never guesses.
+Findings not in this table — dangling links, arbitrary schema violations, and
+anything requiring content epubsana would have to invent — are reported by
+epubveri but **left untouched**. epubsana never guesses.
+
+Note the shape of the two dangling-reference fixers: they only ever delete a
+pointer to something that **isn't there**, which is why deleting loses nothing.
+A reference to a resource that *does* exist is never dropped to silence a
+finding — that would be destroying content to make a validator happy.
 
 More fixers land in real-world impact order. See
 [epubveri](https://github.com/veripublica/epubveri) for the full catalogue of
