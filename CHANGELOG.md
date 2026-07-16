@@ -8,6 +8,58 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [Unreleased]
+
+### Added
+
+- **An eighth fixer: `PKG-006` — `mimetype` is not the first entry**
+  (`fix.mimetype_packaging`, AutoSafe). Re-emits the `mimetype` entry first and
+  stored uncompressed, as OCF requires so a reading system can identify the file
+  from its opening bytes. It is the first fixer that touches **no content at
+  all** — not one byte of any entry, `mimetype` included; only that entry's
+  position and compression method change, and OCF allows exactly one answer for
+  each. Declines when there is no `mimetype` entry to move: inventing one would
+  assert what the file *is* rather than repair how it is packaged. Dispatches on
+  the bare `id` (like `NCX-001`), which `PKG-006` can carry alone — it says one
+  thing and its subject is the container itself, so nothing needs
+  disambiguating.
+
+  This is the repair the writer used to perform invisibly (see below). The
+  round-trip is now honest end to end: on the corpus the same **2 books of 171**
+  are repaired as before, but as a proposal you can see, approve, or decline.
+
+### Fixed
+
+- **Untouched entries are no longer decompressed and recompressed.** The writer
+  rebuilt every entry from scratch, so writing any output re-deflated the whole
+  container: measured across a 171-book corpus, **not one book** survived a
+  no-op load-and-write unchanged — 166 grew, 13 had entries silently switch
+  compression method, and `META-INF/` directory entries were dropped outright.
+  The original archive is now retained and any entry a fix did not rewrite is
+  raw-copied: same compressed bytes, method, timestamp, order, directories
+  included. An entry a fix *does* rewrite keeps the compression method the
+  original used, rather than defaulting to deflate.
+- **The container is no longer normalized behind your back.** `serialize()`
+  always re-emitted `mimetype` first and stored, which repaired `PKG-005` /
+  `PKG-007` as a side effect of writing *any* output — with no fix item, no
+  proposal and no approval. That directly contradicted the crate's own "no
+  mutation without an approved fix" guarantee. Packaging is now preserved
+  exactly as it arrived; a book whose `mimetype` violates OCF keeps saying so
+  until a fix proposes otherwise. On the corpus this affects **2 books of 171**
+  (the other 169 already package `mimetype` correctly), whose real packaging
+  defect epubveri now reports instead of epubsana quietly laundering it.
+
+### Changed
+
+- **`docs/USAGE.md`'s safety guarantees now state what is actually true.** They
+  claimed "every other byte of the container round-trips unchanged" — false for
+  every book measured. A repaired container is *not* byte-identical to its
+  input: the zip writer derives local headers rather than copying them (the
+  version-needed field and general-purpose hint bits come out as its own, ~180
+  bytes per book). Every byte of every entry's *data* is preserved, which is the
+  guarantee that was meant, and nothing semantic is lost — bit 11, the UTF-8
+  entry-name flag, is re-derived from the name.
+
 ## [0.3.2] - 2026-07-16
 
 Tracks `epubveri` 0.5.9. No epubsana source changed — the fixers key on the

@@ -23,6 +23,7 @@ pub fn plan(report: &Report, ws: &Workspace, _goal: Goal) -> Vec<ProposedFix> {
     fixes.extend(manifest_href_spaces(report, ws));
     fixes.extend(content_properties(report, ws));
     fixes.extend(empty_titles(report, ws));
+    fixes.extend(mimetype_packaging(report, ws));
     // Future fixers append here, in a sensible confirm order.
     fixes
 }
@@ -761,6 +762,53 @@ fn manifest_href_spaces(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
         });
     }
     fixes
+}
+
+/// `PKG-006`: the archive carries a `mimetype` entry, but not first. OCF wants
+/// it first and stored so a reader can identify the file from its opening bytes.
+///
+/// Dispatches on the bare `id` — `PKG-006` has no `rule` sub-code and needs
+/// none: it says one thing, and its subject is the container itself, so unlike
+/// `OPF-073` there is nothing to disambiguate.
+///
+/// The only fixer that touches **no content at all**: not one byte of any entry,
+/// `mimetype` included. Only its position and compression method change, and OCF
+/// allows exactly one answer for both. Pure `AutoSafe`.
+///
+/// Through 0.3.2 the writer did this unconditionally, repairing the defect as a
+/// side effect of producing output — no proposal, no approval. The writer now
+/// preserves packaging, and this proposes the repair in the open.
+fn mimetype_packaging(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    if !report.messages.iter().any(|m| m.id == "PKG-006") {
+        return Vec::new();
+    }
+    // Nothing to move — and we will not invent a mimetype, since that asserts
+    // what the file *is* rather than repairing how it is packaged.
+    if ws.get_text("mimetype").is_none() {
+        return Vec::new();
+    }
+
+    vec![ProposedFix {
+        fix_id: "fix.mimetype_packaging",
+        addresses_id: "PKG-006".to_string(),
+        addresses_rule: None,
+        addresses_severity: addressed_severity(report, "PKG-006", None),
+        tier: Tier::AutoSafe,
+        title: "Move the `mimetype` entry first in the container, stored uncompressed".to_string(),
+        rationale: "OCF requires the `mimetype` entry to be the archive's first entry and to be \
+             stored uncompressed, so a reading system can identify the file from its opening \
+             bytes. This changes no content whatsoever — not one byte of any entry, `mimetype` \
+             included — only where that entry sits and how it is compressed. Every other entry \
+             keeps its original order, bytes and compression."
+            .to_string(),
+        preview: vec![Change {
+            path: "mimetype".to_string(),
+            note:
+                "move to the first entry in the ZIP and store it uncompressed (contents unchanged)"
+                    .to_string(),
+        }],
+        apply_fn: Box::new(move |ws: &mut Workspace| ws.repackage_mimetype()),
+    }]
 }
 
 /// One edit per manifest `item` whose `href` is exactly one of `hrefs`: the same

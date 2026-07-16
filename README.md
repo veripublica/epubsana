@@ -13,7 +13,7 @@ changed**. It never guesses, and it preserves everything it doesn't touch.
 ## Status
 
 Early but working. The core contract (`Workspace` → detect → propose → confirm →
-apply → report) is solid, with seven fixers so far:
+apply → report) is solid, with eight fixers so far:
 
 - **`RSC-016`** — undeclared HTML entities (`&nbsp;`, `&mdash;`, …) → the exact
   character each denotes.
@@ -26,6 +26,8 @@ apply → report) is solid, with seven fixers so far:
 - **`RSC-020`** — an unencoded space in a manifest `href` → `%20`.
 - **`OPF-014`** — a content property a document demonstrably uses → declared on
   its manifest item.
+- **`PKG-006`** — a `mimetype` entry that isn't first in the ZIP → moved to the
+  front, stored, with no content touched at all.
 
 More fixers land next, in real-world impact order.
 

@@ -30,6 +30,7 @@ grows one carefully-argued entry at a time.
 | `RSC-005` | `opf.content_document.empty_title` | ConfirmNeeded | An XHTML `<title>` element is empty | [Fill it from the book's own TOC label, else its first heading](#rsc-005--empty-title) |
 | `RSC-020` | `opf.manifest_item.unencoded_space_in_href` | AutoSafe | A manifest `href` contains a raw space | [Percent-encode the space as `%20`](#rsc-020--unencoded-space-in-a-manifest-href) |
 | `OPF-014` | `opf.content_document.property_used_undeclared` | AutoSafe | A content document uses a feature its manifest item doesn't declare | [Add the token to that item's `properties`](#opf-014--undeclared-content-property) |
+| `PKG-006` | *(none)* | AutoSafe | The `mimetype` entry is not first in the ZIP, as OCF requires | [Re-emit it first and stored, touching no content](#pkg-006--mimetype-is-not-the-first-entry) |
 
 **A note on structural fixers.** Fixers that must locate an element (rather than
 match a token) parse the document with `roxmltree` using `allow_dtd: true`, the
@@ -231,3 +232,33 @@ exactly this declaration.
 
 **When it declines.** If the OPF won't parse, no manifest item resolves to the
 document, or the property is already declared, nothing is changed.
+
+---
+
+## PKG-006 — `mimetype` is not the first entry
+
+**Finding.** `PKG-006` (no `rule` sub-code — the code is unambiguous on its own,
+and its subject is the container itself, so there is nothing to disambiguate).
+The archive has a `mimetype` entry, but it is not the first one. OCF requires the
+`mimetype` entry to come first and to be stored uncompressed, so that a reader
+can identify the file by reading its opening bytes.
+
+**Fix** (`fix.mimetype_packaging`, AutoSafe). Re-emit the `mimetype` entry first
+and stored. Every other entry keeps its original order, bytes and compression.
+
+**Why it's safe.** This is the rare fix that changes **no content whatsoever** —
+not one byte of any entry, `mimetype` included. Only the entry's *position* in
+the archive and its compression method change, which is exactly what the finding
+is about, and OCF permits exactly one correct answer: first, and stored. Nothing
+inside the book can be corrupted by it because nothing inside the book is read or
+rewritten.
+
+**When it declines.** If the archive has no `mimetype` entry at all, there is
+nothing to move — epubsana will not create one, because inventing a mimetype is
+asserting what the file *is* rather than repairing how it is packaged.
+
+**Note — this fix used to happen invisibly.** Through 0.3.2 the writer always
+re-emitted `mimetype` first and stored, so merely producing output repaired this
+defect with no proposal and no approval. That contradicted epubsana's first
+guarantee, so the writer now preserves packaging exactly and this fixer proposes
+the repair in the open, where you can see it and decline it.

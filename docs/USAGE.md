@@ -295,6 +295,7 @@ safe, and when epubsana declines, see the **[fix catalogue](./FIXERS.md)**.
 | `RSC-005` | `opf.content_document.empty_title` | ConfirmNeeded | Fills an empty `<title></title>` with text **from the book itself**: the label its table of contents gives that document, or failing that the document's own first heading. Declines when the book names the document nowhere — it never invents a title, and never falls back to the book's own `dc:title`. |
 | `RSC-020` | `opf.manifest_item.unencoded_space_in_href` | AutoSafe | Percent-encodes a raw space in a manifest `href` (`ch 1.xhtml` → `ch%201.xhtml`). The file keeps its name; only the URL is spelled legally. |
 | `OPF-014` | `opf.content_document.property_used_undeclared` | AutoSafe | Adds the property a content document demonstrably uses (`scripted`, `svg`, `remote-resources`, `switch`) to its manifest item's `properties`. The document itself is not touched — the manifest is made to tell the truth about it. |
+| `PKG-006` | *(none)* | AutoSafe | Moves the `mimetype` entry to the front of the ZIP, stored uncompressed, as OCF requires. Changes no content at all — not one byte of any entry, `mimetype` included; only where it sits and how it's compressed. Declines if there is no `mimetype` entry to move. |
 
 Findings not in this table — missing resources, dangling links, arbitrary schema
 violations, and anything requiring content epubsana would have to invent — are
@@ -312,8 +313,17 @@ These invariants hold for every fixer:
 
 - **No mutation without an approved fix.** In the default mode you approve each
   one; `--auto-safe` auto-approves only *AutoSafe* fixes; `--yes` approves all.
-- **Surgical and content-preserving.** A fix edits only what it must; every
-  other byte of the container round-trips unchanged.
+- **Surgical and content-preserving.** A fix edits only what it must. An entry
+  no fix touched is never decompressed and recompressed — its compressed bytes,
+  compression method and timestamp are copied through as-is, and entry order and
+  directory entries are kept. (The zip local headers themselves are rebuilt by
+  the writer, so a repaired container is not *byte*-identical to its input; every
+  byte of every entry's data is.)
+- **The container is never quietly normalized.** epubsana does not repackage
+  anything as a side effect of writing output — not even a `mimetype` entry that
+  violates OCF. If your packaging is wrong, epubveri reports it and it stays
+  reported; a defect epubsana did not propose and you did not approve is a defect
+  epubsana did not touch.
 - **Never guess.** If a finding has no safe, determinate fix, epubsana declines
   it rather than risk the content.
 - **Independently re-validated.** After applying fixes, the whole book is
