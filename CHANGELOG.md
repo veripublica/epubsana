@@ -53,6 +53,28 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
   targets. Not present in the reference corpus, which contains no Kindle→EPUB
   conversions — it lands on `epublift`'s reproduction of it in the wild.
 
+### Changed
+
+- **Track `epubveri` 0.5.12** (from 0.5.9). No source change — the `rule`/`params`
+  contract held across the bump; the effect is behavioural, driven by two upstream
+  fixes we reported and measured:
+  - [epubveri#23](https://github.com/veripublica/epubveri/issues/23): EPUB 2
+    documents with DTD-declared entities (`&nbsp;` under an XHTML 1.1 DOCTYPE) now
+    parse, so a class of false `RSC-012` "fragment not defined" findings is gone.
+    On the corpus, `RSC-012` drops from 1247 to 172 — the 172 are the genuinely
+    dangling fragments, the ~1075 removed were the detector failing to read a valid
+    document and calling its ids absent. `empty_title` findings rise +157 as the
+    same documents become readable.
+  - [epubveri#25](https://github.com/veripublica/epubveri/issues/25): a regression
+    in 0.5.10/0.5.11 that turned any EPUB 2 document with a `[` in its body (a
+    footnote marker) into a false fatal. The corpus had 78 such false fatals across
+    11 books on 0.5.11; 0.5.12 has zero.
+
+  Net on the 171-book corpus: 28 → **30** books brought all the way to valid, still
+  zero regressions. The manifest floor is now `epubveri = "0.5.12"` — 0.5.9 is wrong
+  86% of the time on `RSC-012`, and 0.5.10/0.5.11 carry the #25 false fatal, so
+  building against any of them is not acceptable.
+
 ## [0.4.0] - 2026-07-16
 
 Two new fixers, and the writer stops quietly rewriting your container.
