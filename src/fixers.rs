@@ -19,6 +19,8 @@ pub fn plan(report: &Report, ws: &Workspace, _goal: Goal) -> Vec<ProposedFix> {
     fixes.extend(html_entities(report, ws));
     fixes.extend(entity_missing_semicolon(report, ws));
     fixes.extend(ncx_ncnames(report, ws));
+    fixes.extend(ncx_duplicate_ids(report, ws));
+    fixes.extend(ncx_play_order(report, ws));
     fixes.extend(content_type_meta(report, ws));
     fixes.extend(ncx_dtb_uid(report, ws));
     fixes.extend(manifest_href_spaces(report, ws));
@@ -544,6 +546,232 @@ fn ncx_ncnames(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
         });
     }
     fixes
+}
+
+/// `RSC-005` / `ncx.ids.duplicate_id`: two or more NCX elements share an `id`.
+/// Keep the first occurrence; rename every later one to a fresh unique id (the
+/// value suffixed `-2`, `-3`, … until unique). NCX ids are not IDREF targets, so
+/// no reference is rewritten. Disjoint from [`ncx_ncnames`] by construction — that
+/// fixer only touches ids occurring exactly once, a duplicate occurs more than
+/// once — so plan-once is sound. `ConfirmNeeded` (a visible id change).
+fn ncx_duplicate_ids(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    // file -> ordered, de-duplicated reported id values.
+    let mut by_file: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for m in &report.messages {
+        if m.rule != Some("ncx.ids.duplicate_id") {
+            continue;
+        }
+        let (Some(file), Some(dup)) = (m.location.as_deref(), m.params.first()) else {
+            continue;
+        };
+        let list = by_file.entry(file.to_string()).or_default();
+        if !list.contains(dup) {
+            list.push(dup.clone());
+        }
+    }
+
+    let mut fixes = Vec::new();
+    for (file, dups) in by_file {
+        let Some(text) = ws.get_text(&file) else {
+            continue;
+        };
+        let mut used = existing_ids(&text);
+        // Plan the fixed new-id per later occurrence, so apply is deterministic
+        // and robust to any earlier edit of this NCX.
+        let mut plan: Vec<(String, Vec<String>)> = Vec::new();
+        for dup in &dups {
+            let occ = attr_occurrences(&text, dup);
+            if occ < 2 {
+                continue; // stale finding — nothing duplicated
+            }
+            let news: Vec<String> = (1..occ)
+                .map(|_| {
+                    let new = make_unique(dup.clone(), &used);
+                    used.insert(new.clone());
+                    new
+                })
+                .collect();
+            plan.push((dup.clone(), news));
+        }
+        if plan.is_empty() {
+            continue;
+        }
+
+        let preview: Vec<Change> = plan
+            .iter()
+            .map(|(dup, news)| Change {
+                path: file.clone(),
+                note: format!(
+                    "rename {} duplicate NCX id(s) \"{dup}\" → {news:?}",
+                    news.len()
+                ),
+            })
+            .collect();
+        let n: usize = plan.iter().map(|(_, news)| news.len()).sum();
+        let plan_for_apply = plan.clone();
+        let file_for_apply = file.clone();
+
+        fixes.push(ProposedFix {
+            fix_id: "fix.ncx_duplicate_id",
+            addresses_id: "RSC-005".to_string(),
+            addresses_rule: Some("ncx.ids.duplicate_id"),
+            addresses_severity: addressed_severity(report, "RSC-005", Some("ncx.ids.duplicate_id")),
+            tier: Tier::ConfirmNeeded,
+            title: format!(
+                "Make {n} duplicate NCX id{} unique in {file}",
+                if n == 1 { "" } else { "s" },
+            ),
+            rationale:
+                "Two or more NCX elements share an id. The first keeps it; each later duplicate is \
+                 renamed to a unique value. NCX ids are not referenced by IDREF anywhere in an \
+                 EPUB, so this rewrites no reference and cannot introduce a dangling one."
+                    .to_string(),
+            preview,
+            apply_fn: Box::new(move |ws: &mut Workspace| {
+                if let Some(mut text) = ws.get_text(&file_for_apply) {
+                    for (dup, news) in &plan_for_apply {
+                        text = rename_later_id_occurrences(&text, dup, news);
+                    }
+                    ws.set_text(&file_for_apply, text);
+                }
+            }),
+        });
+    }
+    fixes
+}
+
+/// Rename every boundary-checked `id="dup"` occurrence **after the first** to
+/// `news[k]` in order; the first is left as-is. `news` has one entry per later
+/// occurrence (see the planning in [`ncx_duplicate_ids`]).
+fn rename_later_id_occurrences(text: &str, dup: &str, news: &[String]) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut pos = 0usize;
+    let mut seen = 0usize;
+    loop {
+        // Earliest boundary-checked `id="dup"` / `id='dup'` at or after `pos`.
+        let mut best: Option<(usize, char, usize)> = None;
+        for quote in ['"', '\''] {
+            let needle = format!("id={quote}{dup}{quote}");
+            let mut from = pos;
+            while let Some(rel) = text[from..].find(&needle) {
+                let start = from + rel;
+                if is_attr_boundary(text, start) {
+                    if best.is_none_or(|(b, _, _)| start < b) {
+                        best = Some((start, quote, needle.len()));
+                    }
+                    break;
+                }
+                from = start + needle.len();
+            }
+        }
+        let Some((start, quote, len)) = best else {
+            break;
+        };
+        out.push_str(&text[pos..start]);
+        if seen == 0 {
+            out.push_str(&text[start..start + len]); // keep the first
+        } else if let Some(new) = news.get(seen - 1) {
+            out.push_str(&format!("id={quote}{new}{quote}"));
+        } else {
+            out.push_str(&text[start..start + len]); // more occurrences than planned — leave it
+        }
+        seen += 1;
+        pos = start + len;
+    }
+    out.push_str(&text[pos..]);
+    out
+}
+
+/// `RSC-005` / `ncx.play_order.duplicate`: navigation elements repeat a
+/// `playOrder`. Renumber **every** `playOrder` in the NCX to its 1-based position
+/// in document order — the canonical assignment (`playOrder` mirrors document
+/// order), unique in one pass. `playOrder` is only a hint; the real reading order
+/// is the spine, untouched. `ConfirmNeeded` (rewrites values broadly).
+fn ncx_play_order(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    let files: BTreeSet<&str> = report
+        .messages
+        .iter()
+        .filter(|m| m.rule == Some("ncx.play_order.duplicate"))
+        .filter_map(|m| m.location.as_deref())
+        .collect();
+
+    let mut fixes = Vec::new();
+    for file in files {
+        let Some(text) = ws.get_text(file) else {
+            continue;
+        };
+        let (renumbered, count) = renumber_play_order(&text);
+        if count == 0 || renumbered == text {
+            continue;
+        }
+
+        let file_for_apply = file.to_string();
+        fixes.push(ProposedFix {
+            fix_id: "fix.ncx_play_order",
+            addresses_id: "RSC-005".to_string(),
+            addresses_rule: Some("ncx.play_order.duplicate"),
+            addresses_severity: addressed_severity(
+                report,
+                "RSC-005",
+                Some("ncx.play_order.duplicate"),
+            ),
+            tier: Tier::ConfirmNeeded,
+            title: format!("Renumber {count} NCX playOrder values by document order in {file}"),
+            rationale:
+                "Navigation elements repeat a playOrder value. playOrder is defined to mirror \
+                 document order, so renumbering every one to its 1-based document position makes \
+                 the values unique and canonical. It is only a hint — the reading order a system \
+                 follows is the spine, which is not touched."
+                    .to_string(),
+            preview: vec![Change {
+                path: file.to_string(),
+                note: format!("renumber {count} playOrder values → 1, 2, 3, … (document order)"),
+            }],
+            apply_fn: Box::new(move |ws: &mut Workspace| {
+                if let Some(text) = ws.get_text(&file_for_apply) {
+                    let (out, _) = renumber_play_order(&text);
+                    ws.set_text(&file_for_apply, out);
+                }
+            }),
+        });
+    }
+    fixes
+}
+
+/// Replace each `playOrder="…"` value with its 1-based position in document
+/// order (text order = document order, since `playOrder` lives only in opening
+/// tags). Returns the new text and how many values were renumbered. Boundary-
+/// checked so a longer attribute name never matches.
+fn renumber_play_order(text: &str) -> (String, usize) {
+    let mut out = String::with_capacity(text.len());
+    let mut pos = 0usize;
+    let mut counter = 0u32;
+    let bytes = text.as_bytes();
+    while let Some(rel) = text[pos..].find("playOrder=") {
+        let attr = pos + rel;
+        // Attribute-name boundary: the char before `playOrder` must not continue
+        // a name (else this is a suffix of some other attribute).
+        let preceded_ok = attr == 0
+            || !matches!(bytes[attr - 1], b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b':');
+        let vstart = attr + "playOrder=".len();
+        let quote = bytes.get(vstart).copied();
+        if !preceded_ok || !matches!(quote, Some(b'"') | Some(b'\'')) {
+            out.push_str(&text[pos..vstart.min(text.len())]);
+            pos = vstart.min(text.len());
+            continue;
+        }
+        let q = quote.unwrap() as char;
+        let Some(vend_rel) = text[vstart + 1..].find(q) else {
+            break;
+        };
+        let vend = vstart + 1 + vend_rel;
+        counter += 1;
+        out.push_str(&text[pos..=vstart]); // through the opening quote
+        out.push_str(&counter.to_string());
+        pos = vend; // resume at the closing quote (copied next round)
+    }
+    out.push_str(&text[pos..]);
+    (out, counter as usize)
 }
 
 /// Derive a valid XML NCName from an invalid `id`, preserving as much of the
@@ -2189,6 +2417,61 @@ fn escape_xml_attr(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn play_order_renumbers_duplicates_by_document_order() {
+        let ncx = r#"<navMap><navPoint playOrder="1"><navPoint playOrder="1"/></navPoint><navPoint playOrder="1"/></navMap>"#;
+        let (out, n) = renumber_play_order(ncx);
+        assert_eq!(n, 3);
+        // Document order: outer=1, its child=2, next sibling=3.
+        assert_eq!(
+            out,
+            r#"<navMap><navPoint playOrder="1"><navPoint playOrder="2"/></navPoint><navPoint playOrder="3"/></navMap>"#
+        );
+    }
+
+    #[test]
+    fn play_order_leaves_a_document_with_none_unchanged() {
+        let t = "<navMap><navPoint id=\"a\"/></navMap>";
+        let (out, n) = renumber_play_order(t);
+        assert_eq!(n, 0);
+        assert_eq!(out, t);
+    }
+
+    #[test]
+    fn play_order_handles_single_quotes() {
+        let (out, n) = renumber_play_order("<x playOrder='5'/><y playOrder='5'/>");
+        assert_eq!(n, 2);
+        assert_eq!(out, "<x playOrder='1'/><y playOrder='2'/>");
+    }
+
+    #[test]
+    fn duplicate_id_keeps_first_and_renames_the_rest() {
+        let t = r#"<a id="dup"/><b id="dup"/><c id="dup"/>"#;
+        let out =
+            rename_later_id_occurrences(t, "dup", &["dup-2".to_string(), "dup-3".to_string()]);
+        assert_eq!(out, r#"<a id="dup"/><b id="dup-2"/><c id="dup-3"/>"#);
+    }
+
+    #[test]
+    fn duplicate_id_does_not_match_a_longer_attribute_or_value() {
+        // `xid="dup"` (not an id attr) and `id="duplicate"` (different value) untouched.
+        let t = r#"<a xid="dup"/><b id="dup"/><c id="duplicate"/><d id="dup"/>"#;
+        let out = rename_later_id_occurrences(t, "dup", &["dup-2".to_string()]);
+        assert_eq!(
+            out,
+            r#"<a xid="dup"/><b id="dup"/><c id="duplicate"/><d id="dup-2"/>"#
+        );
+    }
+
+    #[test]
+    fn duplicate_id_new_values_avoid_existing_ids() {
+        // If `dup-2` already exists, make_unique must skip to `dup-3`.
+        let mut used: HashSet<String> = ["dup".into(), "dup-2".into()].into_iter().collect();
+        let new = make_unique("dup".to_string(), &used);
+        used.insert(new.clone());
+        assert_eq!(new, "dup-3");
+    }
 
     #[test]
     fn doctype_span_stops_at_the_declaration_not_a_body_bracket() {

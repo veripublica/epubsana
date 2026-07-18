@@ -12,6 +12,26 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
 ### Added
 
+- **Two fixers completing the NCX internal-consistency family** (`RSC-005`):
+  - `ncx.ids.duplicate_id` (`fix.ncx_duplicate_id`, ConfirmNeeded) — two or more NCX
+    elements share an `id`. The first keeps it; each later duplicate is renamed to a
+    unique value. NCX ids are not IDREF targets anywhere in an EPUB, so no reference
+    is rewritten. Disjoint from the NCName fixer by construction (that one touches
+    only ids occurring exactly once; a duplicate occurs more than once).
+  - `ncx.play_order.duplicate` (`fix.ncx_play_order`, ConfirmNeeded) — navigation
+    elements repeat a `playOrder`. Every `playOrder` is renumbered to its 1-based
+    document-order position (the canonical assignment), making the values unique.
+    `playOrder` is only a hint; the reading order a system follows is the spine,
+    untouched.
+
+  With the existing NCName and `dtb:uid` fixers, this **handles the NCX
+  internal-consistency family end to end**: the one remaining member,
+  `ncx.page_target.invalid_type`, is deliberately **declined** — a bad `@type`
+  (`front`/`normal`/`special`) has no determinate replacement, and guessing the page
+  category would be inventing. On the corpus both new fixers clear every occurrence
+  in the two affected books (`duplicate_id` 3→0, `play_order` 3→0 each), zero
+  regressions.
+
 - **Two fixers for an obsolete or unrecognized DOCTYPE** (`HTM-004`), closing out
   the `htm.doctype` family:
   - `htm.doctype.epub3_obsolete_public_id` (`fix.doctype_html5`, AutoSafe) — an

@@ -13,7 +13,7 @@ changed**. It never guesses, and it preserves everything it doesn't touch.
 ## Status
 
 Early but working. The core contract (`Workspace` → detect → propose → confirm →
-apply → report) is solid, with fifteen fixers so far:
+apply → report) is solid, with seventeen fixers so far:
 
 - **`RSC-016`** — undeclared HTML entities (`&nbsp;`, `&mdash;`, …) → the exact
   character each denotes.
@@ -47,6 +47,12 @@ apply → report) is solid, with fifteen fixers so far:
   identifier → canonicalized. Declines a document that declares a genuinely
   different DTD (XHTML 1.0, …), since relabeling it would assert an unverified
   content model.
+- **`RSC-005` / `ncx.ids.duplicate_id`** — duplicate NCX ids → the first kept,
+  later ones renamed uniquely (NCX ids aren't reference targets, so nothing else
+  moves).
+- **`RSC-005` / `ncx.play_order.duplicate`** — repeated NCX `playOrder` values →
+  renumbered by document order. Together with the NCName and `dtb:uid` fixers,
+  this closes the NCX internal-consistency defects epubsana can determine.
 
 More fixers land next, in real-world impact order.
 

@@ -38,6 +38,8 @@ grows one carefully-argued entry at a time.
 | `OPF-034` / `RSC-005` | `opf.spine.duplicate_itemref` | ConfirmNeeded | The spine lists the same manifest item more than once | [Keep the first occurrence, drop the later ones](#opf-034--rsc-005--duplicate-spine-itemref) |
 | `HTM-004` | `htm.doctype.epub3_obsolete_public_id` | AutoSafe | An EPUB 3 document's DOCTYPE carries an obsolete PUBLIC identifier | [Reduce it to `<!DOCTYPE html>`](#htm-004--obsolete-or-unrecognized-doctype) |
 | `HTM-004` | `htm.doctype.epub2_unrecognized_public_id` | ConfirmNeeded | An EPUB 2 document's DOCTYPE isn't a recognized XHTML 1.1 / OEB identifier | [Canonicalize a malformed XHTML 1.1 id; decline a genuinely different DTD](#htm-004--obsolete-or-unrecognized-doctype) |
+| `RSC-005` | `ncx.ids.duplicate_id` | ConfirmNeeded | Two or more NCX elements share an `id` | [Keep the first, rename later duplicates uniquely](#rsc-005--ncx-internal-consistency) |
+| `RSC-005` | `ncx.play_order.duplicate` | ConfirmNeeded | Navigation elements repeat a `playOrder` value | [Renumber `playOrder` by document order](#rsc-005--ncx-internal-consistency) |
 
 **A note on structural fixers.** Fixers that must locate an element (rather than
 match a token) parse the document with `roxmltree` using `allow_dtd: true`, the
@@ -587,3 +589,67 @@ public phrasing is: *epubsana normalizes obsolete EPUB 3 doctypes and canonicali
 malformed XHTML 1.1 identifiers, and declines to relabel a document that declares a
 different DTD (which would assert an unverified content model).* The decline is a
 feature, not a gap: it is the same "never guess" rule that governs every fixer here.
+
+---
+
+## RSC-005 — NCX internal consistency
+
+The NCX (the EPUB 2 table of contents) has a small, self-contained set of
+internal-consistency rules, and epubsana now covers the whole determinate part of
+it: **invalid NCName ids** and the **`dtb:uid` mismatch** (above), plus the two
+below. NCX ids are **not IDREF targets anywhere in an EPUB** — nothing links into
+an NCX by id — so making an id valid or unique never rewrites a reference, which is
+what makes these repairs surgical.
+
+### `ncx.ids.duplicate_id` — `fix.ncx_duplicate_id`, ConfirmNeeded
+
+**Finding.** Two or more elements in the NCX carry the same `id`. epubveri reports
+each offending element with the value in `params[0]`.
+
+**Fix.** Keep the **first** occurrence of each duplicated id; rename every later
+one to a fresh unique id (the value suffixed `-2`, `-3`, … until unique across the
+NCX). Only the later occurrences change, so the first element keeps the id a
+reader or tool might already know.
+
+**Why it's safe.** An NCX id is a label, not a link target, so renaming a duplicate
+introduces no dangling reference and the uniqueness suffix cannot collide with an
+existing id (it is checked against them). The value is otherwise preserved.
+
+**Disjoint from the NCName fixer, by construction.** `fix.ncx_ncnames` only touches
+an id whose attribute occurs **exactly once** (so its surgical rewrite is
+unambiguous); a duplicate occurs **more than once**. The two fixers therefore never
+target the same id, and planning them once from the original report is sound.
+
+**When it declines.** If the NCX text can't be read. (Any duplicate can be made
+unique, so there is nothing else to decline.)
+
+### `ncx.play_order.duplicate` — `fix.ncx_play_order`, ConfirmNeeded
+
+**Finding.** Two navigation elements (`navPoint`/`navTarget`/`pageTarget`) carry the
+same `playOrder` while pointing at **different** targets. epubveri reports the
+repeated value in `params[0]`. (On the corpus this is the classic tool bug: every
+element emitted with `playOrder="1"`.)
+
+**Fix.** Renumber **every** `playOrder` in the NCX to its 1-based position in
+document order (`1`, `2`, `3`, …). This is the canonical NCX assignment — `playOrder`
+is defined to mirror document order — and it makes every value unique in one pass.
+
+**Why it's safe.** `playOrder` is only a *hint*: the reading order a system actually
+follows is the spine, which this fixer never touches. Renumbering to document order
+can't mislead, because document order is exactly what `playOrder` is meant to
+express. It is `ConfirmNeeded` because it rewrites values broadly — including
+correct ones — and the change is visible. Elements that legitimately *shared* a
+`playOrder` (same target — permitted, and not flagged) receive distinct numbers;
+distinct is always valid.
+
+**When it declines.** If the NCX text can't be read.
+
+### `ncx.page_target.invalid_type` — declined (the family's one judgement member)
+
+The third internal rule. A `pageTarget`'s `@type` must be `front`, `normal`, or
+`special`; a bad value has **no single correct replacement** — we cannot know a
+page's category from an invalid string, and `normal` is only a plausible default,
+not a determinate answer. Setting one would be a guess, so epubsana **declines** it
+and the finding stays reported (0 corpus cases). This is the same "never guess"
+line that governs the different-DTD doctype decline: the family is *handled* — every
+member is fixed where determinate and declined where it would require invention.
