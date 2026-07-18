@@ -13,10 +13,13 @@ changed**. It never guesses, and it preserves everything it doesn't touch.
 ## Status
 
 Early but working. The core contract (`Workspace` → detect → propose → confirm →
-apply → report) is solid, with twelve fixers so far:
+apply → report) is solid, with thirteen fixers so far:
 
 - **`RSC-016`** — undeclared HTML entities (`&nbsp;`, `&mdash;`, …) → the exact
   character each denotes.
+- **`RSC-016` / `missing_semicolon`** — a named entity with no closing `;`
+  (`&nbsp`) → the character it denotes, or the reference closed. Completes the
+  entity family: every entity defect epubveri reports now has a repair.
 - **`RSC-005` / `ncx.ids.invalid_ncname`** — invalid NCX ids → valid XML NCNames.
 - **`RSC-005` / `invalid_content_type_meta`** — legacy encoding declarations →
   the HTML5 `<meta charset="utf-8">`.

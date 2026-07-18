@@ -5,6 +5,7 @@
 /CLAUDE.md
 /docs/SPIKE.md
 /docs/API.md
+/docs/COVERAGE.md
 
 # Local-only dev scaffolding: corpus scanner for grounding fixer ROI in real
 # books (not product; keeps the published crate lean).

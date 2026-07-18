@@ -17,6 +17,7 @@ use crate::{Change, Goal, ProposedFix, Tier, Workspace, entities};
 pub fn plan(report: &Report, ws: &Workspace, _goal: Goal) -> Vec<ProposedFix> {
     let mut fixes = Vec::new();
     fixes.extend(html_entities(report, ws));
+    fixes.extend(entity_missing_semicolon(report, ws));
     fixes.extend(ncx_ncnames(report, ws));
     fixes.extend(content_type_meta(report, ws));
     fixes.extend(ncx_dtb_uid(report, ws));
@@ -125,6 +126,142 @@ fn html_entities(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
                 if let Some(mut text) = ws.get_text(&file_for_apply) {
                     for (from, to) in &repls {
                         text = text.replace(from, to);
+                    }
+                    ws.set_text(&file_for_apply, text);
+                }
+            }),
+        });
+    }
+    fixes
+}
+
+/// The XML-predefined entities: their denoted character is the bare delimiter
+/// itself, so an unterminated one is closed with `;`, never substituted.
+const PREDEFINED_ENTITIES: [&str; 5] = ["amp", "lt", "gt", "quot", "apos"];
+
+/// The replacement for an unterminated `&name`, or `None` to decline: the denoted
+/// character when we map the name, `&name;` (close it) for a predefined entity,
+/// nothing for an unrecognized name (never guessed).
+fn missing_semicolon_replacement(name: &str) -> Option<String> {
+    if let Some(ch) = entities::lookup(name) {
+        Some(ch.to_string())
+    } else if PREDEFINED_ENTITIES.contains(&name) {
+        Some(format!("&{name};"))
+    } else {
+        None
+    }
+}
+
+/// Replace every unterminated `&name` in `text` with `replacement`. A match
+/// counts only where the character right after the name is neither `;` (already
+/// terminated) nor a name character (`&notin;` is not an unterminated `&not`), so
+/// correct references and longer entities are never touched.
+fn replace_unterminated_entity(text: &str, name: &str, replacement: &str) -> String {
+    let needle = format!("&{name}");
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find(&needle) {
+        let after = &rest[i + needle.len()..];
+        let next = after.chars().next();
+        let terminated = next == Some(';');
+        let name_continues = next.is_some_and(|c| c.is_ascii_alphanumeric());
+        out.push_str(&rest[..i]);
+        if terminated || name_continues {
+            // Not our unterminated ref — keep it verbatim and move past the `&`
+            // so we don't rescan and loop.
+            out.push('&');
+            rest = &rest[i + 1..];
+        } else {
+            out.push_str(replacement);
+            rest = after;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// `RSC-016` / `htm.entity.missing_semicolon`: a named entity reference lacking
+/// its closing `;` (`&nbsp` for `&nbsp;`). A `&` not closed by `;` is not
+/// well-formed XML, so this is **fatal** — the document does not open — the same
+/// stakes as [`html_entities`], and the sibling that completes the `htm.entity`
+/// family. epubveri reports the recognized name in `params[0]`; grouped per file.
+///
+/// A mapped entity is replaced by the character it denotes (closes and resolves
+/// it at once, DTD or not); a predefined entity (`amp`/`lt`/`gt`/`quot`/`apos`),
+/// whose character *is* the bare delimiter, is closed with `;` instead;
+/// an unrecognized name is declined. `AutoSafe`.
+fn entity_missing_semicolon(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    // file -> (name -> occurrence count), only for names we can repair.
+    let mut by_file: BTreeMap<String, BTreeMap<String, usize>> = BTreeMap::new();
+    for m in &report.messages {
+        if m.rule != Some("htm.entity.missing_semicolon") {
+            continue;
+        }
+        let (Some(file), Some(name)) = (m.location.as_deref(), m.params.first()) else {
+            continue;
+        };
+        if missing_semicolon_replacement(name).is_none() {
+            continue; // unrecognized — never guessed
+        }
+        *by_file
+            .entry(file.to_string())
+            .or_default()
+            .entry(name.clone())
+            .or_insert(0) += 1;
+    }
+
+    let mut fixes = Vec::new();
+    for (file, names) in by_file {
+        if ws.get_text(&file).is_none() {
+            continue;
+        }
+        let distinct = names.len();
+        let total: usize = names.values().sum();
+
+        let preview: Vec<Change> = names
+            .iter()
+            .map(|(name, count)| {
+                let repl = missing_semicolon_replacement(name).unwrap_or_default();
+                Change {
+                    path: file.clone(),
+                    note: format!("close &{name} → \"{repl}\" ({count}×)"),
+                }
+            })
+            .collect();
+
+        let repls: Vec<(String, String)> = names
+            .keys()
+            .map(|name| (name.clone(), missing_semicolon_replacement(name).unwrap()))
+            .collect();
+        let file_for_apply = file.clone();
+        let summary = names.keys().cloned().collect::<Vec<_>>().join(", ");
+
+        fixes.push(ProposedFix {
+            fix_id: "fix.entity_missing_semicolon",
+            addresses_id: "RSC-016".to_string(),
+            addresses_rule: Some("htm.entity.missing_semicolon"),
+            addresses_severity: addressed_severity(
+                report,
+                "RSC-016",
+                Some("htm.entity.missing_semicolon"),
+            ),
+            tier: Tier::AutoSafe,
+            title: format!(
+                "Close {distinct} unterminated entity reference{} ({total}×) in {file} ({summary})",
+                if distinct == 1 { "" } else { "s" },
+            ),
+            rationale:
+                "A named entity reference without its closing ';' is not well-formed XML, so the \
+                 document does not open. Each recognized name is replaced by the character it \
+                 denotes (which needs no DTD), or — for the XML-predefined entities, whose \
+                 character is the bare delimiter itself — closed with the missing ';'. Only the \
+                 unterminated occurrences are touched; a correct reference is left alone."
+                    .to_string(),
+            preview,
+            apply_fn: Box::new(move |ws: &mut Workspace| {
+                if let Some(mut text) = ws.get_text(&file_for_apply) {
+                    for (name, repl) in &repls {
+                        text = replace_unterminated_entity(&text, name, repl);
                     }
                     ws.set_text(&file_for_apply, text);
                 }
@@ -1874,6 +2011,61 @@ fn escape_xml_attr(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_semicolon_maps_a_known_entity_to_its_character() {
+        let out = replace_unterminated_entity("a&nbsp b", "nbsp", "\u{00A0}");
+        assert_eq!(out, "a\u{00A0} b");
+    }
+
+    #[test]
+    fn missing_semicolon_leaves_a_correct_reference_alone() {
+        // The terminated `&nbsp;` must not be touched when repairing `&nbsp`.
+        let out = replace_unterminated_entity("x&nbsp;y&nbsp z", "nbsp", "\u{00A0}");
+        assert_eq!(out, "x&nbsp;y\u{00A0} z");
+    }
+
+    #[test]
+    fn missing_semicolon_does_not_touch_a_longer_entity_name() {
+        // `&notin;` starts with `not` but is a different, complete entity.
+        let out = replace_unterminated_entity("p&notin;q", "not", "\u{00AC}");
+        assert_eq!(out, "p&notin;q");
+    }
+
+    #[test]
+    fn missing_semicolon_repairs_at_end_of_text() {
+        let out = replace_unterminated_entity("ends with&nbsp", "nbsp", "\u{00A0}");
+        assert_eq!(out, "ends with\u{00A0}");
+    }
+
+    #[test]
+    fn missing_semicolon_repairs_every_unterminated_occurrence() {
+        let out = replace_unterminated_entity("&nbsp and&nbsp and &nbsp!", "nbsp", "\u{00A0}");
+        assert_eq!(out, "\u{00A0} and\u{00A0} and \u{00A0}!");
+    }
+
+    #[test]
+    fn predefined_entity_is_closed_not_substituted() {
+        // `&amp` denotes `&`; substituting would re-introduce a bare delimiter,
+        // so the repair is to add the missing `;`.
+        assert_eq!(
+            missing_semicolon_replacement("amp").as_deref(),
+            Some("&amp;")
+        );
+        let out = replace_unterminated_entity("Tom &amp Jerry", "amp", "&amp;");
+        assert_eq!(out, "Tom &amp; Jerry");
+    }
+
+    #[test]
+    fn mapped_entity_replacement_is_the_character() {
+        assert_eq!(missing_semicolon_replacement("mdash").as_deref(), Some("—"));
+    }
+
+    #[test]
+    fn unrecognized_name_is_declined() {
+        // Not in the table and not predefined — never guessed.
+        assert!(missing_semicolon_replacement("Jerry").is_none());
+    }
 
     /// A spine that lists `ch1` twice — the Kindle→EPUB conversion artifact.
     const DUPE_OPF: &str = r#"<?xml version="1.0" encoding="utf-8"?>

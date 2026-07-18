@@ -12,6 +12,19 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
 ### Added
 
+- **A fixer for an entity reference missing its closing `;`**
+  (`RSC-016` / `htm.entity.missing_semicolon`, *fatal*) — `&nbsp` for `&nbsp;`.
+  A recognized name is replaced by the character it denotes (well-formed with or
+  without a DTD); one of the XML-predefined five (`&amp` …), whose character is
+  the bare delimiter itself, is closed with the missing `;` instead. The match is
+  boundary-checked, so a correct `&nbsp;` and a longer entity that merely starts
+  with the name are never touched; an unrecognized name is declined.
+
+  This **completes the `htm.entity` family** — the first error family epubsana
+  covers end to end: every entity defect epubveri reports (undeclared, and now
+  unterminated) has a repair. See `docs/COVERAGE.md` for the family map this
+  closure is measured against.
+
 - **Two fixers for dangling references in the package document**, contributed as
   requirements by `epublift`, which carried its own repair for them
   ([#4](https://github.com/veripublica/epubsana/issues/4),

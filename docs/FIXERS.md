@@ -24,6 +24,7 @@ grows one carefully-argued entry at a time.
 | epubcheck ID | rule sub-code | Tier | Issue | Fix |
 | --- | --- | --- | --- | --- |
 | `RSC-016` | `htm.entity.undeclared` | AutoSafe | XHTML uses HTML named entities with no DTD to declare them | [Replace each with the character it denotes](#rsc-016--undeclared-html-entities) |
+| `RSC-016` | `htm.entity.missing_semicolon` | AutoSafe | A named entity reference lacks its closing `;` (`&nbsp`) | [Replace with the character, or close the reference](#rsc-016--entity-reference-missing-its-semicolon) |
 | `RSC-005` | `ncx.ids.invalid_ncname` | ConfirmNeeded | An NCX `id` isn't a valid XML NCName | [Sanitize it to a valid, unique NCName](#rsc-005--invalid-ncx-id-ncname) |
 | `RSC-005` | `opf.content_document.invalid_content_type_meta` | ConfirmNeeded | A legacy `<meta http-equiv="Content-Type">` has the wrong value | [Normalize to a single HTML5 `<meta charset="utf-8">`](#rsc-005--content-type-encoding-declaration) |
 | `NCX-001` | *(none)* | ConfirmNeeded | The NCX `dtb:uid` disagrees with the package identifier | [Set `dtb:uid` to the package's unique identifier](#ncx-001--ncx-dtbuid-mismatch) |
@@ -71,6 +72,47 @@ document becomes well-formed and the finding clears.
 (and stays reported). The table is deliberately conservative — an unknown or
 ambiguous entity is never guessed. The XML-predefined five (`&amp;` `&lt;`
 `&gt;` `&quot;` `&apos;`) are always declared and so never appear here.
+
+---
+
+## RSC-016 — entity reference missing its semicolon
+
+**Finding.** `htm.entity.missing_semicolon`, at **fatal** severity. A named entity
+reference lacks its closing `;` — `&nbsp` where `&nbsp;` was meant. A `&` not
+closed by `;` is not well-formed XML, so the document does not parse and does not
+open — the same Fatal, and the same `--goal openable` stakes, as the
+undeclared-entity case above. epubveri's scanner reports the recognized entity
+**name** in `params[0]`. This is the sibling that completes the `htm.entity`
+family: with `htm.entity.undeclared`, every entity defect epubveri reports has a
+repair.
+
+**Fix** (`fix.entity_missing_semicolon`, AutoSafe). Per file, for each recognized
+name, replace the unterminated `&name` with:
+
+- **the character it denotes**, when the name is one we map (reusing the
+  `html_entities` table) — this both closes and resolves the reference, leaving
+  text that is well-formed with or without a DTD (`&nbsp` → U+00A0);
+- **`&name;`** (the semicolon inserted), when the name is one of the XML-predefined
+  five (`amp`/`lt`/`gt`/`quot`/`apos`), whose denoted character is itself
+  `&`/`<`/`>`/`"`/`'`. Substituting the character there would put the bare
+  delimiter straight back, so the repair is to *close* the reference, not resolve
+  it (`&amp` → `&amp;`).
+
+The match is boundary-checked: `&name` is repaired **only** where the next
+character is neither `;` (already terminated — nothing to do) nor a name character
+(`&notin;` is not an unterminated `&not`). So a correct `&name;` elsewhere in the
+file, and a longer entity that merely starts with this name, are never touched.
+
+**Why it's safe.** For a mapped entity, the character is exactly what the reference
+denotes — the same content-preserving substitution as the undeclared case, and it
+removes the malformed reference outright. For a predefined entity, inserting the
+one missing `;` is the single change that makes the reference well-formed and
+denotes nothing new. In both cases the document becomes parseable and the fatal
+clears.
+
+**When it declines.** An unrecognized name — not in the map and not one of the
+predefined five — is left untouched and stays reported. As everywhere, an unknown
+entity is never guessed.
 
 ---
 
