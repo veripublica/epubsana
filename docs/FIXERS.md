@@ -40,6 +40,8 @@ grows one carefully-argued entry at a time.
 | `HTM-004` | `htm.doctype.epub2_unrecognized_public_id` | ConfirmNeeded | An EPUB 2 document's DOCTYPE isn't a recognized XHTML 1.1 / OEB identifier | [Canonicalize a malformed XHTML 1.1 id; decline a genuinely different DTD](#htm-004--obsolete-or-unrecognized-doctype) |
 | `RSC-005` | `ncx.ids.duplicate_id` | ConfirmNeeded | Two or more NCX elements share an `id` | [Keep the first, rename later duplicates uniquely](#rsc-005--ncx-internal-consistency) |
 | `RSC-005` | `ncx.play_order.duplicate` | ConfirmNeeded | Navigation elements repeat a `playOrder` value | [Renumber `playOrder` by document order](#rsc-005--ncx-internal-consistency) |
+| `RSC-007` | `opf.guide.reference_missing_resource` | ConfirmNeeded | A `<guide>` reference points at a resource that doesn't exist | [Drop the reference; drop the guide if it empties](#rsc-007--rsc-017--guide-references) |
+| `RSC-017` | `opf.guide.duplicate_reference` | ConfirmNeeded | Two `<guide>` references share a `type` and `href` | [Keep the first, drop the duplicates](#rsc-007--rsc-017--guide-references) |
 
 **A note on structural fixers.** Fixers that must locate an element (rather than
 match a token) parse the document with `roxmltree` using `allow_dtd: true`, the
@@ -653,3 +655,61 @@ not a determinate answer. Setting one would be a guess, so epubsana **declines**
 and the finding stays reported (0 corpus cases). This is the same "never guess"
 line that governs the different-DTD doctype decline: the family is *handled* — every
 member is fixed where determinate and declined where it would require invention.
+
+---
+
+## RSC-007 / RSC-017 — guide references
+
+The EPUB 2 `<guide>` is a list of `<reference type="…" href="…"/>` pointers to
+structural landmarks (cover, toc, text). Both defects here are cleared by
+**deleting** a reference — a guide reference is pure navigation, so removing a
+broken or redundant one loses nothing a reader can reach. This closes the whole
+`opf.guide` family (its only two rules).
+
+### `opf.guide.reference_missing_resource` — `fix.guide_dangling_reference`, ConfirmNeeded
+
+**Finding.** `RSC-007`. A `<guide>` reference's `href` doesn't resolve to any
+resource in the container — on the corpus, typically a wrong extension
+(`Text/rica.html` beside `rica.xhtml`). epubveri reports the `href` in `params[0]`.
+
+**Fix.** Drop every `<reference>` whose `href` is one epubveri flagged. If that
+would leave the `<guide>` with no references, drop the `<guide>` element itself
+(an empty `<guide>` is invalid — OPS 2.0 requires `reference+` — and `<guide>` is
+optional, so removing it is the correct resolution, not a new defect).
+
+**Why it's safe.** The reference points at a resource that does not exist; as with
+a dangling manifest item or spine itemref, it cannot be repaired *into* anything —
+nothing in the book records what file it meant. A guide reference is not content;
+dropping it removes a pointer to a hole, and every reference that still resolves
+keeps its place. We match on the `href` epubveri reported and **do not re-resolve
+paths** — whether an `href` resolves is the detector's call, not a second opinion
+here.
+
+**When it declines.** If the OPF won't parse, or no `<reference>` carries the
+reported `href`.
+
+### `opf.guide.duplicate_reference` — `fix.guide_duplicate_reference`, ConfirmNeeded
+
+**Finding.** `RSC-017`, at warning severity. Two or more `<reference>` elements
+share the **same `type` and the same `href`** — a redundant repeat. (References
+with the same `type` but *different* `href`, e.g. several `type="text"` entries,
+are **not** duplicates and are left alone.)
+
+**Fix.** Keep the first reference of each identical `(type, href)` pair; drop the
+later ones. Deletion only; nothing else in the guide moves.
+
+**Why it's safe.** A second reference with an identical type and href carries no
+information the first doesn't — it names the same landmark at the same target.
+Removing it cannot change what any landmark resolves to. It cannot empty the guide
+(the first of each pair is kept), so no empty-guide guard is needed.
+
+**When it declines.** If the OPF won't parse, or fewer than two references share a
+`(type, href)` (a stale finding never deletes anything).
+
+**Note on `OPF-031`.** A dangling guide reference is often co-reported as `OPF-031`
+("not declared in the manifest"), which carries no `rule` sub-code. Dropping the
+reference clears that finding too, as a side effect — but epubsana keys only on the
+`opf.guide.*` rules; the case where a guide reference names a file that *exists but
+isn't in the manifest* (`OPF-031` alone, no `RSC-007`) is a different defect —
+adding it to the manifest vs. dropping the reference is a judgement — and is not
+part of this family.

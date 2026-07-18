@@ -13,7 +13,7 @@ changed**. It never guesses, and it preserves everything it doesn't touch.
 ## Status
 
 Early but working. The core contract (`Workspace` → detect → propose → confirm →
-apply → report) is solid, with seventeen fixers so far:
+apply → report) is solid, with nineteen fixers so far:
 
 - **`RSC-016`** — undeclared HTML entities (`&nbsp;`, `&mdash;`, …) → the exact
   character each denotes.
@@ -53,6 +53,11 @@ apply → report) is solid, with seventeen fixers so far:
 - **`RSC-005` / `ncx.play_order.duplicate`** — repeated NCX `playOrder` values →
   renumbered by document order. Together with the NCName and `dtb:uid` fixers,
   this closes the NCX internal-consistency defects epubsana can determine.
+- **`RSC-007` / `opf.guide.reference_missing_resource`** — an EPUB 2 `<guide>`
+  reference pointing at a resource that doesn't exist → dropped (and the `<guide>`
+  itself if that empties it).
+- **`RSC-017` / `opf.guide.duplicate_reference`** — two guide references with the
+  same `type` and `href` → the first kept, the duplicate dropped.
 
 More fixers land next, in real-world impact order.
 

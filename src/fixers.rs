@@ -32,6 +32,8 @@ pub fn plan(report: &Report, ws: &Workspace, _goal: Goal) -> Vec<ProposedFix> {
     fixes.extend(manifest_dangling_items(report, ws));
     fixes.extend(spine_dangling_itemrefs(report, ws));
     fixes.extend(spine_duplicate_itemrefs(report, ws));
+    fixes.extend(guide_dangling_references(report, ws));
+    fixes.extend(guide_duplicate_references(report, ws));
     fixes.extend(mimetype_packaging(report, ws));
     // Future fixers append here, in a sensible confirm order.
     fixes
@@ -1895,6 +1897,214 @@ fn compute_duplicate_itemref_edits(opf: &str, idref: &str) -> Option<Vec<MetaEdi
     )
 }
 
+/// The `<reference>` children of the OPF's `<guide>`, in document order.
+fn guide_references<'a, 'i>(doc: &'a roxmltree::Document<'i>) -> Vec<roxmltree::Node<'a, 'i>> {
+    doc.descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "guide")
+        .map(|g| {
+            g.children()
+                .filter(|n| n.is_element() && n.tag_name().name() == "reference")
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// `RSC-007` / `opf.guide.reference_missing_resource`: a `<guide>` reference whose
+/// `href` resolves to no resource in the container (on the corpus, a wrong
+/// extension). It cannot be repaired *into* anything — nothing records what file
+/// it meant — so drop it, as with a dangling manifest item or spine itemref.
+/// epubveri reports the `href` in `params[0]`; we match on it and never re-resolve
+/// paths (that is the detector's call). If dropping empties the `<guide>`, drop the
+/// `<guide>` too — an empty guide is invalid and the element is optional.
+/// `ConfirmNeeded` (a deletion).
+fn guide_dangling_references(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    let mut by_file: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for m in &report.messages {
+        if m.rule != Some("opf.guide.reference_missing_resource") {
+            continue;
+        }
+        let (Some(file), Some(href)) = (m.location.as_deref(), m.params.first()) else {
+            continue;
+        };
+        by_file
+            .entry(file.to_string())
+            .or_default()
+            .insert(href.clone());
+    }
+
+    let mut fixes = Vec::new();
+    for (file, hrefs) in by_file {
+        let Some(text) = ws.get_text(&file) else {
+            continue;
+        };
+        let Some((_edits, dropped_guide, n)) = compute_guide_dangling_edits(&text, &hrefs) else {
+            continue;
+        };
+
+        let file_for_apply = file.clone();
+        let hrefs_for_apply = hrefs.clone();
+        let listed = hrefs.iter().cloned().collect::<Vec<_>>().join(", ");
+        fixes.push(ProposedFix {
+            fix_id: "fix.guide_dangling_reference",
+            addresses_id: "RSC-007".to_string(),
+            addresses_rule: Some("opf.guide.reference_missing_resource"),
+            addresses_severity: addressed_severity(
+                report,
+                "RSC-007",
+                Some("opf.guide.reference_missing_resource"),
+            ),
+            tier: Tier::ConfirmNeeded,
+            title: if dropped_guide {
+                format!("Drop the <guide> in {file} — all its references are missing ({listed})")
+            } else {
+                format!("Drop {n} missing guide reference(s) in {file} ({listed})")
+            },
+            rationale:
+                "A guide reference points at a resource that does not exist in the container, so \
+                 it names a landmark no reading system can reach and nothing records what file it \
+                 meant. Dropping it removes a pointer to a hole; references that still resolve keep \
+                 their place. If none remain, the empty <guide> (invalid, and optional) is dropped \
+                 too."
+                    .to_string(),
+            preview: vec![Change {
+                path: file.clone(),
+                note: if dropped_guide {
+                    "drop the entire <guide> (no reference resolves)".to_string()
+                } else {
+                    format!("drop {n} <reference> element(s): {listed}")
+                },
+            }],
+            apply_fn: Box::new(move |ws: &mut Workspace| {
+                if let Some(text) = ws.get_text(&file_for_apply)
+                    && let Some((edits, _, _)) =
+                        compute_guide_dangling_edits(&text, &hrefs_for_apply)
+                {
+                    ws.set_text(&file_for_apply, apply_edits(&text, edits));
+                }
+            }),
+        });
+    }
+    fixes
+}
+
+/// Edits dropping every `<reference>` whose `href` is in `hrefs` — or the whole
+/// `<guide>` if that would empty it. Returns (edits, dropped_whole_guide, count).
+/// `None` (decline) if the OPF won't parse or no reference carries a listed href.
+fn compute_guide_dangling_edits(
+    opf: &str,
+    hrefs: &BTreeSet<String>,
+) -> Option<(Vec<MetaEdit>, bool, usize)> {
+    let doc = parse_xml(opf)?;
+    let refs = guide_references(&doc);
+    let to_drop: Vec<_> = refs
+        .iter()
+        .filter(|r| r.attr_no_ns("href").is_some_and(|h| hrefs.contains(h)))
+        .collect();
+    if to_drop.is_empty() {
+        return None;
+    }
+    // Would every reference be dropped? Then remove the <guide> element instead.
+    if to_drop.len() == refs.len() {
+        let guide = doc
+            .descendants()
+            .find(|n| n.is_element() && n.tag_name().name() == "guide")?;
+        return Some((
+            vec![MetaEdit {
+                range: guide.range(),
+                replacement: String::new(),
+            }],
+            true,
+            to_drop.len(),
+        ));
+    }
+    let n = to_drop.len();
+    let edits = to_drop
+        .iter()
+        .map(|r| MetaEdit {
+            range: r.range(),
+            replacement: String::new(),
+        })
+        .collect();
+    Some((edits, false, n))
+}
+
+/// `RSC-017` / `opf.guide.duplicate_reference`: two or more `<guide>` references
+/// share the **same `type` and `href`** — a redundant repeat carrying no
+/// information the first doesn't. Keep the first of each identical pair, drop the
+/// later ones. Cannot empty the guide (a first is always kept). `ConfirmNeeded`.
+fn guide_duplicate_references(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    let files: BTreeSet<&str> = report
+        .messages
+        .iter()
+        .filter(|m| m.rule == Some("opf.guide.duplicate_reference"))
+        .filter_map(|m| m.location.as_deref())
+        .collect();
+
+    let mut fixes = Vec::new();
+    for file in files {
+        let Some(text) = ws.get_text(file) else {
+            continue;
+        };
+        let Some(edits) = compute_guide_duplicate_edits(&text) else {
+            continue;
+        };
+        let n = edits.len();
+
+        let file_for_apply = file.to_string();
+        fixes.push(ProposedFix {
+            fix_id: "fix.guide_duplicate_reference",
+            addresses_id: "RSC-017".to_string(),
+            addresses_rule: Some("opf.guide.duplicate_reference"),
+            addresses_severity: addressed_severity(
+                report,
+                "RSC-017",
+                Some("opf.guide.duplicate_reference"),
+            ),
+            tier: Tier::ConfirmNeeded,
+            title: format!("Drop {n} duplicate guide reference(s) in {file}"),
+            rationale:
+                "Two or more guide references share the same type and href, so the later ones name \
+                 the same landmark at the same target as the first and carry no new information. \
+                 The first of each pair is kept; the redundant repeats are dropped."
+                    .to_string(),
+            preview: vec![Change {
+                path: file.to_string(),
+                note: format!("drop {n} duplicate <reference> element(s) (same type + href)"),
+            }],
+            apply_fn: Box::new(move |ws: &mut Workspace| {
+                if let Some(text) = ws.get_text(&file_for_apply)
+                    && let Some(edits) = compute_guide_duplicate_edits(&text)
+                {
+                    ws.set_text(&file_for_apply, apply_edits(&text, edits));
+                }
+            }),
+        });
+    }
+    fixes
+}
+
+/// Edits dropping every `<guide>` reference after the first of each identical
+/// `(type, href)` pair. `None` (decline) if the OPF won't parse or nothing repeats.
+fn compute_guide_duplicate_edits(opf: &str) -> Option<Vec<MetaEdit>> {
+    let doc = parse_xml(opf)?;
+    let mut seen: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut edits = Vec::new();
+    for r in guide_references(&doc) {
+        // Only references with a `type` are considered (matching epubveri).
+        let (Some(ty), Some(href)) = (r.attr_no_ns("type"), r.attr_no_ns("href")) else {
+            continue;
+        };
+        let key = (ty.to_string(), href.to_string());
+        if !seen.insert(key) {
+            edits.push(MetaEdit {
+                range: r.range(),
+                replacement: String::new(),
+            });
+        }
+    }
+    (!edits.is_empty()).then_some(edits)
+}
+
 /// `PKG-006`: the archive carries a `mimetype` entry, but not first. OCF wants
 /// it first and stored so a reader can identify the file from its opening bytes.
 ///
@@ -2417,6 +2627,71 @@ fn escape_xml_attr(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const GUIDE_OPF: &str = r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0">
+  <guide>
+    <reference type="cover" title="Cover" href="cover.xhtml"/>
+    <reference type="text" title="Text" href="gone.html"/>
+    <reference type="text" title="Text" href="ch1.xhtml"/>
+    <reference type="cover" title="Cover" href="cover.xhtml"/>
+  </guide>
+</package>"#;
+
+    #[test]
+    fn guide_dangling_drops_only_the_missing_reference() {
+        let hrefs = BTreeSet::from(["gone.html".to_string()]);
+        let (edits, dropped_guide, n) = compute_guide_dangling_edits(GUIDE_OPF, &hrefs).unwrap();
+        assert!(!dropped_guide);
+        assert_eq!(n, 1);
+        let out = apply_edits(GUIDE_OPF, edits);
+        assert!(!out.contains("gone.html"));
+        assert!(out.contains("cover.xhtml") && out.contains("ch1.xhtml"));
+    }
+
+    #[test]
+    fn guide_dangling_drops_the_whole_guide_when_all_references_are_missing() {
+        // Every reference's href is flagged.
+        let hrefs = BTreeSet::from([
+            "cover.xhtml".to_string(),
+            "gone.html".to_string(),
+            "ch1.xhtml".to_string(),
+        ]);
+        let (edits, dropped_guide, _) = compute_guide_dangling_edits(GUIDE_OPF, &hrefs).unwrap();
+        assert!(
+            dropped_guide,
+            "an empty guide is invalid — drop the element"
+        );
+        let out = apply_edits(GUIDE_OPF, edits);
+        assert!(!out.contains("<guide"), "the guide element is gone");
+    }
+
+    #[test]
+    fn guide_dangling_declines_when_no_reference_matches() {
+        let hrefs = BTreeSet::from(["nowhere.xhtml".to_string()]);
+        assert!(compute_guide_dangling_edits(GUIDE_OPF, &hrefs).is_none());
+    }
+
+    #[test]
+    fn guide_duplicate_keeps_first_of_each_identical_pair() {
+        // The two type="cover" href="cover.xhtml" are duplicates; the two
+        // type="text" have DIFFERENT hrefs and are not.
+        let edits = compute_guide_duplicate_edits(GUIDE_OPF).unwrap();
+        assert_eq!(edits.len(), 1, "only the repeated cover is a duplicate");
+        let out = apply_edits(GUIDE_OPF, edits);
+        assert_eq!(out.matches("type=\"cover\"").count(), 1);
+        assert_eq!(
+            out.matches("type=\"text\"").count(),
+            2,
+            "different hrefs are not duplicates"
+        );
+    }
+
+    #[test]
+    fn guide_duplicate_declines_when_nothing_repeats() {
+        let opf = r#"<package><guide><reference type="cover" href="c.xhtml"/><reference type="text" href="t.xhtml"/></guide></package>"#;
+        assert!(compute_guide_duplicate_edits(opf).is_none());
+    }
 
     #[test]
     fn play_order_renumbers_duplicates_by_document_order() {

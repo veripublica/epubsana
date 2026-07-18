@@ -12,6 +12,24 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
 ### Added
 
+- **Two fixers completing the EPUB 2 `<guide>` family:**
+  - `opf.guide.reference_missing_resource` (`RSC-007`, `fix.guide_dangling_reference`,
+    ConfirmNeeded) — a `<guide>` reference whose `href` resolves to no resource in
+    the container (on the corpus, a wrong extension like `rica.html` beside
+    `rica.xhtml`) is dropped: it names a landmark no reader can reach and nothing
+    records what file it meant. If dropping leaves the `<guide>` empty — invalid, and
+    the element is optional — the `<guide>` is dropped too. Matches on the reported
+    `href`; paths are not re-resolved. Dropping the reference also clears the
+    co-emitted `OPF-031` ("not declared in the manifest").
+  - `opf.guide.duplicate_reference` (`RSC-017`, `fix.guide_duplicate_reference`,
+    ConfirmNeeded) — two or more references sharing the same `type` **and** `href`;
+    the first is kept and the redundant repeats dropped. References with the same
+    `type` but different `href` are not duplicates and are left alone.
+
+  On the corpus this clears every occurrence in the affected books (missing-resource
+  5 books, duplicate 1 book), and the `OPF-031` side effect too, with zero
+  regressions. This closes the `opf.guide` family.
+
 - **Two fixers completing the NCX internal-consistency family** (`RSC-005`):
   - `ncx.ids.duplicate_id` (`fix.ncx_duplicate_id`, ConfirmNeeded) — two or more NCX
     elements share an `id`. The first keeps it; each later duplicate is renamed to a
