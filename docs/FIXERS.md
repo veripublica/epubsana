@@ -47,8 +47,21 @@ grows one carefully-argued entry at a time.
 match a token) parse the document with `roxmltree` using `allow_dtd: true`, the
 same option epubveri uses. NCX files and many XHTML documents declare a
 `DOCTYPE`, which roxmltree's default parser rejects; matching epubveri's setting
-means a structural fixer sees exactly the documents epubveri did. If a document
-still won't parse, the fixer declines.
+means a structural fixer sees exactly the documents epubveri did.
+
+For **content documents**, matching epubveri means one more step: an EPUB 2 XHTML
+document may use `&nbsp;` and friends under an XHTML 1.1 DOCTYPE that declares them
+only in its *external* DTD, which roxmltree does not fetch — so the document won't
+parse and, before this, every structural fixer silently declined it. epubsana now
+does what epubveri does (its issue #23): it declares those named entities in the
+DOCTYPE's internal subset **in a working copy**, parses that, and maps each node's
+byte range back to the original text it edits. The declarations exist only to
+locate nodes; they never appear in the output, and the injection is bounded by the
+DOCTYPE itself (not a `[1]` in the body — the lesson of epubveri's bracket bug). If
+a document *still* won't parse, the fixer declines. Measured effect: **133 more
+`empty_title` findings across the corpus now get a proposal** (the rest of the
+previously-unreadable ones parse but are declined for having no in-book title
+source — the ordinary "never invent" rule).
 
 ---
 

@@ -10,6 +10,20 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Structural fixers now read EPUB 2 content documents that use DTD-only entities**
+  (`&nbsp;` under an XHTML 1.1 DOCTYPE). roxmltree doesn't fetch the external DTD, so
+  these documents didn't parse and every structural fixer silently declined them —
+  the same reach gap epubveri closed in its issue #23. epubsana now declares the
+  named entities the document uses in the DOCTYPE's internal subset in a working
+  copy, parses that, and maps node byte ranges back to the original text it edits;
+  the declarations never appear in the output, and the injection is bounded by the
+  DOCTYPE (not a body `[1]`). Effect on the corpus: `fix.empty_title` proposals rise
+  from 2153 to **2286** (+133) — the previously-unreadable documents that carry a
+  title source now get one; the rest parse but are declined for having none. Also
+  benefits `content_type_meta` and `bare_text_in_body`. Zero new regressions.
+
 ### Added
 
 - **Two fixers completing the EPUB 2 `<guide>` family:**

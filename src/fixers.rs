@@ -983,6 +983,105 @@ fn parse_xml(text: &str) -> Option<roxmltree::Document<'_>> {
     roxmltree::Document::parse_with_options(text, opts).ok()
 }
 
+/// A content document made parseable by declaring the DTD-only named entities it
+/// uses (`&nbsp;` under an XHTML 1.1 DOCTYPE, which roxmltree can't resolve on its
+/// own) — the same reach epubveri gained in issue #23, so our structural fixers
+/// see the documents it now reports. Because the injection sits in the DOCTYPE
+/// (before every content element), a node's byte range in the parsed `working`
+/// text maps back to the **original** text by subtracting the inserted width.
+struct PreparedDoc {
+    working: String,
+    inject_at: usize,
+    inject_len: usize,
+}
+
+impl PreparedDoc {
+    fn parse(&self) -> Option<roxmltree::Document<'_>> {
+        parse_xml(&self.working)
+    }
+
+    /// Map a byte range in `working` back to the original text. Every content
+    /// element is after the injection point, so the mapping is a constant shift.
+    fn unshift(&self, r: Range<usize>) -> Range<usize> {
+        if self.inject_len == 0 || r.start < self.inject_at {
+            r
+        } else {
+            r.start - self.inject_len..r.end - self.inject_len
+        }
+    }
+}
+
+/// Prepare a content document for parsing. If it already parses, this is a no-op
+/// (no injection, ranges map straight through). Otherwise it declares the mappable
+/// named entities the document uses inside the DOCTYPE's internal subset, so the
+/// parser can resolve them — but only ever *reads* the original for the fix; the
+/// declarations exist solely so nodes can be located, never in the output.
+fn prepare_content_doc(text: &str) -> PreparedDoc {
+    let noop = |working: String| PreparedDoc {
+        working,
+        inject_at: 0,
+        inject_len: 0,
+    };
+    if parse_xml(text).is_some() {
+        return noop(text.to_string());
+    }
+    // The mappable, non-predefined entities actually used (raw-text scan).
+    let mut names: BTreeSet<&str> = BTreeSet::new();
+    let mut rest = text;
+    while let Some(i) = rest.find('&') {
+        let after = &rest[i + 1..];
+        match after.find(';') {
+            Some(j) if j > 0 && j < 12 && after[..j].chars().all(|c| c.is_ascii_alphanumeric()) => {
+                let name = &after[..j];
+                if !PREDEFINED_ENTITIES.contains(&name) && entities::lookup(name).is_some() {
+                    names.insert(name);
+                }
+                rest = &after[j..];
+            }
+            _ => break,
+        }
+    }
+    // No mappable entity, or no DOCTYPE to declare it in — nothing we can do.
+    if names.is_empty() {
+        return noop(text.to_string());
+    }
+    let Some(span) = doctype_span(text) else {
+        return noop(text.to_string());
+    };
+    let decls: String = names
+        .iter()
+        .map(|name| {
+            let value: String = entities::lookup(name)
+                .unwrap_or("")
+                .chars()
+                .map(|c| format!("&#{};", c as u32))
+                .collect();
+            format!("<!ENTITY {name} \"{value}\">")
+        })
+        .collect();
+    // Insert into an existing internal subset (before its `]`), or open one just
+    // before the DOCTYPE's closing `>`.
+    let doctype = &text[span.clone()];
+    let (at, insert) = match doctype.rfind(']') {
+        Some(close) => (span.start + close, decls),
+        None => (span.end - 1, format!("[{decls}]")),
+    };
+    let mut working = String::with_capacity(text.len() + insert.len());
+    working.push_str(&text[..at]);
+    working.push_str(&insert);
+    working.push_str(&text[at..]);
+    // If the injection didn't actually make it parse (unexpected shape), fall back
+    // to the original so a fixer simply declines rather than misbehaves.
+    if parse_xml(&working).is_none() {
+        return noop(text.to_string());
+    }
+    PreparedDoc {
+        working,
+        inject_at: at,
+        inject_len: insert.len(),
+    }
+}
+
 /// A namespace-exact attribute lookup.
 ///
 /// roxmltree 0.21 changed `Node::attribute(name)` to match by **local name,
@@ -1006,7 +1105,8 @@ impl<'a> NodeExt<'a> for roxmltree::Node<'a, '_> {
 }
 
 fn plan_encoding_normalization(text: &str) -> Option<Vec<MetaEdit>> {
-    let doc = parse_xml(text)?;
+    let prepared = prepare_content_doc(text);
+    let doc = prepared.parse()?;
 
     // (byte range, is this a `charset=` meta?)
     let mut metas: Vec<(Range<usize>, bool)> = Vec::new();
@@ -1031,7 +1131,7 @@ fn plan_encoding_normalization(text: &str) -> Option<Vec<MetaEdit>> {
         {
             return None;
         }
-        metas.push((n.range(), charset_attr.is_some()));
+        metas.push((prepared.unshift(n.range()), charset_attr.is_some()));
     }
 
     if metas.is_empty() {
@@ -1430,14 +1530,15 @@ fn bare_text_in_body(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
 /// `None` (decline) if the document doesn't parse or has no `<body>`; an empty
 /// vec means there was nothing bare to wrap.
 fn plan_body_text_wrapping(text: &str) -> Option<Vec<Range<usize>>> {
-    let doc = parse_xml(text)?;
+    let prepared = prepare_content_doc(text);
+    let doc = prepared.parse()?;
     let body = doc.descendants().find(|n| n.tag_name().name() == "body")?;
     let mut spans = Vec::new();
     for child in body.children() {
         if !child.is_text() {
             continue;
         }
-        let range = child.range();
+        let range = prepared.unshift(child.range());
         // The node's own source, so entity references keep their real width.
         let Some(raw) = text.get(range.clone()) else {
             continue;
@@ -2400,7 +2501,8 @@ fn empty_titles(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
 /// `None` when the document won't parse or its title isn't actually empty (the
 /// caller's finding is stale — decline rather than overwrite real text).
 fn plan_title_fill(text: &str, title: &str) -> Option<MetaEdit> {
-    let doc = parse_xml(text)?;
+    let prepared = prepare_content_doc(text);
+    let doc = prepared.parse()?;
     let node = doc
         .descendants()
         .find(|n| n.is_element() && n.tag_name().name() == "title")?;
@@ -2413,7 +2515,7 @@ fn plan_title_fill(text: &str, title: &str) -> Option<MetaEdit> {
         return None; // not empty — never overwrite existing content
     }
     Some(MetaEdit {
-        range: node.range(),
+        range: prepared.unshift(node.range()),
         replacement: format!("<title>{}</title>", escape_xml_text(title)),
     })
 }
@@ -2435,7 +2537,8 @@ pub fn toc_labels(ws: &Workspace) -> BTreeMap<String, String> {
         let Some(text) = ws.get_text(&toc) else {
             continue;
         };
-        let Some(doc) = parse_xml(&text) else {
+        let prepared = prepare_content_doc(&text);
+        let Some(doc) = prepared.parse() else {
             continue;
         };
         let base = dir_of(&toc);
@@ -2498,7 +2601,8 @@ pub fn toc_label_for(ws: &Workspace, doc: &str) -> Option<String> {
 /// `None` when it won't parse, has no heading, or the heading is empty (a purely
 /// decorative one, e.g. a heading holding only an image).
 pub fn first_heading_text(text: &str) -> Option<String> {
-    let doc = parse_xml(text)?;
+    let prepared = prepare_content_doc(text);
+    let doc = prepared.parse()?;
     let h = doc.descendants().find(|n| {
         n.is_element() && matches!(n.tag_name().name(), "h1" | "h2" | "h3" | "h4" | "h5" | "h6")
     })?;
@@ -2627,6 +2731,70 @@ fn escape_xml_attr(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The parse gap: an EPUB 2 doc with an XHTML 1.1 DOCTYPE and `&nbsp;` that
+    /// roxmltree can't parse on its own. The fixer must locate the empty <title>
+    /// via entity-declared parsing and edit the ORIGINAL text at the right bytes.
+    const NBSP_DOC: &str = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n\
+<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.1//EN\" \"http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd\">\n\
+<html xmlns=\"http://www.w3.org/1999/xhtml\"><head><title></title></head>\
+<body><p>a&nbsp;b &mdash; c</p></body></html>";
+
+    #[test]
+    fn prepared_doc_makes_an_nbsp_document_parse() {
+        assert!(
+            parse_xml(NBSP_DOC).is_none(),
+            "precondition: raw doc does not parse"
+        );
+        let prepared = prepare_content_doc(NBSP_DOC);
+        assert!(prepared.inject_len > 0, "entities were declared");
+        assert!(prepared.parse().is_some(), "now it parses");
+    }
+
+    #[test]
+    fn title_fill_lands_correctly_through_the_parse_gap() {
+        let edit = plan_title_fill(NBSP_DOC, "Chapter One").expect("fix");
+        // The range is in ORIGINAL coordinates: applying it to NBSP_DOC must
+        // replace exactly the empty <title>, nothing shifted.
+        let out = apply_edits(NBSP_DOC, vec![edit]);
+        assert!(
+            out.contains("<title>Chapter One</title>"),
+            "title filled: {out}"
+        );
+        assert!(
+            out.contains("a&nbsp;b &mdash; c"),
+            "body entities untouched"
+        );
+        assert!(out.contains("xhtml11.dtd"), "DOCTYPE untouched");
+        assert!(
+            !out.contains("<!ENTITY"),
+            "no injected declarations leak into output"
+        );
+        // And the result is a well-formed EPUB 2 doc again (parses with the DTD entities declared).
+        assert!(prepare_content_doc(&out).parse().is_some());
+    }
+
+    #[test]
+    fn prepared_doc_is_a_noop_when_the_document_already_parses() {
+        let ok = "<html><head><title></title></head><body><p>hi</p></body></html>";
+        let prepared = prepare_content_doc(ok);
+        assert_eq!(prepared.inject_len, 0);
+        assert_eq!(
+            prepared.unshift(5..9),
+            5..9,
+            "no shift when nothing injected"
+        );
+    }
+
+    #[test]
+    fn first_heading_reads_through_the_parse_gap() {
+        let doc = "<?xml version=\"1.0\"?>\n\
+<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.1//EN\" \"http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd\">\n\
+<html xmlns=\"http://www.w3.org/1999/xhtml\"><body><h1>Title&nbsp;Here</h1></body></html>";
+        assert!(parse_xml(doc).is_none());
+        // collapse_ws normalizes the resolved nbsp to a plain space.
+        assert_eq!(first_heading_text(doc).as_deref(), Some("Title Here"));
+    }
 
     const GUIDE_OPF: &str = r#"<?xml version="1.0"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="2.0">
