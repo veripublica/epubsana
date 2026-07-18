@@ -25,6 +25,8 @@ pub fn plan(report: &Report, ws: &Workspace, _goal: Goal) -> Vec<ProposedFix> {
     fixes.extend(content_properties(report, ws));
     fixes.extend(empty_titles(report, ws));
     fixes.extend(bare_text_in_body(report, ws));
+    fixes.extend(doctype_html5(report, ws));
+    fixes.extend(doctype_xhtml11(report, ws));
     fixes.extend(manifest_dangling_items(report, ws));
     fixes.extend(spine_dangling_itemrefs(report, ws));
     fixes.extend(spine_duplicate_itemrefs(report, ws));
@@ -269,6 +271,182 @@ fn entity_missing_semicolon(report: &Report, ws: &Workspace) -> Vec<ProposedFix>
         });
     }
     fixes
+}
+
+/// The one correct EPUB 2 XHTML content-document DOCTYPE.
+const CANONICAL_XHTML11_DOCTYPE: &str = "<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.1//EN\" \
+     \"http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd\">";
+
+/// The byte range of the document's `<!DOCTYPE …>` declaration, bounded by the
+/// DOCTYPE's own closing `>` — after a `[ … ]` internal subset if one is present,
+/// never a `>` or `[` that belongs to the body. (The bound-by-the-DOCTYPE
+/// discipline is the lesson of epubveri's bracket bug: a footnote `[1]` in the
+/// body must not be mistaken for an internal subset.) `None` if absent.
+fn doctype_span(text: &str) -> Option<Range<usize>> {
+    let start = text.find("<!DOCTYPE")?;
+    let rest = &text[start..];
+    let gt = rest.find('>')?;
+    let end_rel = match rest.find('[') {
+        // An internal subset opens before the first `>`: the declaration really
+        // ends at the first `>` after the matching `]`.
+        Some(b) if b < gt => {
+            let close = b + rest[b..].find(']')?;
+            close + rest[close..].find('>')?
+        }
+        _ => gt,
+    };
+    Some(start..start + end_rel + 1)
+}
+
+/// `HTM-004` / `htm.doctype.epub3_obsolete_public_id`: an EPUB 3 content document
+/// whose DOCTYPE carries a `PUBLIC` identifier. HTML5 has exactly one legal
+/// doctype, `<!DOCTYPE html>`, so any public/system identifier is obsolete —
+/// reduce the whole declaration to that. A doctype declares no content, so this
+/// changes nothing a reader sees. Declines when the DOCTYPE has an internal
+/// subset (`[ … ]`) — those declarations (entities) may be in use and HTML5's
+/// doctype cannot carry them. No `params`; the DOCTYPE is located by scan.
+/// `AutoSafe`.
+fn doctype_html5(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    let files: BTreeSet<&str> = report
+        .messages
+        .iter()
+        .filter(|m| m.rule == Some("htm.doctype.epub3_obsolete_public_id"))
+        .filter_map(|m| m.location.as_deref())
+        .collect();
+
+    let mut fixes = Vec::new();
+    for file in files {
+        let Some(text) = ws.get_text(file) else {
+            continue;
+        };
+        let Some(span) = doctype_span(&text) else {
+            continue;
+        };
+        if text[span.clone()].contains('[') {
+            continue; // internal subset — leave it for a human
+        }
+
+        let file_for_apply = file.to_string();
+        fixes.push(ProposedFix {
+            fix_id: "fix.doctype_html5",
+            addresses_id: "HTM-004".to_string(),
+            addresses_rule: Some("htm.doctype.epub3_obsolete_public_id"),
+            addresses_severity: addressed_severity(
+                report,
+                "HTM-004",
+                Some("htm.doctype.epub3_obsolete_public_id"),
+            ),
+            tier: Tier::AutoSafe,
+            title: format!("Reduce the obsolete DOCTYPE in {file} to <!DOCTYPE html>"),
+            rationale:
+                "HTML5 has exactly one legal doctype, <!DOCTYPE html>; an EPUB 3 document's \
+                 PUBLIC identifier is obsolete. A doctype declares no content, so reducing it \
+                 changes nothing a reader sees and clears the finding. The document's markup is \
+                 untouched."
+                    .to_string(),
+            preview: vec![Change {
+                path: file.to_string(),
+                note: "DOCTYPE → <!DOCTYPE html>".to_string(),
+            }],
+            apply_fn: Box::new(move |ws: &mut Workspace| {
+                if let Some(text) = ws.get_text(&file_for_apply)
+                    && let Some(span) = doctype_span(&text)
+                    && !text[span.clone()].contains('[')
+                {
+                    let mut out = String::with_capacity(text.len());
+                    out.push_str(&text[..span.start]);
+                    out.push_str("<!DOCTYPE html>");
+                    out.push_str(&text[span.end..]);
+                    ws.set_text(&file_for_apply, out);
+                }
+            }),
+        });
+    }
+    fixes
+}
+
+/// `HTM-004` / `htm.doctype.epub2_unrecognized_public_id`: an EPUB 2 content
+/// document whose DOCTYPE is not one EPUB 2 recognizes (XHTML 1.1 or OEB 1.2).
+///
+/// **Deliberately narrow.** The recognized set is only XHTML 1.1, so this finding
+/// also fires on a document declaring a *different, legitimate* DTD — XHTML 1.0, a
+/// bare `<!DOCTYPE html>`, OEB. Relabeling those to 1.1 is not a safe rename (1.0
+/// permits constructs 1.1 removed, e.g. `name=` anchors), and proving a document
+/// is already valid 1.1 is the detector's job, not ours. So the fixer canonicalizes
+/// **only** a malformed XHTML 1.1 identifier — one whose text names XHTML 1.1 (or
+/// the `xhtml11.dtd` system id) but mistypes the exact recognized string — where
+/// the author's intent is unambiguous. Anything else is declined and stays
+/// reported. `ConfirmNeeded` (it edits the declared document type).
+fn doctype_xhtml11(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    let files: BTreeSet<&str> = report
+        .messages
+        .iter()
+        .filter(|m| m.rule == Some("htm.doctype.epub2_unrecognized_public_id"))
+        .filter_map(|m| m.location.as_deref())
+        .collect();
+
+    let mut fixes = Vec::new();
+    for file in files {
+        let Some(text) = ws.get_text(file) else {
+            continue;
+        };
+        let Some(span) = doctype_span(&text) else {
+            continue;
+        };
+        if !is_malformed_xhtml11(&text[span.clone()]) {
+            continue; // a genuinely different DTD — never relabel it
+        }
+
+        let file_for_apply = file.to_string();
+        fixes.push(ProposedFix {
+            fix_id: "fix.doctype_xhtml11",
+            addresses_id: "HTM-004".to_string(),
+            addresses_rule: Some("htm.doctype.epub2_unrecognized_public_id"),
+            addresses_severity: addressed_severity(
+                report,
+                "HTM-004",
+                Some("htm.doctype.epub2_unrecognized_public_id"),
+            ),
+            tier: Tier::ConfirmNeeded,
+            title: format!("Canonicalize the malformed XHTML 1.1 DOCTYPE in {file}"),
+            rationale:
+                "The DOCTYPE names XHTML 1.1 but mistypes the exact identifier EPUB 2 requires, so \
+                 the author's intent is unambiguous and the canonical form is the one correct \
+                 spelling. A document declaring a genuinely different DTD is declined instead, \
+                 since relabeling it would assert a content model epubsana cannot verify."
+                    .to_string(),
+            preview: vec![Change {
+                path: file.to_string(),
+                note: "DOCTYPE → canonical XHTML 1.1".to_string(),
+            }],
+            apply_fn: Box::new(move |ws: &mut Workspace| {
+                if let Some(text) = ws.get_text(&file_for_apply)
+                    && let Some(span) = doctype_span(&text)
+                    && is_malformed_xhtml11(&text[span.clone()])
+                {
+                    let mut out = String::with_capacity(text.len());
+                    out.push_str(&text[..span.start]);
+                    out.push_str(CANONICAL_XHTML11_DOCTYPE);
+                    out.push_str(&text[span.end..]);
+                    ws.set_text(&file_for_apply, out);
+                }
+            }),
+        });
+    }
+    fixes
+}
+
+/// A DOCTYPE that clearly *intends* XHTML 1.1 but isn't the exact recognized
+/// identifier: it names the 1.1 version, or points at the `xhtml11.dtd`, yet
+/// (having been flagged) doesn't carry the canonical string. An internal subset
+/// declines it — canonicalizing would drop `[ … ]` declarations that may be used.
+fn is_malformed_xhtml11(doctype: &str) -> bool {
+    if doctype.contains('[') {
+        return false;
+    }
+    let names_11 =
+        doctype.to_ascii_uppercase().contains("XHTML 1.1") || doctype.contains("xhtml11.dtd");
+    names_11 && !doctype.contains("-//W3C//DTD XHTML 1.1//EN")
 }
 
 /// `RSC-005` / `ncx.ids.invalid_ncname`: an `id` attribute in the NCX that is
@@ -2011,6 +2189,70 @@ fn escape_xml_attr(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn doctype_span_stops_at_the_declaration_not_a_body_bracket() {
+        // A footnote [1] in the body must not extend the DOCTYPE (the bracket-bug lesson).
+        let t = "<!DOCTYPE html PUBLIC \"x\" \"y\">\n<html><body><p>note [1]</p></body></html>";
+        let span = doctype_span(t).expect("span");
+        assert_eq!(&t[span], "<!DOCTYPE html PUBLIC \"x\" \"y\">");
+    }
+
+    #[test]
+    fn doctype_span_includes_a_real_internal_subset() {
+        let t = "<!DOCTYPE html [ <!ENTITY nbsp \"&#160;\"> ]>\n<html/>";
+        let span = doctype_span(t).expect("span");
+        assert!(
+            t[span].ends_with("]>"),
+            "the subset is part of the declaration"
+        );
+    }
+
+    #[test]
+    fn epub3_obsolete_reduces_to_html5_doctype() {
+        let t = "<?xml version=\"1.0\"?>\n<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.1//EN\" \"http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd\">\n<html/>";
+        let span = doctype_span(t).unwrap();
+        let out = format!("{}<!DOCTYPE html>{}", &t[..span.start], &t[span.end..]);
+        assert!(out.contains("<!DOCTYPE html>\n<html/>"));
+        assert!(!out.contains("PUBLIC"));
+    }
+
+    #[test]
+    fn malformed_xhtml11_is_recognized_when_it_names_1_1() {
+        // Missing a slash — clearly intends 1.1, not the exact recognized string.
+        assert!(is_malformed_xhtml11(
+            "<!DOCTYPE html PUBLIC \"-//W3C/DTD XHTML 1.1//EN\" \"http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd\">"
+        ));
+    }
+
+    #[test]
+    fn xhtml_1_0_is_not_treated_as_malformed_1_1() {
+        // The corpus case: XHTML 1.0 Strict is a DIFFERENT DTD — must be declined.
+        assert!(!is_malformed_xhtml11(
+            "<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.0 Strict//EN\" \"http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd\">"
+        ));
+    }
+
+    #[test]
+    fn bare_html5_doctype_in_epub2_is_declined() {
+        assert!(!is_malformed_xhtml11("<!DOCTYPE html>"));
+    }
+
+    #[test]
+    fn exact_xhtml11_identifier_is_not_flagged_as_malformed() {
+        // If it already carries the recognized string, there's nothing to canonicalize.
+        assert!(!is_malformed_xhtml11(
+            "<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.1//EN\" \"http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd\">"
+        ));
+    }
+
+    #[test]
+    fn malformed_xhtml11_with_internal_subset_is_declined() {
+        // Canonicalizing would drop the subset's declarations.
+        assert!(!is_malformed_xhtml11(
+            "<!DOCTYPE html PUBLIC \"-//W3C/DTD XHTML 1.1//EN\" \"x\" [ <!ENTITY foo \"bar\"> ]>"
+        ));
+    }
 
     #[test]
     fn missing_semicolon_maps_a_known_entity_to_its_character() {

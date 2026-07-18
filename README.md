@@ -13,7 +13,7 @@ changed**. It never guesses, and it preserves everything it doesn't touch.
 ## Status
 
 Early but working. The core contract (`Workspace` → detect → propose → confirm →
-apply → report) is solid, with thirteen fixers so far:
+apply → report) is solid, with fifteen fixers so far:
 
 - **`RSC-016`** — undeclared HTML entities (`&nbsp;`, `&mdash;`, …) → the exact
   character each denotes.
@@ -42,6 +42,11 @@ apply → report) is solid, with thirteen fixers so far:
   (a chapter appearing twice) → the first occurrence kept, the repeats dropped.
   Declines when the entries differ in `linear`: that is an authored intent, not
   a duplicate.
+- **`HTM-004`** — an obsolete DOCTYPE. An EPUB 3 document's PUBLIC identifier →
+  reduced to `<!DOCTYPE html>`; an EPUB 2 document's malformed XHTML 1.1
+  identifier → canonicalized. Declines a document that declares a genuinely
+  different DTD (XHTML 1.0, …), since relabeling it would assert an unverified
+  content model.
 
 More fixers land next, in real-world impact order.
 

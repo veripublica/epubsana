@@ -12,6 +12,27 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
 ### Added
 
+- **Two fixers for an obsolete or unrecognized DOCTYPE** (`HTM-004`), closing out
+  the `htm.doctype` family:
+  - `htm.doctype.epub3_obsolete_public_id` (`fix.doctype_html5`, AutoSafe) — an
+    EPUB 3 document's DOCTYPE carrying a PUBLIC identifier is reduced to HTML5's
+    only legal form, `<!DOCTYPE html>`. Declines a DOCTYPE with an internal subset,
+    whose `[ … ]` declarations HTML5 can't carry.
+  - `htm.doctype.epub2_unrecognized_public_id` (`fix.doctype_xhtml11`,
+    ConfirmNeeded) — an EPUB 2 DOCTYPE whose identifier is a **malformed XHTML 1.1**
+    id (names 1.1 / the `xhtml11.dtd` but mistypes the exact string) is canonicalized
+    to the recognized form. **Declines a document declaring a genuinely different DTD**
+    (XHTML 1.0, a bare `<!DOCTYPE html>`, OEB): relabeling it to 1.1 would assert a
+    content model epubsana can't verify and risks trading the finding for
+    content-model errors. On the corpus the one affected book (XHTML 1.0 Strict, 77×)
+    is declined, correctly.
+
+  Both are surgical on the DOCTYPE only and bound it by its own closing `>` (never a
+  body `[1]`), the lesson of the upstream bracket bug. The `htm.doctype` family is
+  now handled end to end — every finding gets a repair or a principled decline —
+  though not "every occurrence rewritten"; the decline is the "never guess" rule at
+  work. See `docs/COVERAGE.md`.
+
 - **A fixer for an entity reference missing its closing `;`**
   (`RSC-016` / `htm.entity.missing_semicolon`, *fatal*) — `&nbsp` for `&nbsp;`.
   A recognized name is replaced by the character it denotes (well-formed with or

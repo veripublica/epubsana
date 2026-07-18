@@ -36,6 +36,8 @@ grows one carefully-argued entry at a time.
 | `RSC-001` | `opf.manifest_item.missing_resource` | ConfirmNeeded | A manifest `<item>` declares a resource the container doesn't hold | [Drop the item, and every reference that named it](#rsc-001--dangling-manifest-item) |
 | `OPF-049` | `opf.spine.itemref_idref_not_in_manifest` | ConfirmNeeded | A spine `<itemref>` names a manifest id that doesn't exist | [Drop the itemref](#opf-049--dangling-spine-itemref) |
 | `OPF-034` / `RSC-005` | `opf.spine.duplicate_itemref` | ConfirmNeeded | The spine lists the same manifest item more than once | [Keep the first occurrence, drop the later ones](#opf-034--rsc-005--duplicate-spine-itemref) |
+| `HTM-004` | `htm.doctype.epub3_obsolete_public_id` | AutoSafe | An EPUB 3 document's DOCTYPE carries an obsolete PUBLIC identifier | [Reduce it to `<!DOCTYPE html>`](#htm-004--obsolete-or-unrecognized-doctype) |
+| `HTM-004` | `htm.doctype.epub2_unrecognized_public_id` | ConfirmNeeded | An EPUB 2 document's DOCTYPE isn't a recognized XHTML 1.1 / OEB identifier | [Canonicalize a malformed XHTML 1.1 id; decline a genuinely different DTD](#htm-004--obsolete-or-unrecognized-doctype) |
 
 **A note on structural fixers.** Fixers that must locate an element (rather than
 match a token) parse the document with `roxmltree` using `allow_dtd: true`, the
@@ -513,3 +515,75 @@ Kindle→EPUB conversions — the shelf structurally cannot see this defect clas
 Reproduced by epublift on a real book outside it (a Kindle conversion of *Project
 Hail Mary*), and cheap and provably safe, so it lands on that evidence rather than
 on ours. The guards are argued and unit-tested, not corpus-tested.
+
+---
+
+## HTM-004 — obsolete or unrecognized DOCTYPE
+
+Two `HTM-004` findings, one per EPUB version, share a repair section because they
+are the same defect seen through each version's rules. Both carry **no `params`**
+and a position at the DOCTYPE. The repairs are **surgical on the DOCTYPE only** —
+no other byte of the document is read or rewritten — and both bound the DOCTYPE the
+way epubveri now does (up to its own closing `>`, never a `[` elsewhere in the
+body — the lesson of the upstream bracket bug).
+
+### `htm.doctype.epub3_obsolete_public_id` (EPUB 3) — `fix.doctype_html5`, AutoSafe
+
+**Finding.** An EPUB 3 (HTML5) content document's DOCTYPE contains a `PUBLIC`
+identifier. HTML5 has exactly one legal doctype — `<!DOCTYPE html>` — so any
+public/system identifier is obsolete.
+
+**Fix.** Replace the whole DOCTYPE with `<!DOCTYPE html>`.
+
+**Why it's safe.** `<!DOCTYPE html>` is the one correct HTML5 doctype, and a
+doctype declares no content — reducing it changes nothing a reader sees and clears
+the finding. The document's own markup is untouched.
+
+**When it declines.** If the DOCTYPE carries an **internal subset** (`<!DOCTYPE
+html PUBLIC … [ … ]>`) — those `[ … ]` declarations (entities, notably) may be in
+use, and HTML5's doctype cannot carry them, so stripping to `<!DOCTYPE html>`
+could break the document. That is not a doctype relabel, so the fixer leaves it
+for a human. (Also declines if the DOCTYPE can't be located.)
+
+### `htm.doctype.epub2_unrecognized_public_id` (EPUB 2) — `fix.doctype_xhtml11`, ConfirmNeeded
+
+**Finding.** An EPUB 2 content document's DOCTYPE is **not** one of the two EPUB 2
+recognizes: `-//W3C//DTD XHTML 1.1//EN` or the OEB 1.2 identifier. EPUB 2 requires
+XHTML 1.1.
+
+**This one is deliberately narrow, and the reason is the whole point.** The
+recognized set is *only* XHTML 1.1. So this finding also fires on a document that
+declares a **different, legitimate DTD** — XHTML 1.0 Strict/Transitional, a bare
+HTML5 `<!DOCTYPE html>`, or an OEB variant. Relabeling such a document to XHTML 1.1
+is **not** a safe rename: XHTML 1.0 permits constructs 1.1 removed (`name=` on
+anchors — a common fragment-target idiom in old books — presentational attributes,
+…), so stamping `1.1` on a 1.0 document can trade this finding for a fresh crop of
+content-model errors. Proving the document is *already* valid 1.1 is the detector's
+job, not ours, and we do not re-validate at plan time. So we do not guess a content
+model.
+
+**Fix.** Set the DOCTYPE's public (and system) identifier to the canonical
+recognized XHTML 1.1 form **only when the existing identifier is clearly a
+malformed XHTML 1.1 identifier** — its public-id text names XHTML 1.1, or its
+system id is the `xhtml11.dtd` URL, but the exact recognized string is mistyped
+(wrong whitespace, a missing slash). There the author's intent is unambiguous and
+the canonical form is the one correct spelling.
+
+`ConfirmNeeded`: it edits the declared document type, which a strict reader can act
+on.
+
+**When it declines — which on real books is the common case.** A DOCTYPE that
+declares a *genuinely different* DTD (XHTML 1.0, bare `<!DOCTYPE html>`, OEB, or
+nonsense) is left untouched and the finding stays reported: correcting it would
+assert a content model epubsana can't verify. On the reference corpus the single
+affected book is XHTML 1.0 Strict (77×) — **declined**, correctly. Also declines if
+the DOCTYPE can't be located.
+
+### What this means for the family claim
+
+`htm.doctype` is **handled end to end** — every finding gets either a repair or a
+principled decline — but it is *not* "every occurrence rewritten". The honest
+public phrasing is: *epubsana normalizes obsolete EPUB 3 doctypes and canonicalizes
+malformed XHTML 1.1 identifiers, and declines to relabel a document that declares a
+different DTD (which would assert an unverified content model).* The decline is a
+feature, not a gap: it is the same "never guess" rule that governs every fixer here.
