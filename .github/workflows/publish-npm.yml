@@ -116,6 +116,40 @@ jobs:
         if: steps.check.outputs.skip == 'false'
         run: wasm-pack build epubsana-wasm --target bundler --scope veripublica
 
+      # wasm-pack writes package.json's `files` list *before* it copies the
+      # licence files into pkg/, so on a clean checkout LICENSE-COMMERCIAL.md
+      # is present in the directory but absent from the list — and npm's
+      # always-include rules cover `LICENSE` but not that name. The published
+      # 0.6.0 package went out without the commercial licence for exactly this
+      # reason; 0.5.0 escaped it only because it was built over a stale pkg/
+      # that already held the file, which is also why the local build and the
+      # runner disagreed. epubsana is dual-licensed, and the commercial terms
+      # are how a closed embedder knows what they bought: list it explicitly.
+      - name: Include the commercial licence in the package
+        if: steps.check.outputs.skip == 'false'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp epubsana-wasm/LICENSE-COMMERCIAL.md epubsana-wasm/pkg/
+          jq '.files = ((.files // []) + ["LICENSE-COMMERCIAL.md"] | unique)' \
+            epubsana-wasm/pkg/package.json > package.json.tmp
+          mv package.json.tmp epubsana-wasm/pkg/package.json
+
+      # Assert on the *packed* file list rather than on pkg/, because that is
+      # where the two diverged: a file can sit in the directory and still not
+      # ship. This is the guard that would have caught the 0.6.0 omission.
+      - name: Verify both licences ship
+        if: steps.check.outputs.skip == 'false'
+        shell: bash
+        run: |
+          set -euo pipefail
+          files=$(npm pack ./epubsana-wasm/pkg --dry-run --json | jq -r '.[0].files[].path')
+          echo "$files"
+          for want in LICENSE LICENSE-COMMERCIAL.md; do
+            grep -qx "$want" <<< "$files" \
+              || { echo "::error::$want is missing from the npm package"; exit 1; }
+          done
+
       # Confirm the built package is what we think it is before publishing:
       # right name and version, and no stray files. (The iCloud conflict-copy
       # check is moot on a runner, but a surprise in the file list is worth
