@@ -13,7 +13,7 @@ changed**. It never guesses, and it preserves everything it doesn't touch.
 ## Status
 
 Early but working. The core contract (`Workspace` → detect → propose → confirm →
-apply → report) is solid, with twenty-one fixers so far:
+apply → report) is solid, with twenty-two fixers so far:
 
 - **`RSC-016`** — undeclared HTML entities (`&nbsp;`, `&mdash;`, …) → the exact
   character each denotes.
@@ -67,6 +67,10 @@ apply → report) is solid, with twenty-one fixers so far:
 - **`RSC-005` / empty `lang`** — an empty `lang=""` / `xml:lang=""`, which EPUB 2
   doesn't allow → deleted, so the element inherits its parent's language. A
   malformed tag is never guessed at.
+- **`OPF-054`** — a `<dc:date>` with no content → dropped; the element states no
+  date and `dc:date` is optional. A malformed but non-empty date (`March 2019`)
+  is left exactly as it is: it carries a date the author wrote, and deciding
+  which characters are stray would be a guess.
 
 More fixers land next, in real-world impact order.
 

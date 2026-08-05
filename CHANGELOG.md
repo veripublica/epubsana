@@ -8,6 +8,38 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [Unreleased]
+
+### Added
+
+- **A fixer for an empty `<dc:date>`** (`OPF-054`), the last of the four defects
+  `epublift` handed over ([#5](https://github.com/veripublica/epubsana/issues/5)).
+  An element with no content states no date, and `dc:date` is optional, so it is
+  dropped.
+
+  **What it does not do is the point of it.** epubveri's check is not "is the
+  date empty" but "is it a valid W3C-DTF date", so the same id and the same
+  message also cover `2022-09-08)` and `March 2019` — malformed values that still
+  carry a date the author wrote. Those are **declined**: dropping one would
+  destroy information the book has, and repairing one means guessing which
+  characters are stray. The finding survives the repair, which is the honest
+  outcome. An empty element whose `id` a `<meta refines>` targets is declined too.
+
+  The claim to make for this fixer is therefore *"removes an empty `dc:date`,
+  leaves a malformed one alone"* — not *"repairs `OPF-054`"*.
+
+  Worth recording for anyone reading the id: `OPF-054` is **EPUB 2 only**. On
+  EPUB 3 the identical condition is `OPF-053` at *Warning*, which never moves the
+  validity line — the same version-scoped id split as the duplicate spine
+  itemref, cutting the other way.
+
+  **Zero occurrences on the 94-book shelf**, and zero on the earlier 171-book
+  corpus: verified by injection end to end (an empty date takes a book from 1
+  error to fully valid; a malformed one is left untouched with its finding
+  intact), and its guards are covered by unit tests rather than by real books.
+  The shelf's one nearby specimen is an `OPF-053` reading `2022-09-08)` — the
+  declining case, on the id this fixer does not act on.
+
 ## [0.6.0] - 2026-08-05
 
 Tracks `epubveri` from 0.5.15 to **0.9.7**, which corrects a false positive

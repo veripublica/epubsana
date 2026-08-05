@@ -44,6 +44,7 @@ grows one carefully-argued entry at a time.
 | `RSC-017` | `opf.guide.duplicate_reference` | ConfirmNeeded | Two `<guide>` references share a `type` and `href` | [Keep the first, drop the duplicates](#rsc-007--rsc-017--guide-references) |
 | `RSC-005` | `htm.obsolete_attribute` (`params[0] == "name"`) | AutoSafe | A legacy `<a name>` anchor duplicating the element's own `id` | [Drop the `name` attribute](#rsc-005--a-legacy-name-attribute-on-a) |
 | `RSC-005` | `opf.content_document.schema_violation` (empty `lang`/`xml:lang`) | ConfirmNeeded | An empty language tag, which EPUB 2's grammar does not allow | [Delete the attribute](#rsc-005--an-empty-lang--xmllang) |
+| `OPF-054` | *(none)* | ConfirmNeeded | A `<dc:date>` holds no date at all (EPUB 2) | [Drop the empty element; never touch a non-empty one](#opf-054--an-empty-dcdate-epub-2) |
 
 **A note on structural fixers.** Fixers that must locate an element (rather than
 match a token) parse the document with `roxmltree` using `allow_dtd: true`, the
@@ -877,3 +878,71 @@ is exactly the invention epubsana refuses.
 94-book shelf, all empty-valued. The same caveat as the anchor fixer applies: one
 book shows the shape is real and the repair right for it, and the declines carry
 the weight for everything else.
+
+---
+
+## OPF-054 — an empty `<dc:date>` (EPUB 2)
+
+**Finding.** `OPF-054`, **no `rule`**, reported on the package document at the
+offending element: *dc:date value '' is empty or doesn't conform to ISO 8601*.
+Contributed as a requirement by `epublift`, which carried its own repair for it
+([#5](https://github.com/veripublica/epubsana/issues/5)).
+
+**Read the emission site before believing the id.** Two things about it decide
+the whole shape of this fixer:
+
+- **It is EPUB 2 only.** epubveri runs one check (`is_valid_dc_date`) and splits
+  by version: `OPF-054`/Error on EPUB 2, **`OPF-053`/Warning on EPUB 3**. The same
+  version-scoped split as the duplicate spine itemref, and the same lesson —
+  except here it cuts the other way. An EPUB 3 book with a broken date is not
+  invalid, so there is nothing for a `--goal valid` repairer to clear.
+- **The trigger is not "empty".** It is "not a valid W3C-DTF date", which covers
+  an empty value *and* a malformed one, under one id and one message. That
+  distinction is this fixer's entire content: the two need opposite treatment.
+
+**Fix** (`fix.empty_dc_date`, ConfirmNeeded). Drop every `<dc:date>` child of
+`<metadata>` whose text content is empty or whitespace-only, with the whitespace
+that preceded it. One proposal per package document.
+
+**Why it is safe.** An empty element states nothing: there is no date in it to
+lose, and `dc:date` is optional in EPUB 2 (only `dc:title`, `dc:identifier` and
+`dc:language` are required), so its absence is valid. The invariant carried over
+from epublift's version — *only drop an empty element if a non-empty sibling of
+the same required type survives* — is kept, and is vacuous here precisely because
+`dc:date` is not one of the required types.
+
+**Why `ConfirmNeeded` and not `AutoSafe`.** It is a deletion of authored markup,
+and an empty `<dc:date>` is a statement that a date was *meant* to be here.
+Removing it is safe for validity and still destroys the only evidence the book's
+date is missing rather than never-intended. That is the caller's call.
+
+**Filling it instead is out of scope, deliberately.** The natural comparison is
+`empty_title`, which fills rather than drops — but that fixer moves text the
+author already wrote from one part of the container to another. A publication
+date is not in the book; getting one means asking a third party over a network,
+which is asserting a fact about the world and writing it into someone's file.
+That is outside epubsana's contract (repair what epubveri reports, using only
+what is in the container). If enrichment happens it belongs to the orchestrator,
+which then hands us a `<dc:date>` that isn't empty and we propose nothing.
+
+**When it declines.**
+
+- **Any non-empty value — and this is the majority of what `OPF-054` reports.**
+  `2022-09-08)`, `March 2019`, `2019/10/31` are malformed but they carry a real
+  authored date. Dropping one destroys information the book actually has, and
+  repairing one means deciding which characters are stray or parsing natural
+  language — a guess either way. Left untouched, so the finding survives the
+  repair, which is the honest outcome.
+- **A `<dc:date>` carrying an `id` that a `<meta refines="#…">` targets.**
+  Dropping it would orphan the refinement and trade this finding for another.
+- A package document that doesn't parse, or in which no `<dc:date>` is empty
+  (including the case where the finding is real but describes a malformed value).
+
+**Measured.** **Zero** occurrences on the 94-book shelf, and zero on the earlier
+171-book corpus — injection-only on both sides, which is why it ranked last of
+the four fixers `epublift` handed over. What the shelf does hold is one
+`OPF-053`: an EPUB 3 book whose date reads `2022-09-08)`. That is the declining
+case, on the id this fixer does not act on — so the single real-world specimen we
+have is evidence for the decline, not for the repair. The guards are covered by
+unit tests, not by real books, and that should be said plainly whenever this
+fixer is claimed.

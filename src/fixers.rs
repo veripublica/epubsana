@@ -36,6 +36,7 @@ pub fn plan(report: &Report, ws: &Workspace, _goal: Goal) -> Vec<ProposedFix> {
     fixes.extend(spine_duplicate_itemrefs(report, ws));
     fixes.extend(guide_dangling_references(report, ws));
     fixes.extend(guide_duplicate_references(report, ws));
+    fixes.extend(empty_dc_date(report, ws));
     fixes.extend(mimetype_packaging(report, ws));
     // Future fixers append here, in a sensible confirm order — and in
     // `handled_rules()` below.
@@ -52,8 +53,8 @@ pub fn plan(report: &Report, ws: &Workspace, _goal: Goal) -> Vec<ProposedFix> {
 /// like a fixer that does not exist), which is precisely the confusion that made
 /// this list necessary.
 ///
-/// Findings epubveri reports with no `rule` at all (`NCX-001`, `PKG-006`) are
-/// addressed by id and so cannot appear here.
+/// Findings epubveri reports with no `rule` at all (`NCX-001`, `PKG-006`,
+/// `OPF-054`) are addressed by id and so cannot appear here.
 ///
 /// **Keep this in sync with [`plan`].** Nothing enforces it at compile time; the
 /// census cross-checks at runtime and reports any rule a proposal addressed that
@@ -2596,6 +2597,132 @@ fn compute_guide_duplicate_edits(opf: &str) -> Option<Vec<MetaEdit>> {
     (!edits.is_empty()).then_some(edits)
 }
 
+/// `OPF-054`: a `<dc:date>` that holds no date at all. Drop the element.
+///
+/// **Dispatches on the bare `id`** — this site has no `rule` and needs none: it
+/// says one thing, and the finding is only a trigger. We re-find the element in
+/// the package document ourselves, the same re-locate-by-predicate strategy the
+/// other structural fixers use, so no `params` are required either.
+///
+/// **The id is narrower than it looks, and the trigger is wider.** epubveri runs
+/// one check (`is_valid_dc_date`) and splits by version: `OPF-054`/Error on EPUB
+/// 2, `OPF-053`/**Warning** on EPUB 3 — so this only ever moves the validity
+/// line on EPUB 2, and the scope comes from the detector rather than from a
+/// version test here. The check is *not* "is it empty" but "is it a valid W3C-DTF
+/// date", which reports an empty value and a malformed one under the same id and
+/// the same message text.
+///
+/// That distinction is this fixer's whole content, because the two need opposite
+/// treatment. An empty element states nothing and `dc:date` is optional in EPUB 2
+/// (only `title`, `identifier` and `language` are required), so dropping it loses
+/// nothing. A malformed but non-empty value — `2022-09-08)`, `March 2019` — is a
+/// real authored date: dropping it destroys information the book has, and
+/// repairing it means deciding which characters are stray, or parsing natural
+/// language. **Every non-empty value is declined**, and the finding survives the
+/// repair. Filling an empty one from a catalogue is not on the table either: the
+/// date is not in the container, so writing one would be asserting a fact about
+/// the world (see `docs/FIXERS.md`).
+///
+/// `ConfirmNeeded`: it deletes authored markup, and an empty `<dc:date>` is a
+/// statement that a date was *meant* to be here.
+fn empty_dc_date(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    let files: BTreeSet<&str> = report
+        .messages
+        .iter()
+        .filter(|m| m.id == "OPF-054")
+        .filter_map(|m| m.location.as_deref())
+        .collect();
+
+    let mut fixes = Vec::new();
+    for file in files {
+        let Some(text) = ws.get_text(file) else {
+            continue;
+        };
+        let Some(edits) = compute_empty_dc_date_edits(&text) else {
+            continue;
+        };
+        let n = edits.len();
+
+        let file_for_apply = file.to_string();
+        fixes.push(ProposedFix {
+            fix_id: "fix.empty_dc_date",
+            addresses_id: "OPF-054".to_string(),
+            addresses_rule: None,
+            addresses_severity: addressed_severity(report, "OPF-054", None),
+            tier: Tier::ConfirmNeeded,
+            title: format!("Drop {n} empty <dc:date> element(s) in {file}"),
+            rationale: "A <dc:date> with no content states no date: there is nothing in it to \
+                 lose, and dc:date is optional, so an absent one is valid. Only elements that are \
+                 empty or whitespace-only are dropped — a malformed but non-empty date carries a \
+                 real authored value and is left exactly as it is, finding and all."
+                .to_string(),
+            preview: vec![Change {
+                path: file.to_string(),
+                note: format!("drop {n} empty <dc:date> element(s)"),
+            }],
+            apply_fn: Box::new(move |ws: &mut Workspace| {
+                if let Some(text) = ws.get_text(&file_for_apply)
+                    && let Some(edits) = compute_empty_dc_date_edits(&text)
+                {
+                    ws.set_text(&file_for_apply, apply_edits(&text, edits));
+                }
+            }),
+        });
+    }
+    fixes
+}
+
+/// Edits dropping every empty `<dc:date>`, with the whitespace that preceded it.
+/// `None` (decline) if the package document won't parse or no date is empty.
+///
+/// `<metadata>`'s children named `date` are the candidates, matched exactly as
+/// epubveri matches them, so the two never disagree about which element a finding
+/// is about.
+fn compute_empty_dc_date_edits(opf: &str) -> Option<Vec<MetaEdit>> {
+    let doc = parse_xml(opf)?;
+    let metadata = doc
+        .descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "metadata")?;
+    // An `id` a `<meta refines="#…">` targets: dropping its element would orphan
+    // the refinement, trading this finding for another.
+    let refined: BTreeSet<&str> = doc
+        .descendants()
+        .filter(|n| n.is_element())
+        .filter_map(|n| n.attribute("refines"))
+        .filter_map(|r| r.strip_prefix('#'))
+        .collect();
+
+    let mut edits = Vec::new();
+    for n in metadata
+        .children()
+        .filter(|n| n.is_element() && n.tag_name().name() == "date")
+    {
+        let text: String = n
+            .descendants()
+            .filter(|t| t.is_text())
+            .filter_map(|t| t.text())
+            .collect();
+        if !text.trim().is_empty() {
+            continue; // a real date, however malformed — never ours to delete
+        }
+        if n.attribute("id").is_some_and(|id| refined.contains(id)) {
+            continue;
+        }
+        edits.push(MetaEdit {
+            range: with_leading_whitespace(opf, n.range()),
+            replacement: String::new(),
+        });
+    }
+    (!edits.is_empty()).then_some(edits)
+}
+
+/// `range` extended back over the whitespace that preceded it, so dropping an
+/// element on its own line doesn't leave the blank line behind.
+fn with_leading_whitespace(text: &str, range: Range<usize>) -> Range<usize> {
+    let start = text[..range.start].trim_end().len();
+    start..range.end
+}
+
 /// `PKG-006`: the archive carries a `mimetype` entry, but not first. OCF wants
 /// it first and stored so a reader can identify the file from its opening bytes.
 ///
@@ -3195,6 +3322,86 @@ mod tests {
     <reference type="cover" title="Cover" href="cover.xhtml"/>
   </guide>
 </package>"#;
+
+    /// One empty date, one malformed-but-real date, one valid one. The middle
+    /// element is the point of the whole fixer: `OPF-054` reports it, and we
+    /// still must not touch it.
+    const DATE_OPF: &str = r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">
+    <dc:title>A Book</dc:title>
+    <dc:date opf:event="publication">2019-10-31</dc:date>
+    <dc:date opf:event="modification">March 2019</dc:date>
+    <dc:date opf:event="creation"></dc:date>
+  </metadata>
+</package>"#;
+
+    #[test]
+    fn empty_dc_date_drops_only_the_empty_one() {
+        let edits = compute_empty_dc_date_edits(DATE_OPF).unwrap();
+        assert_eq!(edits.len(), 1, "exactly one <dc:date> is empty");
+        let out = apply_edits(DATE_OPF, edits);
+        assert!(
+            !out.contains("creation"),
+            "the empty element is gone, attributes and all"
+        );
+        assert!(
+            out.contains("March 2019"),
+            "a malformed but real date is authored information — never dropped"
+        );
+        assert!(out.contains("2019-10-31"), "the valid date is untouched");
+    }
+
+    #[test]
+    fn empty_dc_date_declines_a_whitespace_only_value_is_still_empty() {
+        let opf = DATE_OPF.replace(
+            "<dc:date opf:event=\"creation\"></dc:date>",
+            "<dc:date>\n   \n  </dc:date>",
+        );
+        let edits = compute_empty_dc_date_edits(&opf).unwrap();
+        assert_eq!(edits.len(), 1, "whitespace is not a date");
+    }
+
+    #[test]
+    fn empty_dc_date_declines_when_every_date_carries_a_value() {
+        let opf = DATE_OPF.replace("<dc:date opf:event=\"creation\"></dc:date>", "");
+        assert!(
+            compute_empty_dc_date_edits(&opf).is_none(),
+            "nothing empty — decline rather than propose a no-op"
+        );
+    }
+
+    /// The finding can be real (a malformed date) while the fix declines. The
+    /// finding then survives the repair, which is the honest outcome.
+    #[test]
+    fn empty_dc_date_declines_a_book_whose_only_defect_is_a_malformed_date() {
+        let opf = DATE_OPF
+            .replace("<dc:date opf:event=\"creation\"></dc:date>", "")
+            .replace("2019-10-31", "2022-09-08)");
+        assert!(compute_empty_dc_date_edits(&opf).is_none());
+    }
+
+    #[test]
+    fn empty_dc_date_declines_when_a_meta_refines_the_element() {
+        let opf = DATE_OPF.replace(
+            "<dc:date opf:event=\"creation\"></dc:date>",
+            "<dc:date id=\"d1\"></dc:date>\n    <meta refines=\"#d1\" property=\"x\">y</meta>",
+        );
+        assert!(
+            compute_empty_dc_date_edits(&opf).is_none(),
+            "dropping it would orphan the refinement"
+        );
+    }
+
+    #[test]
+    fn empty_dc_date_leaves_no_blank_line_behind() {
+        let edits = compute_empty_dc_date_edits(DATE_OPF).unwrap();
+        let out = apply_edits(DATE_OPF, edits);
+        assert!(
+            !out.contains("\n\n"),
+            "the whitespace that preceded the element goes with it: {out}"
+        );
+    }
 
     #[test]
     fn guide_dangling_drops_only_the_missing_reference() {
