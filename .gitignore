@@ -24,3 +24,5 @@
 /examples/regress_diag.rs
 /examples/one_file_diag.rs
 /examples/second_pass.rs
+/examples/roundtrip_audit.rs
+/examples/decline_census.rs

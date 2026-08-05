@@ -13,7 +13,7 @@ changed**. It never guesses, and it preserves everything it doesn't touch.
 ## Status
 
 Early but working. The core contract (`Workspace` → detect → propose → confirm →
-apply → report) is solid, with nineteen fixers so far:
+apply → report) is solid, with twenty-one fixers so far:
 
 - **`RSC-016`** — undeclared HTML entities (`&nbsp;`, `&mdash;`, …) → the exact
   character each denotes.
@@ -31,8 +31,10 @@ apply → report) is solid, with nineteen fixers so far:
   its manifest item.
 - **`PKG-006`** — a `mimetype` entry that isn't first in the ZIP → moved to the
   front, stored, with no content touched at all.
-- **`RSC-005` / `bare_text_in_body`** — EPUB 2 text sitting directly in `<body>`
-  → wrapped in a `<div>`; the text and the whitespace around it are untouched.
+- **`RSC-005` / stray text in `<body>`** — EPUB 2 text sitting directly in
+  `<body>` → wrapped in a `<div>`; the text and the whitespace around it are
+  untouched. Stray text in any other container is declined: there the correct
+  wrapper would assert something about what the text is.
 - **`RSC-001`** — a manifest item declaring a resource the container doesn't hold
   → dropped, together with every reference that named it (the spine entries it
   would orphan, and a legacy cover `<meta>`), in one edit you approve once.
@@ -58,6 +60,13 @@ apply → report) is solid, with nineteen fixers so far:
   itself if that empties it).
 - **`RSC-017` / `opf.guide.duplicate_reference`** — two guide references with the
   same `type` and `href` → the first kept, the duplicate dropped.
+- **`RSC-005` / `htm.obsolete_attribute`** — a legacy `<a name="x">` on an element
+  that already carries `id="x"` → the `name` dropped. Nothing that linked to the
+  anchor moves; the fragment resolves through the `id`. An anchor with no `id`, or
+  a different one, is left alone.
+- **`RSC-005` / empty `lang`** — an empty `lang=""` / `xml:lang=""`, which EPUB 2
+  doesn't allow → deleted, so the element inherits its parent's language. A
+  malformed tag is never guessed at.
 
 More fixers land next, in real-world impact order.
 

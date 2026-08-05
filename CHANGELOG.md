@@ -8,6 +8,100 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [0.6.0] - 2026-08-05
+
+Tracks `epubveri` from 0.5.15 to **0.9.7**, which corrects a false positive
+epubsana had been repairing, and closes the only regression epubsana introduced
+on the shared shelf.
+
+### Changed
+
+- **`epubveri` 0.9.7 is now the minimum, and the reason is correctness.**
+  `opf.content_document.empty_title` was an EPUB 3 rule firing on EPUB 2 books
+  (XHTML 1.1 types `<title>` as `<text/>`, which RELAX NG matches on empty; the
+  non-empty assertion exists only in `epub-xhtml-30.sch`). While epubsana ran
+  against the 0.5 line, `fix.empty_title` therefore filled `<title>` elements in
+  books that were already valid. Measured on the 94-book shared shelf, epubsana's
+  code unchanged and only the detector moving: **606 proposals → 3** (the three
+  remaining are one EPUB 3 book, where the rule is right), and books receiving
+  any proposal at all fall from 23 to 13. Upstream counts 8 books going INVALID →
+  VALID for this cause alone.
+
+  No epubsana code was wrong and no epubsana test could have caught it: a
+  repairer inherits its detector's false positives whole. The bump itself needed
+  no source change — the 0.8.0 `Options` API break does not reach this crate.
+
+- **The bare-text fixer follows its finding to a new home.** epubveri removed
+  `htm.epub2_dom.bare_text_in_body` in the 0.9 line because it duplicated the
+  RELAX NG grammar; the same defect now arrives as
+  `opf.content_document.schema_violation` with the message *stray text is not
+  allowed directly in "body"*. `fix.bare_text_in_body` matches that shape
+  (message prefix **and** `params[0] == "body"`, since one rule now spans a whole
+  grammar) and is otherwise unchanged. Stray text in any other container —
+  an `<ol>`, say — is **declined**: the correct wrapper there is an `<li>`, which
+  asserts the text is a list item, and that is a judgement rather than a
+  determinate repair. On the shelf the fixer clears **289 findings across 17
+  documents**; without the re-target it would silently have done nothing.
+
+### Added
+
+- **Two fixers, from the families epubveri's 0.9 work newly exposed** (nineteen →
+  twenty-one). Both were specified in `docs/FIXERS.md` before being coded, and
+  both are one *message shape* wide rather than one rule wide — the unit that
+  replaces "family" now that so much detection lives in the grammar.
+
+  - `htm.obsolete_attribute`, the legacy `<a name>` anchor (`fix.anchor_name`,
+    **AutoSafe**) — `name` on `<a>` predates `id` and XHTML 1.1 removed it. Where
+    the element already carries an `id` with the **identical** value the anchor is
+    declared the modern way too, so the `name` is a duplicate declaration and
+    every `#fragment` targeting it resolves through the `id`. Dropping it loses
+    nothing, which is what makes this the rare deletion that is AutoSafe.
+    Declines an anchor with **no** `id` (renaming `name` → `id` would have to
+    prove the value is an NCName *and* unique — it can manufacture a finding), one
+    whose `id` differs (dropping breaks the fragment; an element cannot carry two
+    ids), and every other attribute in the family, `<br clear>` included: its
+    presentational intent has no single markup equivalent.
+
+  - An empty `lang` / `xml:lang` (`fix.empty_lang`, **ConfirmNeeded**) — EPUB 2's
+    grammar types them as a language tag and `""` is not one. The attribute is
+    deleted. It is deliberately not AutoSafe: an element that declared
+    "undetermined" will now inherit its parent's language, and a reading system
+    acts on that (hyphenation, text-to-speech, CJK font selection). XHTML 1.1 has
+    no valid spelling for "undetermined", so the choice is between an invalid
+    document and inheritance — a decision about the book. A **malformed** tag
+    (`lang="en_US"`) is declined: repairing it means guessing.
+
+  On the 94-book shelf the two clear **exactly the 442 findings they target**
+  (162 + 280) and no others, take one more book to fully valid, and introduce
+  nothing. Both are single-book shapes on this shelf, which shows the repair is
+  right for that shape rather than that the shape is common — the declines above
+  are what makes that an acceptable basis to ship on.
+
+- **`fixers::handled_rules()`** — every epubveri `rule` some fixer knows how to
+  address. "Knows how to" is not "will": a listed rule may still be declined on
+  any given book, and the distinction is the point. A rule *missing* from the
+  list is a coverage gap; a listed rule that proposes nothing is a decision, and
+  reading a plan's output cannot tell the two apart — a fixer that declines
+  everywhere looks exactly like a fixer that does not exist. An embedder deciding
+  whether to route a book through epubsana at all can now ask without running a
+  plan.
+
+### Fixed
+
+- **`fix.manifest_dangling_item` no longer drops the navigation document.** A
+  dangling manifest item carrying `properties="nav"` was dropped like any other,
+  which cleared `RSC-001` and produced `opf.package.missing_nav_document` in its
+  place — a book no more valid than before, and now without a table of contents.
+  It declines instead, on the same principle as the existing spine guard: a
+  repair that trades one error for another is not a repair. The `nav` token is
+  matched, not the substring, and a declined item is also removed from the shared
+  spine guard's arithmetic (that guard counts deletions that could happen, and
+  this one no longer can).
+
+  This was epubsana's own defect, live since 0.4.0 and present under both the old
+  and the new detector. It was the **only** finding epubsana introduced anywhere
+  on the 94-book shelf; with the guard in place the shelf run introduces nothing.
+
 ## [0.5.0] - 2026-07-18
 
 Ten new fixers (nine → nineteen), tracking `epubveri` through 0.5.15, and the

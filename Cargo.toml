@@ -1,6 +1,6 @@
 [package]
 name = "epubsana"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Repairs the EPUB defects epubveri detects — a pure-Rust, confirm-each-step EPUB fixer."
@@ -19,18 +19,30 @@ members = ["epubsana-wasm"]
 
 [dependencies]
 # The detector this repairs the output of — consumed from crates.io like any
-# external user (dogfooding). The 0.5 line is the conventions-v0.4 one: five-value
-# `Severity` (a fatal is no longer folded into an error) and the `rule`/`params`
-# sub-codes epubsana's fixers dispatch on.
+# external user (dogfooding). Five-value `Severity` (a fatal is no longer folded
+# into an error) and the `rule`/`params` sub-codes epubsana's fixers dispatch on
+# both arrived on the 0.5 line, the conventions-v0.4 one.
 #
-# The minimum is **0.5.7**: that release is edition-2024 / MSRV-1.88 (which is why
-# this crate matches both above) and carries the `data.element_path` additions.
-# The envelope types epubsana builds on in `src/envelope.rs` have been generic
-# over the two tool-owned slots (`Envelope::for_tool`, `Item::fix`) since 0.5.3.
+# **The floor is 0.9.7, and it is a correctness floor, not a preference.** On
+# 0.5.x, `opf.content_document.empty_title` was an EPUB 3 rule firing on EPUB 2
+# books, so epubsana's most active fixer wrote TOC labels into the `<title>` of
+# valid books (606 proposals on the 94-book shelf; 3 after the bump). 0.9.7 also
+# restores the per-run positions this crate's stray-text fixer follows upstream to
+# (epubveri #68). Nothing in between is safe to build against.
+#
+# The bump itself cost no source change: epubsana's whole surface is
+# `validate_bytes`, `report::{Report, Severity}` and the three `envelope` types
+# (generic over the tool-owned slots since 0.5.3), so the 0.8.0 `Options` break
+# does not reach here.
+#
+# Tracking policy, agreed with epubveri 2026-08-05: **track loosely** — a caret on
+# 0.9, re-measure when a minor lands, don't chase patches. For an irreversible
+# repairer, a newer detector only matters when the rules we consume move, and
+# across 24 releases exactly two of ours did.
 #
 # For local co-development of epubveri, add an uncommitted override:
 #   [patch.crates-io] epubveri = { path = "../epubveri" }
-epubveri = "0.5.15"
+epubveri = "0.9.7"
 # Pure-Rust only (no C deps), same philosophy as epubveri: zip's "deflate"
 # feature uses zlib-rs (Rust) on the 8.x line; bzip2/zstd (C) stay disabled.
 # Aligned to epubveri's zip major — the family shares one zip version because

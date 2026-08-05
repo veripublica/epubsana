@@ -32,7 +32,7 @@ grows one carefully-argued entry at a time.
 | `RSC-020` | `opf.manifest_item.unencoded_space_in_href` | AutoSafe | A manifest `href` contains a raw space | [Percent-encode the space as `%20`](#rsc-020--unencoded-space-in-a-manifest-href) |
 | `OPF-014` | `opf.content_document.property_used_undeclared` | AutoSafe | A content document uses a feature its manifest item doesn't declare | [Add the token to that item's `properties`](#opf-014--undeclared-content-property) |
 | `PKG-006` | *(none)* | AutoSafe | The `mimetype` entry is not first in the ZIP, as OCF requires | [Re-emit it first and stored, touching no content](#pkg-006--mimetype-is-not-the-first-entry) |
-| `RSC-005` | `htm.epub2_dom.bare_text_in_body` | ConfirmNeeded | EPUB 2 text sits directly in `<body>` with no block-level element around it | [Wrap the text in a `<div>`, leaving whitespace alone](#rsc-005--bare-text-directly-in-body-epub-2) |
+| `RSC-005` | `opf.content_document.schema_violation` (stray text, `params[0] == "body"`) | ConfirmNeeded | EPUB 2 text sits directly in `<body>` with no block-level element around it | [Wrap the text in a `<div>`, leaving whitespace alone](#rsc-005--bare-text-directly-in-body-epub-2) |
 | `RSC-001` | `opf.manifest_item.missing_resource` | ConfirmNeeded | A manifest `<item>` declares a resource the container doesn't hold | [Drop the item, and every reference that named it](#rsc-001--dangling-manifest-item) |
 | `OPF-049` | `opf.spine.itemref_idref_not_in_manifest` | ConfirmNeeded | A spine `<itemref>` names a manifest id that doesn't exist | [Drop the itemref](#opf-049--dangling-spine-itemref) |
 | `OPF-034` / `RSC-005` | `opf.spine.duplicate_itemref` | ConfirmNeeded | The spine lists the same manifest item more than once | [Keep the first occurrence, drop the later ones](#opf-034--rsc-005--duplicate-spine-itemref) |
@@ -42,6 +42,8 @@ grows one carefully-argued entry at a time.
 | `RSC-005` | `ncx.play_order.duplicate` | ConfirmNeeded | Navigation elements repeat a `playOrder` value | [Renumber `playOrder` by document order](#rsc-005--ncx-internal-consistency) |
 | `RSC-007` | `opf.guide.reference_missing_resource` | ConfirmNeeded | A `<guide>` reference points at a resource that doesn't exist | [Drop the reference; drop the guide if it empties](#rsc-007--rsc-017--guide-references) |
 | `RSC-017` | `opf.guide.duplicate_reference` | ConfirmNeeded | Two `<guide>` references share a `type` and `href` | [Keep the first, drop the duplicates](#rsc-007--rsc-017--guide-references) |
+| `RSC-005` | `htm.obsolete_attribute` (`params[0] == "name"`) | AutoSafe | A legacy `<a name>` anchor duplicating the element's own `id` | [Drop the `name` attribute](#rsc-005--a-legacy-name-attribute-on-a) |
+| `RSC-005` | `opf.content_document.schema_violation` (empty `lang`/`xml:lang`) | ConfirmNeeded | An empty language tag, which EPUB 2's grammar does not allow | [Delete the attribute](#rsc-005--an-empty-lang--xmllang) |
 
 **A note on structural fixers.** Fixers that must locate an element (rather than
 match a token) parse the document with `roxmltree` using `allow_dtd: true`, the
@@ -332,12 +334,36 @@ the repair in the open, where you can see it and decline it.
 
 ## RSC-005 — bare text directly in `<body>` (EPUB 2)
 
-**Finding.** `htm.epub2_dom.bare_text_in_body`. An EPUB 2 content document has
-text sitting directly inside `<body>`, with no block-level element around it.
-XHTML 1.1 requires `<body>` to contain block-level content, so this is invalid
-there. (EPUB 3 is HTML5, where `<body>` accepts flow content directly — hence the
-rule's EPUB-2 scope.) `params` is empty, so epubsana parses the document and
-locates the text itself.
+**Finding.** `opf.content_document.schema_violation`, message *stray text is not
+allowed directly in "body"; wrap it in an element*, with `params[0] == "body"`.
+An EPUB 2 content document has text sitting directly inside `<body>`, with no
+block-level element around it. XHTML 1.1 requires `<body>` to contain block-level
+content, so this is invalid there. (EPUB 3 is HTML5, where `<body>` accepts flow
+content directly — so the finding only ever arises on EPUB 2, by the grammar
+rather than by a version test.)
+
+**This finding used to have a rule of its own,** `htm.epub2_dom.bare_text_in_body`.
+epubveri removed that check in the 0.9 line because it duplicated what the RELAX NG
+grammar already reported, and the detection moved into `schema_violation` — same
+book, same file, same count, verified file-by-file upstream. Since `schema_violation`
+is one rule spanning a whole grammar, matching it takes two conditions:
+
+- **`params[0]` is the containing element**, and epubsana acts only on `body`.
+  Stray text in an `<ol>` is a real finding too, but its correct wrapper is an
+  `<li>` — which asserts the text *is* a list item, a judgement rather than a
+  determinate repair. Every other container is declined.
+- **The message prefix identifies the kind of violation.** `params[0]` cannot do
+  it alone (`element "body" is not allowed here` carries the same param), and the
+  prefix cannot do it alone either (it matches the `<ol>` case). This is a
+  coupling to English message text, and it is the only discriminator the finding
+  offers; it fails in the safe direction, because a reworded message makes the
+  fixer go quiet rather than edit the wrong node.
+
+epubsana still locates the text itself by parsing the document, as it did when
+the rule was its own — so it never depended on how precisely the finding is
+anchored. (epubveri restored per-run positions and `…/text()[n]` paths in 0.9.7,
+its issue #68, after they were lost in the move; useful to a repairer that
+addresses by position, which this one deliberately is not.)
 
 **Fix** (`fix.bare_text_in_body`, ConfirmNeeded). Wrap each run of bare text in a
 `<div>`, grouped one proposal per document. The wrapper goes around the text's
@@ -425,6 +451,21 @@ check — if it ever regressed, a guard here would hide the bug rather than fix 
   names a missing resource has no reading order at all, and emitting a spine-less
   EPUB trades this finding for a different broken book rather than repairing
   anything. epubsana reports it and leaves it for a human.
+- **If the item is the navigation document** (`properties="nav"`). A publication
+  that declares a nav document must have one, so dropping the item clears
+  `RSC-001` and produces `opf.package.missing_nav_document` in its place: the
+  book is no more valid than before, and now has no table of contents either.
+  This is the spine guard's principle one level down — a repair that trades one
+  error for another is not a repair. The `nav` **token** is matched, not the
+  substring, so `properties="mathml"` is unaffected. The guard deliberately does
+  not ask which EPUB version the book is: in an EPUB 2 book the property is
+  itself invalid, and a second defect on the same element is a reason for a human
+  to look, not a licence to delete it faster.
+
+  Declining also removes the item from the shared spine guard's arithmetic — that
+  guard asks whether a reading order would survive every deletion these fixers
+  *could* propose, so counting a deletion that will never happen would make it
+  decline runs that are safe.
 
 **Measured.** 2 books in the 171-book corpus, both the same shape: a conversion
 left `cover-1.jpg`/`cover-2.jpg` declared beside the real, present cover
@@ -432,8 +473,18 @@ left `cover-1.jpg`/`cover-2.jpg` declared beside the real, present cover
 On this corpus neither guard fires — the dangling items are images, so nothing in
 the spine references them, and they are not the declared cover. Grepping every
 content document, the NCX and the OPF confirms the manifest entry itself is the
-**only** thing in either book that mentions them. The guards above are therefore
-argued rather than corpus-tested, and are covered by unit tests instead.
+**only** thing in either book that mentions them.
+
+The **nav guard is not argued but measured**, and it is the reason this entry
+grew a third decline clause. On the shared 94-book shelf (2026-08-05), one book
+declares `<item id="toc-idm…" href="toc01.xhtml" properties="nav"/>` for a file
+the container does not hold. Dropping it was the **only** finding epubsana
+introduced anywhere on that shelf, under both epubveri 0.5.18 and 0.9.7 — so it
+was epubsana's own defect, live since this fixer shipped in 0.4.0, and invisible
+to every unit test because each one asks whether the *edit* is right rather than
+whether the *book* ends up better. With the guard in place the shelf run
+introduces nothing at all. The spine guard remains argued rather than
+corpus-tested, and is covered by unit tests instead.
 
 ---
 
@@ -726,3 +777,103 @@ reference clears that finding too, as a side effect — but epubsana keys only o
 isn't in the manifest* (`OPF-031` alone, no `RSC-007`) is a different defect —
 adding it to the manifest vs. dropping the reference is a judgement — and is not
 part of this family.
+
+---
+
+## RSC-005 — a legacy `name` attribute on `<a>`
+
+**Finding.** `htm.obsolete_attribute`, `params[0]` = the attribute's name, with
+the message *attribute "name" not allowed here*. epubveri reports every obsolete
+attribute through this one rule — `<br clear>`, other presentational leftovers,
+and the pre-XHTML-1.1 `<a name="…">` anchor. **Only the anchor has a determinate
+repair**, so this fixer is deliberately one member of the family wide.
+
+**Fix** (`fix.anchor_name`, AutoSafe). In each affected document, for every `<a>`
+carrying **both** `name` and `id` with the **identical value**, delete the `name`
+attribute along with the whitespace that separated it from its neighbour. One
+proposal per document; the element, its text, its other attributes and every
+byte outside the attribute's own span are untouched.
+
+**Why it's safe.** `name` on `<a>` was how a link target was declared before
+`id` existed; XHTML 1.1 removed it, and epubcheck rejects it. Where the element
+already carries an `id` with the same value, the anchor is *already* declared the
+modern way — the two attributes are saying the same thing, and `#fragment` links
+resolve through the `id`. So nothing that referenced the anchor moves, nothing
+becomes unreachable, and no reading system renders anything differently. This is
+the rare deletion that loses no information at all, which is what makes it
+`AutoSafe`.
+
+**When it declines.**
+
+- **Any other attribute in the family.** `<br clear>` (10 findings on the shelf)
+  is presentational and has no single markup equivalent — replacing it would mean
+  choosing a CSS rule on the author's behalf.
+- **`name` with no `id`.** The obvious repair — rename `name` → `id`, which
+  preserves every `#fragment` that targets it — is *not* determinate. An `id`
+  must be a valid NCName and must be unique in the document; a legacy `name` is
+  under neither constraint (`name="1"` is legal where `id="1"` is not, and two
+  anchors may share a name). Renaming can therefore manufacture a fresh finding,
+  which is the one thing a repair must never do. 0 cases on the shelf; if a real
+  book produces them, the branch gets specified then, with the NCName and
+  collision tests spelled out.
+- **`name` and `id` present but different.** Dropping `name` would break any
+  `#fragment` that targets the name, and an element cannot carry two ids. There
+  is no repair that keeps both, so this is a human's call.
+- A document that doesn't parse, or in which no `<a>` matches (a stale finding
+  never deletes anything).
+
+**Measured.** 162 findings in **one** book on the 94-book shared shelf
+(2026-08-05), and every one of them is the `id == name` shape —
+`<a href="…#footnote-600-1" id="x" name="x">`, an annotation toolchain's output.
+epubcheck reports the same defect with the same wording and the two tools' totals
+on that book agree exactly (197 vs 197), so this is a closed epubcheck gap rather
+than a divergence to be careful of. **One book is thin evidence**: it establishes
+that the shape exists and that the repair is right for it, not that the shape is
+representative. The declines above are what make that acceptable — an unfamiliar
+shape is left alone rather than guessed at.
+
+---
+
+## RSC-005 — an empty `lang` / `xml:lang`
+
+**Finding.** `opf.content_document.schema_violation`, message *value of attribute
+"lang" is invalid: ""*, `params` = `[attribute, value]`. EPUB 2's grammar types
+`lang` and `xml:lang` as a language tag, and the empty string is not one. (EPUB 3
+is HTML5, where `lang=""` legally means "undetermined" — so this only ever arises
+on EPUB 2, from the grammar rather than from a version test here.)
+
+As with the stray-text fixer, `schema_violation` is one rule over a whole grammar,
+so the match takes the message prefix (*value of attribute*) **and** `params`:
+`params[0]` ∈ {`lang`, `xml:lang`} and `params[1]` empty.
+
+**Fix** (`fix.empty_lang`, ConfirmNeeded). Delete the attribute, with the
+whitespace that separated it. One proposal per document; `lang` and `xml:lang` on
+the same element go together in it, since a document that has one almost always
+has the other (140 and 140 on the shelf).
+
+**Why it is `ConfirmNeeded` and not `AutoSafe`.** The deletion looks inert — an
+empty language tag names no language — but it is not. `<p lang="">` inside
+`<html lang="tr">` currently declares *undetermined*; with the attribute gone the
+paragraph inherits `tr`, and a reading system acts on that: hyphenation, the
+text-to-speech voice, font selection for CJK. XHTML 1.1 offers no valid way to
+spell "undetermined", so the real choice is between an invalid document and one
+that inherits its parent's language. That is a decision about the book, and the
+caller should make it — the alternative repair (guessing the intended language)
+is exactly the invention epubsana refuses.
+
+**When it declines.**
+
+- **A non-empty invalid value.** `lang="en_US"`, `lang="turkish"` — these are
+  malformed rather than absent, and repairing them means guessing which tag was
+  meant (`en-US`? `tr`?). 0 non-empty cases on the shelf.
+- Any other attribute reported through the same message shape — notably
+  `value of attribute "id" is invalid` (312 findings, 5 books), which is a
+  *cross-file* repair: renaming an id means moving every `href="#…"` that targets
+  it, in every document plus the NCX and the OPF, without colliding with an
+  existing id. Determinate in principle, not a local edit, and not this fixer.
+- A document that doesn't parse, or in which no attribute matches.
+
+**Measured.** 280 findings (140 `lang` + 140 `xml:lang`) in **one** book on the
+94-book shelf, all empty-valued. The same caveat as the anchor fixer applies: one
+book shows the shape is real and the repair right for it, and the declines carry
+the weight for everything else.

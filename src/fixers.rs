@@ -27,6 +27,8 @@ pub fn plan(report: &Report, ws: &Workspace, _goal: Goal) -> Vec<ProposedFix> {
     fixes.extend(content_properties(report, ws));
     fixes.extend(empty_titles(report, ws));
     fixes.extend(bare_text_in_body(report, ws));
+    fixes.extend(anchor_name_attrs(report, ws));
+    fixes.extend(empty_lang_attrs(report, ws));
     fixes.extend(doctype_html5(report, ws));
     fixes.extend(doctype_xhtml11(report, ws));
     fixes.extend(manifest_dangling_items(report, ws));
@@ -35,8 +37,49 @@ pub fn plan(report: &Report, ws: &Workspace, _goal: Goal) -> Vec<ProposedFix> {
     fixes.extend(guide_dangling_references(report, ws));
     fixes.extend(guide_duplicate_references(report, ws));
     fixes.extend(mimetype_packaging(report, ws));
-    // Future fixers append here, in a sensible confirm order.
+    // Future fixers append here, in a sensible confirm order — and in
+    // `handled_rules()` below.
     fixes
+}
+
+/// Every epubveri `rule` some fixer in the registry knows how to address.
+///
+/// **"Knows how to" is not "will".** A rule listed here may still be declined on
+/// a given book — that is the normal case, not the exception, and the two must
+/// never be conflated: a rule missing from this list is a *coverage* gap, while a
+/// listed rule that proposes nothing is a *decision*. Reading a plan's output
+/// alone cannot tell them apart (a fixer that declines everywhere looks exactly
+/// like a fixer that does not exist), which is precisely the confusion that made
+/// this list necessary.
+///
+/// Findings epubveri reports with no `rule` at all (`NCX-001`, `PKG-006`) are
+/// addressed by id and so cannot appear here.
+///
+/// **Keep this in sync with [`plan`].** Nothing enforces it at compile time; the
+/// census cross-checks at runtime and reports any rule a proposal addressed that
+/// is missing here, so drift announces itself on the next shelf run.
+pub fn handled_rules() -> &'static [&'static str] {
+    &[
+        "htm.doctype.epub2_unrecognized_public_id",
+        "htm.doctype.epub3_obsolete_public_id",
+        "htm.entity.missing_semicolon",
+        "htm.entity.undeclared",
+        "htm.obsolete_attribute",
+        "ncx.ids.duplicate_id",
+        "ncx.ids.invalid_ncname",
+        "ncx.play_order.duplicate",
+        "opf.content_document.empty_title",
+        "opf.content_document.invalid_content_type_meta",
+        "opf.content_document.property_used_undeclared",
+        // Two shapes inside it: stray text in <body>, and an empty lang.
+        "opf.content_document.schema_violation",
+        "opf.guide.duplicate_reference",
+        "opf.guide.reference_missing_resource",
+        "opf.manifest_item.missing_resource",
+        "opf.manifest_item.unencoded_space_in_href",
+        "opf.spine.duplicate_itemref",
+        "opf.spine.itemref_idref_not_in_manifest",
+    ]
 }
 
 /// The severity epubveri gave the finding a fixer addresses — a fix inherits it
@@ -1431,11 +1474,34 @@ fn trimmed_span(range: Range<usize>, raw: &str) -> Option<Range<usize>> {
     Some((range.start + lead)..(range.end - trail))
 }
 
-/// `RSC-005` / `htm.epub2_dom.bare_text_in_body`: an EPUB 2 content document
-/// with text sitting directly in `<body>`, which XHTML 1.1 forbids (it wants
-/// block-level content there; EPUB 3 is HTML5 and allows it, hence the rule's
-/// EPUB-2 scope). `params` is empty, so — like `content_type_meta` — we parse
-/// the document and find the text nodes ourselves.
+/// `RSC-005` / `opf.content_document.schema_violation`, stray text directly in
+/// `<body>`: an EPUB 2 content document with text sitting where XHTML 1.1 wants
+/// block-level content. (EPUB 3 is HTML5 and allows it, so this only ever fires
+/// on EPUB 2 — the scope comes from the grammar rather than from a version test
+/// here.)
+///
+/// **This used to be its own rule, `htm.epub2_dom.bare_text_in_body`.** epubveri
+/// deleted it when the RELAX NG grammar started reporting the same thing (its
+/// dedicated EPUB 2 DOM check was duplicating the grammar), so the finding now
+/// arrives inside `schema_violation` — one rule covering many unrelated
+/// violations. Matching it therefore needs more than the rule name:
+///
+/// - `params[0]` is the **containing element's** name, and we act only on
+///   `body`. Stray text in an `<ol>` is a real finding too, but its correct
+///   wrapper is an `<li>`, which asserts the text is a list item — a judgement,
+///   not a determinate repair. We decline everything that is not `body`.
+/// - `params[0]` alone cannot separate this from the family's other shapes
+///   (`element "body" is not allowed here` carries the same param), so the
+///   message prefix discriminates. That is a coupling to English text and it is
+///   the only discriminator the finding offers. It fails in the safe direction:
+///   if epubveri ever rewords the message this fixer goes **quiet**, declining
+///   rather than editing the wrong thing.
+///
+/// The finding gives us the file; we parse the document and find the text nodes
+/// ourselves, as `content_type_meta` does. So this fixer never needed the
+/// per-run `position`/`element_path` that epubveri restored in 0.9.7 — the
+/// re-locate-by-predicate strategy `docs/API.md` chose keeps us independent of
+/// how precisely a finding is anchored.
 ///
 /// Wraps each run of bare text in a `<div>`, grouped per document. `<div>` and
 /// not `<p>` on purpose: it claims nothing about what the text *is* (the corpus
@@ -1451,7 +1517,7 @@ fn trimmed_span(range: Range<usize>, raw: &str) -> Option<Range<usize>> {
 fn bare_text_in_body(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
     let mut docs: BTreeSet<String> = BTreeSet::new();
     for m in &report.messages {
-        if m.rule == Some("htm.epub2_dom.bare_text_in_body")
+        if is_stray_text_in_body(m)
             && let Some(loc) = m.location.as_deref()
         {
             docs.insert(loc.to_string());
@@ -1487,11 +1553,11 @@ fn bare_text_in_body(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
         fixes.push(ProposedFix {
             fix_id: "fix.bare_text_in_body",
             addresses_id: "RSC-005".to_string(),
-            addresses_rule: Some("htm.epub2_dom.bare_text_in_body"),
+            addresses_rule: Some("opf.content_document.schema_violation"),
             addresses_severity: addressed_severity(
                 report,
                 "RSC-005",
-                Some("htm.epub2_dom.bare_text_in_body"),
+                Some("opf.content_document.schema_violation"),
             ),
             tier: Tier::ConfirmNeeded,
             title: format!(
@@ -1526,6 +1592,35 @@ fn bare_text_in_body(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
     fixes
 }
 
+/// An attribute's span, extended backwards over the whitespace that separated it
+/// from its neighbour — the span to delete when removing an attribute.
+///
+/// `roxmltree` gives `name="value"` exactly, so deleting that alone would leave
+/// `<a href="x"  >`: legal, but it edits the tag's shape for no reason. Taking
+/// the run of whitespace in front of it instead leaves the element looking as if
+/// the attribute had never been written. The tag name always precedes the first
+/// attribute, so this can never eat the `<a` itself.
+fn attr_span_with_leading_space(text: &str, attr: Range<usize>) -> Range<usize> {
+    let start = text[..attr.start]
+        .trim_end_matches(|c: char| c.is_whitespace())
+        .len();
+    start..attr.end
+}
+
+/// Is this finding "stray text sits directly in `<body>`"?
+///
+/// Two conditions, because `opf.content_document.schema_violation` is one rule
+/// over a whole grammar: the message shape identifies the *kind* of violation
+/// (only a text-node blame reads "stray text …"), and `params[0]` identifies the
+/// container we are willing to repair. Both are required — the prefix alone
+/// would match stray text in an `<ol>`, and the param alone would match any
+/// other violation that happens to name `body`.
+fn is_stray_text_in_body(m: &epubveri::report::Message) -> bool {
+    m.rule == Some("opf.content_document.schema_violation")
+        && m.params.first().is_some_and(|p| p == "body")
+        && m.text.starts_with("stray text is not allowed directly in")
+}
+
 /// The non-whitespace spans of every text node sitting directly in `<body>`.
 /// `None` (decline) if the document doesn't parse or has no `<body>`; an empty
 /// vec means there was nothing bare to wrap.
@@ -1550,6 +1645,257 @@ fn plan_body_text_wrapping(text: &str) -> Option<Vec<Range<usize>>> {
     Some(spans)
 }
 
+/// `RSC-005` / `htm.obsolete_attribute`, the legacy `<a name="…">` anchor: an
+/// attribute XHTML 1.1 removed and epubcheck rejects. `params[0]` is the
+/// attribute's name, and this fixer handles exactly one member of a family that
+/// also carries `<br clear>` and other presentational leftovers — see
+/// `docs/FIXERS.md` for why only the anchor has a determinate repair.
+///
+/// Drops `name` **only where the element already carries an `id` with the same
+/// value**, i.e. where the two attributes say the same thing and every
+/// `#fragment` targeting the anchor resolves through the `id` regardless. That
+/// makes it a deletion which loses nothing at all, hence `AutoSafe`.
+///
+/// Deliberately does *not* rename `name` → `id` when there is no `id`: an `id`
+/// must be a valid NCName and unique in the document, and a legacy `name` is
+/// under neither constraint, so the rename can manufacture a new finding.
+fn anchor_name_attrs(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    let mut docs: BTreeSet<String> = BTreeSet::new();
+    for m in &report.messages {
+        if m.rule == Some("htm.obsolete_attribute")
+            && m.params.first().is_some_and(|p| p == "name")
+            && let Some(loc) = m.location.as_deref()
+        {
+            docs.insert(loc.to_string());
+        }
+    }
+
+    let mut fixes = Vec::new();
+    for doc in docs {
+        let Some(text) = ws.get_text(&doc) else {
+            continue;
+        };
+        let Some(spans) = plan_anchor_name_drops(&text) else {
+            continue; // won't parse — decline
+        };
+        if spans.is_empty() {
+            continue; // no <a> matches the shape we repair
+        }
+
+        let n = spans.len();
+        let preview: Vec<Change> = spans
+            .iter()
+            .take(8)
+            .map(|r| Change {
+                path: doc.clone(),
+                note: format!("drop redundant attribute:{}", &text[r.clone()]),
+            })
+            .collect();
+        let doc_for_apply = doc.clone();
+
+        fixes.push(ProposedFix {
+            fix_id: "fix.anchor_name",
+            addresses_id: "RSC-005".to_string(),
+            addresses_rule: Some("htm.obsolete_attribute"),
+            addresses_severity: addressed_severity(
+                report,
+                "RSC-005",
+                Some("htm.obsolete_attribute"),
+            ),
+            tier: Tier::AutoSafe,
+            title: format!(
+                "Drop {n} legacy <a name> attribute{} in {doc}",
+                if n == 1 { "" } else { "s" }
+            ),
+            rationale:
+                "`name` on `<a>` is how a link target was declared before `id` existed; XHTML 1.1 \
+                 removed it. Each of these elements already carries an `id` with the identical \
+                 value, so the anchor is declared the modern way too and every `#fragment` \
+                 pointing at it resolves through that `id`. Deleting the duplicate declaration \
+                 loses nothing: no text, no other attribute, and nothing outside the attribute's \
+                 own span is touched, and nothing that linked to the anchor moves."
+                    .to_string(),
+            preview,
+            apply_fn: Box::new(move |ws: &mut Workspace| {
+                if let Some(text) = ws.get_text(&doc_for_apply)
+                    && let Some(spans) = plan_anchor_name_drops(&text)
+                {
+                    let edits = spans
+                        .into_iter()
+                        .map(|range| MetaEdit {
+                            range,
+                            replacement: String::new(),
+                        })
+                        .collect();
+                    ws.set_text(&doc_for_apply, apply_edits(&text, edits));
+                }
+            }),
+        });
+    }
+    fixes
+}
+
+/// The spans to delete: every `<a>`'s `name` attribute whose value the element's
+/// own `id` already carries. `None` (decline) if the document doesn't parse.
+fn plan_anchor_name_drops(text: &str) -> Option<Vec<Range<usize>>> {
+    let prepared = prepare_content_doc(text);
+    let doc = prepared.parse()?;
+    let mut spans = Vec::new();
+    for node in doc
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "a")
+    {
+        let Some(name) = node.attr_no_ns("name") else {
+            continue;
+        };
+        // Not `id != name` — an absent id is its own decline, spelled out here so
+        // the two cases can't be collapsed by accident later.
+        if node.attr_no_ns("id") != Some(name) {
+            continue;
+        }
+        let Some(attr) = node
+            .attributes()
+            .find(|a| a.namespace().is_none() && a.name() == "name")
+        else {
+            continue;
+        };
+        spans.push(attr_span_with_leading_space(
+            text,
+            prepared.unshift(attr.range()),
+        ));
+    }
+    Some(spans)
+}
+
+/// Is this finding "an empty `lang` / `xml:lang`"?
+///
+/// Same two-part match as the stray-text fixer, for the same reason —
+/// `schema_violation` spans a whole grammar. Here `params` carries both the
+/// attribute and its value, so the emptiness is checked from the finding itself
+/// rather than inferred: a *malformed* tag (`en_US`) is a different defect and
+/// must not reach the fixer.
+fn is_empty_lang(m: &epubveri::report::Message) -> bool {
+    m.rule == Some("opf.content_document.schema_violation")
+        && m.text.starts_with("value of attribute")
+        && m.params
+            .first()
+            .is_some_and(|p| p == "lang" || p == "xml:lang")
+        && m.params.get(1).is_some_and(|v| v.is_empty())
+}
+
+/// `RSC-005` / `opf.content_document.schema_violation`, an empty `lang` or
+/// `xml:lang`: EPUB 2's grammar types them as a language tag and the empty string
+/// is not one. (EPUB 3 is HTML5, where `lang=""` legally means *undetermined* —
+/// so this only arises on EPUB 2, by the grammar rather than a version test.)
+///
+/// `ConfirmNeeded`, and the reason is worth keeping in view: the deletion looks
+/// inert but is not. `<p lang="">` inside `<html lang="tr">` declares
+/// *undetermined* today; with the attribute gone it inherits `tr`, which a
+/// reading system acts on (hyphenation, TTS voice, CJK font selection). XHTML 1.1
+/// has no valid spelling for "undetermined", so the choice is between an invalid
+/// document and inheriting the parent's language — a decision about the book,
+/// which is the caller's to make.
+fn empty_lang_attrs(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    let mut docs: BTreeSet<String> = BTreeSet::new();
+    for m in &report.messages {
+        if is_empty_lang(m)
+            && let Some(loc) = m.location.as_deref()
+        {
+            docs.insert(loc.to_string());
+        }
+    }
+
+    let mut fixes = Vec::new();
+    for doc in docs {
+        let Some(text) = ws.get_text(&doc) else {
+            continue;
+        };
+        let Some(spans) = plan_empty_lang_drops(&text) else {
+            continue;
+        };
+        if spans.is_empty() {
+            continue;
+        }
+
+        let n = spans.len();
+        let preview: Vec<Change> = spans
+            .iter()
+            .take(8)
+            .map(|r| Change {
+                path: doc.clone(),
+                note: format!("delete empty attribute:{}", &text[r.clone()]),
+            })
+            .collect();
+        let doc_for_apply = doc.clone();
+
+        fixes.push(ProposedFix {
+            fix_id: "fix.empty_lang",
+            addresses_id: "RSC-005".to_string(),
+            addresses_rule: Some("opf.content_document.schema_violation"),
+            addresses_severity: addressed_severity(
+                report,
+                "RSC-005",
+                Some("opf.content_document.schema_violation"),
+            ),
+            tier: Tier::ConfirmNeeded,
+            title: format!(
+                "Delete {n} empty lang/xml:lang attribute{} in {doc}",
+                if n == 1 { "" } else { "s" }
+            ),
+            rationale:
+                "An empty language tag names no language, and EPUB 2's grammar does not allow it \
+                 — XHTML 1.1 has no valid way to spell HTML5's \"undetermined\". Deleting the \
+                 attribute is the only repair that does not invent a language the book never \
+                 stated. It is not, however, a no-op: an element that declared \"undetermined\" \
+                 will now inherit the language of its parent, which a reading system uses for \
+                 hyphenation, text-to-speech and font selection. Nothing else in the document is \
+                 touched."
+                    .to_string(),
+            preview,
+            apply_fn: Box::new(move |ws: &mut Workspace| {
+                if let Some(text) = ws.get_text(&doc_for_apply)
+                    && let Some(spans) = plan_empty_lang_drops(&text)
+                {
+                    let edits = spans
+                        .into_iter()
+                        .map(|range| MetaEdit {
+                            range,
+                            replacement: String::new(),
+                        })
+                        .collect();
+                    ws.set_text(&doc_for_apply, apply_edits(&text, edits));
+                }
+            }),
+        });
+    }
+    fixes
+}
+
+/// The spans to delete: every empty-valued `lang`, plain or `xml:`-prefixed.
+/// `None` (decline) if the document doesn't parse.
+///
+/// One predicate covers both spellings: `roxmltree` reports the local name, so
+/// `lang` and `xml:lang` are both `"lang"` and differ only in namespace — and
+/// both are equally invalid when empty, so neither is special-cased.
+fn plan_empty_lang_drops(text: &str) -> Option<Vec<Range<usize>>> {
+    let prepared = prepare_content_doc(text);
+    let doc = prepared.parse()?;
+    let mut spans = Vec::new();
+    for node in doc.descendants().filter(|n| n.is_element()) {
+        for attr in node
+            .attributes()
+            .filter(|a| a.name() == "lang" && a.value().is_empty())
+        {
+            spans.push(attr_span_with_leading_space(
+                text,
+                prepared.unshift(attr.range()),
+            ));
+        }
+    }
+    spans.sort_by_key(|r| r.start);
+    Some(spans)
+}
+
 /// The `<itemref>` children of the package's `<spine>`, in document order.
 fn spine_itemrefs<'a, 'i>(doc: &'a roxmltree::Document<'i>) -> Vec<roxmltree::Node<'a, 'i>> {
     doc.descendants()
@@ -1570,13 +1916,40 @@ fn manifest_ids<'a>(doc: &'a roxmltree::Document<'_>) -> HashSet<&'a str> {
         .collect()
 }
 
-/// The manifest ids epubveri reported as declaring a missing resource.
-fn dangling_item_ids(report: &Report) -> BTreeSet<&str> {
+/// The manifest ids that declare the publication's navigation document.
+///
+/// `properties` is a space-separated token list, so this matches the `nav`
+/// **token** — `properties="mathml"` is not a navigation document, and neither
+/// is one whose value merely contains those three letters.
+fn nav_item_ids(opf: &str) -> BTreeSet<String> {
+    let Some(doc) = parse_xml(opf) else {
+        return BTreeSet::new();
+    };
+    doc.descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "item")
+        .filter(|n| {
+            n.attr_no_ns("properties")
+                .is_some_and(|p| p.split_whitespace().any(|t| t == "nav"))
+        })
+        .filter_map(|n| n.attr_no_ns("id").map(String::from))
+        .collect()
+}
+
+/// The manifest ids epubveri reported as declaring a missing resource, **minus
+/// the navigation document**, which `manifest_dangling_items` declines to drop.
+///
+/// The subtraction is what keeps the shared spine guard honest: the guard asks
+/// "would a reading order survive every deletion these fixers could propose?",
+/// so counting a deletion that will never be proposed would make it decline
+/// runs that are perfectly safe.
+fn dangling_item_ids<'r>(report: &'r Report, opf: &str) -> BTreeSet<&'r str> {
+    let nav = nav_item_ids(opf);
     report
         .messages
         .iter()
         .filter(|m| m.rule == Some("opf.manifest_item.missing_resource"))
         .filter_map(|m| m.params.first().map(String::as_str))
+        .filter(|id| !nav.contains(*id))
         .collect()
 }
 
@@ -1648,12 +2021,29 @@ fn manifest_dangling_items(report: &Report, ws: &Workspace) -> Vec<ProposedFix> 
     let Some(opf) = ws.get_text(&opf_path) else {
         return Vec::new();
     };
-    if !spine_survives_dangling_drops(&opf, &dangling_item_ids(report)) {
+    if !spine_survives_dangling_drops(&opf, &dangling_item_ids(report, &opf)) {
         return Vec::new();
     }
+    let nav = nav_item_ids(&opf);
 
     let mut fixes = Vec::new();
     for (id, href) in items {
+        // The navigation document is not droppable. A publication that declares
+        // one must have it, so deleting the item clears `RSC-001` and produces
+        // `opf.package.missing_nav_document` in its place — the book is still
+        // invalid, and now it has no table of contents either. Measured on a
+        // real book, where it was the only finding epubsana introduced across
+        // the whole shelf.
+        //
+        // This is the spine guard's principle applied one level down: a repair
+        // that trades one error for another is not a repair. Note what it does
+        // *not* do — it does not ask which EPUB version this is. In an EPUB 2
+        // book the `nav` property is itself invalid, and a second defect on the
+        // same element is a reason for a human to look at it, not a licence for
+        // us to delete it faster.
+        if nav.contains(&id) {
+            continue;
+        }
         let Some((_, spine_drops, cover_meta)) = compute_dangling_item_edits(&opf, &id) else {
             continue;
         };
@@ -1790,7 +2180,7 @@ fn spine_dangling_itemrefs(report: &Report, ws: &Workspace) -> Vec<ProposedFix> 
     let Some(opf) = ws.get_text(&opf_path) else {
         return Vec::new();
     };
-    if !spine_survives_dangling_drops(&opf, &dangling_item_ids(report)) {
+    if !spine_survives_dangling_drops(&opf, &dangling_item_ids(report, &opf)) {
         return Vec::new();
     }
 
@@ -3151,6 +3541,37 @@ mod tests {
         apply_edits(opf, edits)
     }
 
+    /// Sorted and unique, so the list reads as a set and a duplicate entry (the
+    /// likely shape of a bad merge) fails rather than hides.
+    #[test]
+    fn handled_rules_is_a_sorted_set() {
+        let rules = handled_rules();
+        let mut sorted = rules.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(rules, sorted.as_slice());
+    }
+
+    /// A report carrying one `RSC-001` per named manifest id — the only part of
+    /// a real report the dangling fixers read.
+    fn report_with_dangling(ids: &[&str]) -> Report {
+        let mut report = Report::default();
+        report.messages = ids
+            .iter()
+            .map(|id| epubveri::report::Message {
+                id: "RSC-001",
+                severity: Severity::Error,
+                text: String::new(),
+                location: None,
+                position: None,
+                rule: Some("opf.manifest_item.missing_resource"),
+                params: vec![id.to_string(), format!("{id}.xhtml")],
+                element_path: None,
+            })
+            .collect();
+        report
+    }
+
     #[test]
     fn dangling_item_drops_the_item_and_cascades_into_the_spine() {
         let (_, spine_drops, cover_meta) = compute_dangling_item_edits(OPF, "gone").expect("fix");
@@ -3184,6 +3605,47 @@ mod tests {
     #[test]
     fn dangling_item_declines_when_no_item_carries_the_id() {
         assert!(compute_dangling_item_edits(OPF, "no-such-id").is_none());
+    }
+
+    /// A dangling item that is also the navigation document: dropping it would
+    /// clear `RSC-001` and hand the book `opf.package.missing_nav_document`
+    /// instead. Measured on a real book — the shelf's only self-inflicted
+    /// finding — and the reason the fixer declines rather than trades.
+    #[test]
+    fn a_dangling_nav_item_is_declined() {
+        let opf = OPF.replace(
+            "<item id=\"gone\" href=\"gone.xhtml\"",
+            "<item id=\"gone\" properties=\"nav\" href=\"gone.xhtml\"",
+        );
+        assert_eq!(nav_item_ids(&opf), BTreeSet::from(["gone".to_string()]));
+
+        let report = report_with_dangling(&["gone"]);
+        assert!(
+            dangling_item_ids(&report, &opf).is_empty(),
+            "a declined deletion must not count against the spine guard either"
+        );
+    }
+
+    /// `properties` is a token list. Neither a different property nor one that
+    /// merely contains the letters makes an item the navigation document.
+    #[test]
+    fn nav_is_matched_as_a_token_not_a_substring() {
+        for props in ["mathml", "navigation", "scripted mathml"] {
+            let opf = OPF.replace(
+                "<item id=\"gone\" href=\"gone.xhtml\"",
+                &format!("<item id=\"gone\" properties=\"{props}\" href=\"gone.xhtml\""),
+            );
+            assert!(
+                nav_item_ids(&opf).is_empty(),
+                "properties=\"{props}\" is not a navigation document"
+            );
+            let report = report_with_dangling(&["gone"]);
+            assert_eq!(
+                dangling_item_ids(&report, &opf),
+                BTreeSet::from(["gone"]),
+                "so it is still droppable"
+            );
+        }
     }
 
     #[test]
@@ -3495,6 +3957,53 @@ mod tests {
         Some(apply_edits(doc, edits))
     }
 
+    /// A `schema_violation` message, the way the grammar emits it: the message
+    /// names the containing element and `params[0]` repeats it.
+    fn schema_violation(text: &str, param: &str) -> epubveri::report::Message {
+        epubveri::report::Message {
+            id: "RSC-005",
+            severity: Severity::Error,
+            text: text.to_string(),
+            location: Some("OEBPS/ch1.xhtml".to_string()),
+            position: None,
+            rule: Some("opf.content_document.schema_violation"),
+            params: vec![param.to_string()],
+            element_path: None,
+        }
+    }
+
+    /// The finding this fixer used to have to itself now arrives inside
+    /// `schema_violation`, so the match has to be narrow in two directions at
+    /// once: the right kind of violation, and a container we can repair.
+    #[test]
+    fn only_stray_text_in_body_is_matched() {
+        assert!(is_stray_text_in_body(&schema_violation(
+            "stray text is not allowed directly in \"body\"; wrap it in an element",
+            "body",
+        )));
+
+        // Right kind, wrong container: an <li> is the correct wrapper inside an
+        // <ol>, and that asserts the text is a list item — a judgement.
+        assert!(!is_stray_text_in_body(&schema_violation(
+            "stray text is not allowed directly in \"ol\"; wrap it in an element",
+            "ol",
+        )));
+
+        // Right container, wrong kind — the param alone would have matched.
+        assert!(!is_stray_text_in_body(&schema_violation(
+            "element \"body\" is not allowed here",
+            "body",
+        )));
+
+        // A sibling rule that is not a schema violation at all.
+        let mut other = schema_violation(
+            "stray text is not allowed directly in \"body\"; wrap it in an element",
+            "body",
+        );
+        other.rule = Some("opf.content_document.empty_title");
+        assert!(!is_stray_text_in_body(&other));
+    }
+
     #[test]
     fn bare_text_is_wrapped_and_surrounding_whitespace_stays_put() {
         let doc = "<html><body>\n\n\nBiRiNCi BÖLÜM\n<p>x</p></body></html>";
@@ -3548,6 +4057,144 @@ mod tests {
     #[test]
     fn a_document_that_does_not_parse_declines() {
         assert!(plan_body_text_wrapping("<html><body>unclosed").is_none());
+    }
+
+    // --- fix.anchor_name -------------------------------------------------
+
+    fn drop_anchor_names(doc: &str) -> Option<String> {
+        let spans = plan_anchor_name_drops(doc)?;
+        let edits = spans
+            .into_iter()
+            .map(|range| MetaEdit {
+                range,
+                replacement: String::new(),
+            })
+            .collect();
+        Some(apply_edits(doc, edits))
+    }
+
+    /// The shelf's shape, all 162 of them: the `id` already carries the value,
+    /// so the `name` is a duplicate declaration and the fragment still resolves.
+    #[test]
+    fn a_redundant_anchor_name_is_dropped_with_its_whitespace() {
+        let doc = r#"<html><body><a href="x.xhtml#f1" id="f1" name="f1">1</a></body></html>"#;
+        assert_eq!(
+            drop_anchor_names(doc).unwrap(),
+            r#"<html><body><a href="x.xhtml#f1" id="f1">1</a></body></html>"#
+        );
+    }
+
+    /// No `id` to fall back on: renaming `name` → `id` would have to prove the
+    /// value is an NCName and unique, so the fixer leaves it for a human.
+    #[test]
+    fn an_anchor_name_without_an_id_is_declined() {
+        let doc = r#"<html><body><a name="f1">1</a></body></html>"#;
+        assert!(plan_anchor_name_drops(doc).unwrap().is_empty());
+    }
+
+    /// Two different values: dropping `name` breaks any `#fragment` targeting
+    /// it, and an element cannot carry two ids.
+    #[test]
+    fn an_anchor_whose_id_and_name_differ_is_declined() {
+        let doc = r#"<html><body><a id="a1" name="f1">1</a></body></html>"#;
+        assert!(plan_anchor_name_drops(doc).unwrap().is_empty());
+    }
+
+    /// `name` is obsolete on `<a>`; on a form control it is the control's
+    /// name and carries the submitted data. The fixer is `<a>`-only.
+    #[test]
+    fn a_name_on_another_element_is_never_touched() {
+        let doc = r#"<html><body><input id="q" name="q"/></body></html>"#;
+        assert!(plan_anchor_name_drops(doc).unwrap().is_empty());
+    }
+
+    #[test]
+    fn several_anchors_in_one_document_are_all_dropped() {
+        let doc = r#"<html><body><a id="a" name="a">1</a><a id="b" name="b">2</a></body></html>"#;
+        assert_eq!(
+            drop_anchor_names(doc).unwrap(),
+            r#"<html><body><a id="a">1</a><a id="b">2</a></body></html>"#
+        );
+    }
+
+    /// Attributes spread over lines: the deletion takes the run of whitespace
+    /// in front of the attribute, so the tag reads as if it were never written.
+    #[test]
+    fn a_multiline_tag_keeps_its_shape() {
+        let doc = "<html><body><a\n  id=\"f\"\n  name=\"f\">1</a></body></html>";
+        assert_eq!(
+            drop_anchor_names(doc).unwrap(),
+            "<html><body><a\n  id=\"f\">1</a></body></html>"
+        );
+    }
+
+    // --- fix.empty_lang --------------------------------------------------
+
+    fn drop_empty_langs(doc: &str) -> Option<String> {
+        let spans = plan_empty_lang_drops(doc)?;
+        let edits = spans
+            .into_iter()
+            .map(|range| MetaEdit {
+                range,
+                replacement: String::new(),
+            })
+            .collect();
+        Some(apply_edits(doc, edits))
+    }
+
+    /// The shelf's shape: both spellings on the same element, both empty.
+    #[test]
+    fn both_spellings_of_an_empty_lang_are_deleted() {
+        let doc = r#"<html><body><p lang="" xml:lang="">x</p></body></html>"#;
+        assert_eq!(
+            drop_empty_langs(doc).unwrap(),
+            "<html><body><p>x</p></body></html>"
+        );
+    }
+
+    /// A malformed tag is a different defect: repairing it means guessing which
+    /// language was meant, which is exactly what epubsana refuses to do.
+    #[test]
+    fn a_non_empty_language_tag_is_never_touched() {
+        for doc in [
+            r#"<html><body><p lang="en_US">x</p></body></html>"#,
+            r#"<html><body><p lang="tr" xml:lang="tr">x</p></body></html>"#,
+        ] {
+            assert!(plan_empty_lang_drops(doc).unwrap().is_empty(), "{doc}");
+        }
+    }
+
+    /// Only the empty one goes, even when its sibling on the same element is a
+    /// perfectly good tag.
+    #[test]
+    fn a_mixed_pair_loses_only_the_empty_half() {
+        let doc = r#"<html><body><p lang="" xml:lang="tr">x</p></body></html>"#;
+        assert_eq!(
+            drop_empty_langs(doc).unwrap(),
+            r#"<html><body><p xml:lang="tr">x</p></body></html>"#
+        );
+    }
+
+    /// The finding decides, not the fixer's own reading of the document: a
+    /// malformed value and a non-`lang` attribute must both fail the match.
+    #[test]
+    fn only_an_empty_lang_finding_is_matched() {
+        let empty = |attr: &str, value: &str| epubveri::report::Message {
+            id: "RSC-005",
+            severity: Severity::Error,
+            text: format!("value of attribute \"{attr}\" is invalid: \"{value}\""),
+            location: Some("OEBPS/ch1.xhtml".to_string()),
+            position: None,
+            rule: Some("opf.content_document.schema_violation"),
+            params: vec![attr.to_string(), value.to_string()],
+            element_path: None,
+        };
+        assert!(is_empty_lang(&empty("lang", "")));
+        assert!(is_empty_lang(&empty("xml:lang", "")));
+        assert!(!is_empty_lang(&empty("lang", "en_US")));
+        // The cross-file one: renaming an id means moving every href="#…" that
+        // targets it. Determinate in principle, not a local edit, not this fixer.
+        assert!(!is_empty_lang(&empty("id", "06")));
     }
 
     #[test]
