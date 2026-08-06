@@ -13,7 +13,7 @@ changed**. It never guesses, and it preserves everything it doesn't touch.
 ## Status
 
 Early but working. The core contract (`Workspace` → detect → propose → confirm →
-apply → report) is solid, with twenty-three fixers so far:
+apply → report) is solid, with twenty-four fixers so far:
 
 - **`RSC-016`** — undeclared HTML entities (`&nbsp;`, `&mdash;`, …) → the exact
   character each denotes.
@@ -74,6 +74,13 @@ apply → report) is solid, with twenty-three fixers so far:
   file's own directory rather than replaced globally, so a link meaning another
   document's identically-named id is left alone. Any occurrence it can't
   classify — a fragment in a stylesheet or in prose — makes it decline.
+- **`RSC-005` / `opf.package.schema_violation`** — an EPUB 3 attribute on an
+  EPUB 2 package → deleted, but only once verified it says nothing the book
+  doesn't: a `properties="cover-image"` whose cover is already declared by
+  `<meta name="cover">` on that item, or a `page-progression-direction="ltr"`.
+  A `properties="nav"`, a cover with no legacy declaration, or an `rtl` reading
+  direction are left alone — EPUB 2 has nowhere to put that information, which
+  is a reason not to erase it.
 - **`OPF-054`** — a `<dc:date>` with no content → dropped; the element states no
   date and `dc:date` is optional. A malformed but non-empty date (`March 2019`)
   is left exactly as it is: it carries a date the author wrote, and deciding

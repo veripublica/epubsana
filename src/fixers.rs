@@ -37,6 +37,7 @@ pub fn plan(report: &Report, ws: &Workspace, _goal: Goal) -> Vec<ProposedFix> {
     fixes.extend(guide_dangling_references(report, ws));
     fixes.extend(guide_duplicate_references(report, ws));
     fixes.extend(content_document_invalid_ids(report, ws));
+    fixes.extend(epub3_attrs_in_epub2_package(report, ws));
     fixes.extend(empty_dc_date(report, ws));
     fixes.extend(mimetype_packaging(report, ws));
     // Future fixers append here, in a sensible confirm order — and in
@@ -79,6 +80,7 @@ pub fn handled_rules() -> &'static [&'static str] {
         "opf.guide.reference_missing_resource",
         "opf.manifest_item.missing_resource",
         "opf.manifest_item.unencoded_space_in_href",
+        "opf.package.schema_violation",
         "opf.spine.duplicate_itemref",
         "opf.spine.itemref_idref_not_in_manifest",
     ]
@@ -2929,6 +2931,154 @@ fn plan_id_renames(ws: &Workspace, doc: &str, values: &BTreeSet<String>) -> Opti
     (!renames.is_empty()).then_some(IdRenamePlan { renames, edits })
 }
 
+/// `RSC-005` / `opf.package.schema_violation`: an attribute EPUB 3 introduced,
+/// sitting on a package document that declares `version="2.0"`.
+///
+/// **Not to be confused with its content-document twin.** `attribute "X" is not
+/// allowed here` under `opf.content_document.schema_violation` is the largest and
+/// least repairable surface epubveri reports; `docs/COVERAGE.md` says to stay
+/// away from it. This is a different rule over the package document's much
+/// smaller vocabulary — 4 findings on the shelf, not thousands — so the **rule
+/// name**, never the message text, is what selects this fixer.
+///
+/// **Deleted only after the redundancy is verified in that book**, which is what
+/// makes it `AutoSafe`:
+///
+/// - `properties="cover-image"` on a manifest item, when the package also
+///   carries `<meta name="cover" content="…">` naming that same item's `id`. The
+///   cover is then already declared the way EPUB 2 declares it; the attribute
+///   repeats it.
+/// - `page-progression-direction="ltr"`, which is EPUB 3's own default and so
+///   asserts nothing anywhere.
+///
+/// Everything else declines — another `properties` token (EPUB 2 has no
+/// equivalent, so dropping it would discard a real claim), a `cover-image` with
+/// no matching or a mismatched `<meta name="cover">` (then the attribute is the
+/// *only* cover declaration), and `rtl` (authored information EPUB 2 has nowhere
+/// to put, which is a reason to leave the book alone rather than erase it).
+fn epub3_attrs_in_epub2_package(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    let mut by_file: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for m in &report.messages {
+        if m.rule != Some("opf.package.schema_violation") || !m.text.starts_with("attribute ") {
+            continue;
+        }
+        let (Some(file), Some(attr)) = (m.location.as_deref(), m.params.first()) else {
+            continue;
+        };
+        by_file
+            .entry(file.to_string())
+            .or_default()
+            .insert(attr.clone());
+    }
+
+    let mut fixes = Vec::new();
+    for (file, attrs) in by_file {
+        let Some(text) = ws.get_text(&file) else {
+            continue;
+        };
+        let Some(dropped) = compute_epub3_attr_edits(&text, &attrs) else {
+            continue;
+        };
+        let n = dropped.len();
+        let listed = dropped
+            .iter()
+            .map(|d| d.name.clone())
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let file_for_apply = file.clone();
+        let attrs_for_apply = attrs.clone();
+        fixes.push(ProposedFix {
+            fix_id: "fix.epub3_attr_in_epub2_package",
+            addresses_id: "RSC-005".to_string(),
+            addresses_rule: Some("opf.package.schema_violation"),
+            addresses_severity: addressed_severity(
+                report,
+                "RSC-005",
+                Some("opf.package.schema_violation"),
+            ),
+            tier: Tier::AutoSafe,
+            title: format!("Delete {n} EPUB 3 attribute(s) in {file} ({listed})"),
+            rationale: "The package document declares EPUB 2, and these attributes were \
+                 introduced by EPUB 3. Each is deleted only after checking that it says nothing \
+                 this book does not already say: a properties=\"cover-image\" whose cover is \
+                 also declared by <meta name=\"cover\"> on the same item, or a \
+                 page-progression-direction of \"ltr\", which is the default everywhere. Any \
+                 other value carries information EPUB 2 cannot express, and is left alone."
+                .to_string(),
+            preview: dropped
+                .iter()
+                .map(|d| Change {
+                    path: file.clone(),
+                    note: format!("delete {} ({})", text[d.edit.range.clone()].trim(), d.why),
+                })
+                .collect(),
+            apply_fn: Box::new(move |ws: &mut Workspace| {
+                if let Some(text) = ws.get_text(&file_for_apply)
+                    && let Some(dropped) = compute_epub3_attr_edits(&text, &attrs_for_apply)
+                {
+                    let edits = dropped.into_iter().map(|d| d.edit).collect();
+                    ws.set_text(&file_for_apply, apply_edits(&text, edits));
+                }
+            }),
+        });
+    }
+    fixes
+}
+
+/// One attribute this fixer is willing to delete, and the reason it is safe.
+struct DroppableAttr {
+    name: String,
+    why: &'static str,
+    edit: MetaEdit,
+}
+
+/// Every reported attribute that is verifiably redundant *in this package*.
+/// `None` (decline) if it won't parse or nothing qualifies.
+fn compute_epub3_attr_edits(opf: &str, attrs: &BTreeSet<String>) -> Option<Vec<DroppableAttr>> {
+    let doc = parse_xml(opf)?;
+    // The id the legacy EPUB 2 cover declaration points at, if there is one.
+    let legacy_cover: Option<&str> = doc
+        .descendants()
+        .find(|n| {
+            n.is_element() && n.tag_name().name() == "meta" && n.attr_no_ns("name") == Some("cover")
+        })
+        .and_then(|n| n.attr_no_ns("content"));
+
+    let mut out = Vec::new();
+    for node in doc.descendants().filter(|n| n.is_element()) {
+        for attr in node.attributes() {
+            let name = attr.name();
+            if !attrs.contains(name) {
+                continue;
+            }
+            let why = match (node.tag_name().name(), name, attr.value().trim()) {
+                // The cover is already declared the way EPUB 2 declares it, on
+                // this very item — so the EPUB 3 attribute only repeats it.
+                ("item", "properties", "cover-image")
+                    if legacy_cover.is_some() && legacy_cover == node.attr_no_ns("id") =>
+                {
+                    "the cover is already declared by <meta name=\"cover\"> on this item"
+                }
+                // EPUB 3's own default: the attribute asserts nothing anywhere.
+                ("spine", "page-progression-direction", "ltr") => {
+                    "\"ltr\" is the default reading direction"
+                }
+                _ => continue,
+            };
+            out.push(DroppableAttr {
+                name: name.to_string(),
+                why,
+                edit: MetaEdit {
+                    range: attr_span_with_leading_space(opf, attr.range()),
+                    replacement: String::new(),
+                },
+            });
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
 /// `OPF-054`: a `<dc:date>` that holds no date at all. Drop the element.
 ///
 /// **Dispatches on the bare `id`** — this site has no `rule` and needs none: it
@@ -3654,6 +3804,125 @@ mod tests {
     <reference type="cover" title="Cover" href="cover.xhtml"/>
   </guide>
 </package>"#;
+
+    /// An EPUB 2 package with `{cover}` and `{spine}` substituted in.
+    fn package(cover_item: &str, meta: &str, spine: &str) -> String {
+        format!(
+            r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="id">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>A Book</dc:title>
+    {meta}
+  </metadata>
+  <manifest>
+    {cover_item}
+    <item href="ch1.xhtml" id="ch1" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine {spine}><itemref idref="ch1"/></spine>
+</package>"#
+        )
+    }
+
+    fn droppable(opf: &str, attrs: &[&str]) -> Vec<String> {
+        let set: BTreeSet<String> = attrs.iter().map(|s| s.to_string()).collect();
+        compute_epub3_attr_edits(opf, &set)
+            .map(|v| v.into_iter().map(|d| d.name).collect())
+            .unwrap_or_default()
+    }
+
+    const COVER_PROPS: &str =
+        r#"<item href="c.jpg" id="cover-image" media-type="image/jpeg" properties="cover-image"/>"#;
+    const COVER_META: &str = r#"<meta name="cover" content="cover-image"/>"#;
+
+    #[test]
+    fn a_redundant_cover_property_is_dropped() {
+        let opf = package(COVER_PROPS, COVER_META, r#"toc="ncx""#);
+        assert_eq!(droppable(&opf, &["properties"]), vec!["properties"]);
+        let set = BTreeSet::from(["properties".to_string()]);
+        let edits = compute_epub3_attr_edits(&opf, &set)
+            .unwrap()
+            .into_iter()
+            .map(|d| d.edit)
+            .collect();
+        let out = apply_edits(&opf, edits);
+        assert!(!out.contains("properties"));
+        assert!(
+            out.contains(r#"id="cover-image" media-type="image/jpeg"/>"#),
+            "the attribute goes with its leading space: {out}"
+        );
+        assert!(out.contains(COVER_META), "the EPUB 2 declaration stays");
+    }
+
+    #[test]
+    fn a_cover_property_with_no_legacy_meta_is_declined() {
+        // Then the attribute is the ONLY cover declaration — dropping it loses
+        // the cover.
+        let opf = package(COVER_PROPS, "", r#"toc="ncx""#);
+        assert!(droppable(&opf, &["properties"]).is_empty());
+    }
+
+    #[test]
+    fn a_cover_property_whose_meta_names_another_item_is_declined() {
+        let opf = package(
+            COVER_PROPS,
+            r#"<meta name="cover" content="some-other-item"/>"#,
+            r#"toc="ncx""#,
+        );
+        assert!(droppable(&opf, &["properties"]).is_empty());
+    }
+
+    #[test]
+    fn a_property_that_is_not_the_cover_is_declined() {
+        // EPUB 2 has no equivalent declaration for these, so dropping one would
+        // discard a real claim about the document.
+        for token in ["nav", "mathml", "scripted", "cover-image mathml"] {
+            let item = format!(
+                r#"<item href="c.xhtml" id="cover-image" media-type="application/xhtml+xml" properties="{token}"/>"#
+            );
+            let opf = package(&item, COVER_META, r#"toc="ncx""#);
+            assert!(
+                droppable(&opf, &["properties"]).is_empty(),
+                "properties={token:?} must decline"
+            );
+        }
+    }
+
+    #[test]
+    fn a_default_page_progression_direction_is_dropped() {
+        let opf = package(
+            COVER_PROPS,
+            COVER_META,
+            r#"toc="ncx" page-progression-direction="ltr""#,
+        );
+        assert_eq!(
+            droppable(&opf, &["page-progression-direction"]),
+            vec!["page-progression-direction"]
+        );
+    }
+
+    #[test]
+    fn a_right_to_left_reading_direction_is_declined() {
+        // Authored information EPUB 2 has nowhere to put — a reason to leave the
+        // book alone, not to erase it.
+        let opf = package(
+            COVER_PROPS,
+            COVER_META,
+            r#"toc="ncx" page-progression-direction="rtl""#,
+        );
+        assert!(droppable(&opf, &["page-progression-direction"]).is_empty());
+    }
+
+    #[test]
+    fn only_the_attributes_the_finding_named_are_considered() {
+        let opf = package(
+            COVER_PROPS,
+            COVER_META,
+            r#"toc="ncx" page-progression-direction="ltr""#,
+        );
+        // The finding named only `properties`, so the spine attribute is not
+        // touched even though it would qualify.
+        assert_eq!(droppable(&opf, &["properties"]), vec!["properties"]);
+    }
 
     /// A container holding exactly the files given, so a cross-file rename can
     /// be exercised end to end rather than helper by helper.

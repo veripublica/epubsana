@@ -12,6 +12,30 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
 ### Added
 
+- **A fixer for an EPUB 3 attribute on an EPUB 2 package document**
+  (`opf.package.schema_violation`) — the third of the family, and the one whose
+  value is in what it refuses to do. All four findings on the shelf turn out to
+  assert nothing the book does not already say, so each is deleted **only after
+  that redundancy is verified in that book**: a `properties="cover-image"` whose
+  cover is also declared by `<meta name="cover">` on the same item, and a
+  `page-progression-direction="ltr"`, which is the default everywhere.
+
+  Any other `properties` token (`nav`, `mathml`, …) declines — EPUB 2 has no
+  equivalent declaration, so dropping one would discard a real claim rather than
+  a repeat. So does a `cover-image` with no matching or a mismatched
+  `<meta name="cover">`, where the attribute is the *only* cover declaration, and
+  so does `page-progression-direction="rtl"`: a right-to-left reading order is
+  authored information EPUB 2 has nowhere to put, which is a reason to leave the
+  book alone rather than erase it.
+
+  `AutoSafe`, unusually for a deletion, because the redundancy is checked before
+  the fix is proposed rather than assumed from the shape.
+
+  **Measured:** 4 findings across 4 books, all cleared — the rule goes to zero on
+  the shelf, with nothing introduced. The declines cost nothing here because no
+  shelf book carries the shapes they guard against; they are written from the
+  specification, not from the corpus.
+
 - **A fixer for an `id` that is not a valid XML NCName** — and the first one that
   edits more than one file at a time. All 312 findings on the 94-book shelf are
   one defect: an id that starts with a digit. Each is sanitized to the nearest

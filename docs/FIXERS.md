@@ -45,6 +45,7 @@ grows one carefully-argued entry at a time.
 | `RSC-005` | `htm.obsolete_attribute` (`params[0] == "name"`) | AutoSafe | A legacy `<a name>` anchor duplicating the element's own `id` | [Drop the `name` attribute](#rsc-005--a-legacy-name-attribute-on-a) |
 | `RSC-005` | `opf.content_document.schema_violation` (empty `lang`/`xml:lang`) | ConfirmNeeded | An empty language tag, which EPUB 2's grammar does not allow | [Delete the attribute](#rsc-005--an-empty-lang--xmllang) |
 | `RSC-005` | `opf.content_document.schema_violation` (`params[0] == "id"`) | ConfirmNeeded | An `id` that is not a valid XML NCName (on the shelf: it starts with a digit) | [Rename it, moving every reference with it](#rsc-005--an-id-that-is-not-a-valid-ncname-the-first-cross-file-fixer) |
+| `RSC-005` | `opf.package.schema_violation` | AutoSafe | An EPUB 3 attribute on an EPUB 2 package document | [Delete it, once verified it says nothing the book does not](#rsc-005--an-epub-3-attribute-on-an-epub-2-package-document) |
 | `OPF-054` | *(none)* | ConfirmNeeded | A `<dc:date>` holds no date at all (EPUB 2) | [Drop the empty element; never touch a non-empty one](#opf-054--an-empty-dcdate-epub-2) |
 
 **A note on structural fixers.** Fixers that must locate an element (rather than
@@ -1013,3 +1014,68 @@ whole-shelf instruments — `regression_audit` and the round-trip check, the lat
 comparing ID sets as well as counts — report **nothing introduced anywhere**.
 That is the strongest evidence any fixer here has shipped with, and it is the
 right bar for the first one that edits more than one file at a time.
+
+---
+
+## RSC-005 — an EPUB 3 attribute on an EPUB 2 package document
+
+**Finding.** `opf.package.schema_violation`, message *attribute "…" is not allowed
+here*, `params` = `[attribute]`, reported on the package document. The OPF's own
+grammar, not a content document's.
+
+**Do not confuse it with its content-document twin.** `attribute "X" is not
+allowed here` under `opf.content_document.schema_violation` is the largest and
+least repairable surface epubveri reports (and the one it is still changing), and
+`docs/COVERAGE.md` says to stay away from it. This is a different rule over a
+much smaller vocabulary: the package document has a handful of attributes, EPUB 2
+and EPUB 3 differ in a knowable way, and there are 4 findings on the shelf, not
+thousands. The rule name is the discriminator — the message text alone is not.
+
+**The defect.** A book declares `version="2.0"` but carries an attribute EPUB 3
+introduced. On the shelf it is exactly two, and **both turn out to assert nothing
+the book does not already say**:
+
+    3 books  <item href="…jpg" id="cover-image" … properties="cover-image"/>
+             <meta name="cover" content="cover-image"/>   ← the EPUB 2 declaration,
+                                                            naming that same item
+    1 book   <spine toc="ncx" page-progression-direction="ltr">
+                                                    ↑ EPUB 3's own default value
+
+**Fix** (`fix.epub3_attr_in_epub2_package`, AutoSafe). Delete the attribute, with
+the whitespace that preceded it — but **only after verifying, in that book, that
+it carries no information**:
+
+- `properties="cover-image"` on a manifest item is dropped **iff** the package
+  also has `<meta name="cover" content="…">` naming *that item's own `id`*. Then
+  the cover is already declared the way EPUB 2 declares it, at the same item, and
+  the attribute is pure redundancy.
+- `page-progression-direction` is dropped **iff** its value is `ltr`. That is the
+  default in EPUB 3 too, so the attribute asserts nothing anywhere.
+
+**Why `AutoSafe`.** Deletions are normally `ConfirmNeeded` here, because they can
+shorten a reading order or remove a cover declaration. This one provably cannot:
+each case is checked to be redundant *before* it is proposed, and the check is
+about this book rather than about the shape in general. That is the same standard
+that made the legacy `<a name>` fixer `AutoSafe` — a duplicate declaration whose
+information demonstrably survives its own removal.
+
+**When it declines.**
+
+- **Any other `properties` token** — `nav`, `mathml`, `scripted`, `svg`,
+  `remote-resources`, `switch` — or more than one token. EPUB 2 has no equivalent
+  declaration for these, so dropping one would silently discard a real claim
+  about the document rather than a redundant one.
+- **`properties="cover-image"` with no matching `<meta name="cover">`**, or one
+  that names a different item. Then the attribute is the *only* cover
+  declaration, and removing it would lose the cover.
+- **`page-progression-direction="rtl"`** (or any value that is not `ltr`). A
+  right-to-left reading order is real authored information. EPUB 2 has nowhere to
+  put it, which is a reason to leave the book alone, not a reason to erase it.
+- **Any other attribute name** reported through this rule, and a package document
+  that doesn't parse.
+
+**Measured.** 4 findings across **4 books**, and the fix clears all four — the
+rule goes to zero on the shelf. Both whole-shelf instruments report nothing
+introduced. Note what the declines cost here: **nothing on this shelf**, because
+no book carries the shapes they guard against. They are written from the
+specification rather than from the corpus, and should be described that way.
