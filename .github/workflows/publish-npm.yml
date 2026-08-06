@@ -143,7 +143,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          files=$(npm pack ./epubsana-wasm/pkg --dry-run --json | jq -r '.[0].files[].path')
+          # Read the file list without indexing into the document. `npm pack
+          # --json` prints an array of pack results on npm 11 and an object on
+          # npm 12, and the step above installs npm@latest — so the shape can
+          # change under this workflow with no change to this repo. It did:
+          # 0.7.0's first publish attempt died here on `.[0]` the day npm 12
+          # landed, which at least failed safe (nothing was published). Walking
+          # for entries that have a `path` works either way, and the raw output
+          # is echoed so the next surprise is diagnosable from the log alone.
+          raw=$(npm pack ./epubsana-wasm/pkg --dry-run --json)
+          echo "$raw"
+          files=$(jq -r '[.. | objects | select(has("path")) | .path] | .[]' <<< "$raw")
+          echo "--- packed files ---"
           echo "$files"
           for want in LICENSE LICENSE-COMMERCIAL.md; do
             grep -qx "$want" <<< "$files" \
