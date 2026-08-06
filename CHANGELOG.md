@@ -8,7 +8,25 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
-## [Unreleased]
+## [0.7.0] - 2026-08-06
+
+Four fixers' worth of new repair — three added and one widened, twenty-one to
+**twenty-four** — chosen by measuring the shelf rather than by working down a
+list. On the 94 shared books, error-severity findings fall **4677 → 3366**, one
+more book reaches fully valid, and both whole-shelf instruments (`regression_audit`
+and the round-trip check, which compares ID sets as well as counts) report
+**nothing introduced anywhere**.
+
+Two of them are the first of their kind here: one edits more than a single file,
+and one deletes on an `AutoSafe` tier because it verifies the redundancy first.
+As much of the work went into what these decline — a malformed date, an
+identically-named id in another document, an element XHTML 1.1 does not have —
+and each entry below says so, because that is the part a repairer is judged on.
+
+This is also the first release the tag-triggered automation publishes end to end,
+and it carries the `LICENSE-COMMERCIAL.md` packaging fix that npm 0.6.0 shipped
+without.
+
 
 ### Changed
 
