@@ -44,6 +44,7 @@ grows one carefully-argued entry at a time.
 | `RSC-017` | `opf.guide.duplicate_reference` | ConfirmNeeded | Two `<guide>` references share a `type` and `href` | [Keep the first, drop the duplicates](#rsc-007--rsc-017--guide-references) |
 | `RSC-005` | `htm.obsolete_attribute` (`params[0] == "name"`) | AutoSafe | A legacy `<a name>` anchor duplicating the element's own `id` | [Drop the `name` attribute](#rsc-005--a-legacy-name-attribute-on-a) |
 | `RSC-005` | `opf.content_document.schema_violation` (empty `lang`/`xml:lang`) | ConfirmNeeded | An empty language tag, which EPUB 2's grammar does not allow | [Delete the attribute](#rsc-005--an-empty-lang--xmllang) |
+| `RSC-005` | `opf.content_document.schema_violation` (`params[0] == "id"`) | ConfirmNeeded | An `id` that is not a valid XML NCName (on the shelf: it starts with a digit) | [Rename it, moving every reference with it](#rsc-005--an-id-that-is-not-a-valid-ncname-the-first-cross-file-fixer) |
 | `OPF-054` | *(none)* | ConfirmNeeded | A `<dc:date>` holds no date at all (EPUB 2) | [Drop the empty element; never touch a non-empty one](#opf-054--an-empty-dcdate-epub-2) |
 
 **A note on structural fixers.** Fixers that must locate an element (rather than
@@ -946,3 +947,69 @@ case, on the id this fixer does not act on — so the single real-world specimen
 have is evidence for the decline, not for the repair. The guards are covered by
 unit tests, not by real books, and that should be said plainly whenever this
 fixer is claimed.
+
+---
+
+## RSC-005 — an `id` that is not a valid NCName (the first cross-file fixer)
+
+**Finding.** `opf.content_document.schema_violation`, message *value of attribute
+"id" is invalid: "…"*, `params` = `[attribute, value]` with `params[0] == "id"`.
+Like the stray-text and empty-`lang` fixers, this reaches through one rule that
+covers a whole grammar, so the match takes the message prefix **and** `params`.
+
+**One defect, measured.** All **312** findings on the 94-book shelf are the same
+thing: an id that **starts with a digit**, which an XML NCName may not. Zero are
+invalid for any other reason. So the repair is the sanitize-and-rename the NCX
+fixer already does — `id_09`, made unique against the ids already in the
+document.
+
+**What makes it different from `ncx_ncnames`, and why it is the first cross-file
+fixer.** That fixer renames freely because NCX ids are not reference targets.
+These are: **191 of the 312 are pointed at** — 181 times from the NCX, 150 from
+other content documents, twice from the OPF. A rename that leaves a reference
+behind trades this finding for a dangling fragment, which is precisely the
+self-inflicted regression the house rules care most about.
+
+**Fix** (`fix.content_document_invalid_id`, ConfirmNeeded). One proposal per
+document, covering every invalid id in it. Each id is sanitized and made unique,
+and **every reference to it is rewritten in the same edit**: fragments inside the
+document itself, links from other content documents, and the NCX's
+`<content src="…#…"/>`.
+
+**How a reference is attributed, and why it must be.** The hazard here is
+measured, not hypothetical: **six values on the shelf are carried by 6–12
+different documents of the same book**, so a global search for `#value` would
+rewrite links that legitimately mean *another* document's identically-named id.
+Every occurrence is therefore resolved — the path part of the attribute value it
+sits in is resolved against the **referring file's own directory** (treating it
+as container-absolute is the mistake `frag_diag` made once and `docs/API.md`
+records), and rewritten only when it lands on this document. A bare `#value`
+belongs to the file it appears in.
+
+**When it declines.**
+
+- **An occurrence it cannot classify.** A `#value` that is not inside a quoted
+  attribute value — an id selector in a stylesheet, a string in script, a mention
+  in prose — cannot be rewritten with confidence, so the whole rename for that id
+  is abandoned. This is the safety net, and it is why the fixer can promise that
+  a rename never leaves a reference behind.
+- **A percent-encoded path** in a reference: we do not guess at an encoding we
+  would then have to re-emit.
+- **Two elements sharing the invalid id.** That is a duplicate-id defect, and
+  which of them a reference meant is not ours to guess.
+- **A value nothing usable survives sanitizing.** Never invent an id.
+
+**One filter that is correctness, not optimization.** Only markup, styles and
+script are scanned for references (`.xhtml`, `.html`, `.htm`, `.xml`, `.ncx`,
+`.opf`, `.svg`, `.css`, `.js`). `Workspace::get_text` will hand back the bytes of
+a JPEG as a string, and a cover image reliably contains a byte pair spelling
+`#1`; that occurrence is unclassifiable, and since unclassifiable means decline,
+**one cover image was enough to abandon ten perfectly repairable ids on a real
+book** before this filter existed. It was caught by the shelf, not by a test.
+
+**Measured.** 312 findings across **5 books**; after the fix **all five hold zero
+invalid ids**. One more book reaches fully valid (3 → 4 on the shelf), and both
+whole-shelf instruments — `regression_audit` and the round-trip check, the latter
+comparing ID sets as well as counts — report **nothing introduced anywhere**.
+That is the strongest evidence any fixer here has shipped with, and it is the
+right bar for the first one that edits more than one file at a time.

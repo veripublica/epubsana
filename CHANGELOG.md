@@ -12,6 +12,33 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
 ### Added
 
+- **A fixer for an `id` that is not a valid XML NCName** — and the first one that
+  edits more than one file at a time. All 312 findings on the 94-book shelf are
+  one defect: an id that starts with a digit. Each is sanitized to the nearest
+  valid, unique name, exactly as the NCX fixer does.
+
+  **The reason it took a cross-file design** is that unlike NCX ids, these are
+  reference targets: 191 of the 312 are pointed at, 181 times from the NCX, 150
+  from other content documents. So every reference moves with the id it names —
+  fragments inside the document, links from other documents, the NCX's
+  `<content src="…#…"/>` — in the same edit you approve once. A rename that left
+  a reference behind would trade this finding for a dangling fragment.
+
+  References are **resolved**, never globally replaced: the path part of the
+  attribute value is resolved against the referring file's own directory, and
+  rewritten only when it lands on this document. That is not caution for its own
+  sake — six values on the shelf are carried by 6–12 *different documents of the
+  same book*, so a global rewrite would move links meaning another document's
+  identically-named id.
+
+  Anything that cannot be classified — a `#value` in a stylesheet selector, in
+  script, or in prose — makes the fixer decline that id rather than guess.
+
+  **Measured:** 312 findings across 5 books, and after the repair all five hold
+  **zero** invalid ids. One more book reaches fully valid, and both whole-shelf
+  instruments (`regression_audit`, and the round-trip check at the ID-set level)
+  report nothing introduced anywhere.
+
 - **A fixer for an empty `<dc:date>`** (`OPF-054`), the last of the four defects
   `epublift` handed over ([#5](https://github.com/veripublica/epubsana/issues/5)).
   An element with no content states no date, and `dc:date` is optional, so it is

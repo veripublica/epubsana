@@ -36,6 +36,7 @@ pub fn plan(report: &Report, ws: &Workspace, _goal: Goal) -> Vec<ProposedFix> {
     fixes.extend(spine_duplicate_itemrefs(report, ws));
     fixes.extend(guide_dangling_references(report, ws));
     fixes.extend(guide_duplicate_references(report, ws));
+    fixes.extend(content_document_invalid_ids(report, ws));
     fixes.extend(empty_dc_date(report, ws));
     fixes.extend(mimetype_packaging(report, ws));
     // Future fixers append here, in a sensible confirm order — and in
@@ -1006,6 +1007,7 @@ fn content_type_meta(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
 }
 
 /// One surgical byte-range edit (`replacement == ""` means delete).
+#[derive(Clone)]
 struct MetaEdit {
     range: Range<usize>,
     replacement: String,
@@ -2597,6 +2599,336 @@ fn compute_guide_duplicate_edits(opf: &str) -> Option<Vec<MetaEdit>> {
     (!edits.is_empty()).then_some(edits)
 }
 
+/// True if `c` may appear inside an id/fragment, so `#09` is not seen inside
+/// `#0099ff` (a CSS colour) and `#ch1` is not seen inside `#ch10`.
+fn is_frag_char(c: char) -> bool {
+    c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | ':')
+}
+
+/// The byte span of the *value* of the single boundary `id="bad"` occurrence.
+/// The caller checks uniqueness first; this returns the first boundary match.
+fn id_attr_value_span(text: &str, bad: &str) -> Option<Range<usize>> {
+    for quote in ['"', '\''] {
+        let needle = format!("id={quote}{bad}{quote}");
+        let mut from = 0;
+        while let Some(rel) = text[from..].find(needle.as_str()) {
+            let start = from + rel;
+            if is_attr_boundary(text, start) {
+                let vstart = start + format!("id={quote}").len();
+                return Some(vstart..vstart + bad.len());
+            }
+            from = start + needle.len();
+        }
+    }
+    None
+}
+
+/// Every `#value` occurrence in `text`, as (span of the `#`, span of the value).
+/// Bounded by [`is_frag_char`] so a longer id that merely starts with `value`
+/// is never matched.
+fn fragment_spans(text: &str, value: &str) -> Vec<(usize, Range<usize>)> {
+    let needle = format!("#{value}");
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(rel) = text[from..].find(needle.as_str()) {
+        let hash = from + rel;
+        let end = hash + needle.len();
+        let next_ok = text[end..].chars().next().is_none_or(|c| !is_frag_char(c));
+        if next_ok {
+            out.push((hash, (hash + 1)..end));
+        }
+        from = hash + needle.len();
+    }
+    out
+}
+
+/// What the reference at `hash` points at: the **path part** of the attribute
+/// value the fragment sits in (`""` for a bare `#frag`, i.e. this same file).
+///
+/// `None` means *unclassifiable*, and the caller must then decline the whole
+/// rename. That is the safety net for everything this fixer cannot reason about:
+/// a `#frag` in a CSS selector or stylesheet, in script, or in ordinary prose —
+/// none of which is a quoted attribute value, so none of which can be rewritten
+/// with confidence. The walk back is bounded by the characters that cannot occur
+/// inside an attribute value, so it can never wander into a neighbouring tag.
+fn reference_path(text: &str, hash: usize) -> Option<String> {
+    let before = &text[..hash];
+    let quote = before
+        .char_indices()
+        .rev()
+        .take(512)
+        .find(|(_, c)| matches!(c, '"' | '\'' | '<' | '>' | '\n'))
+        .and_then(|(i, c)| matches!(c, '"' | '\'').then_some((i, c)))?;
+    let (qpos, qchar) = quote;
+    // The value must END at the fragment: anything after it (a query string, a
+    // second fragment) is a shape this fixer does not claim to understand.
+    let after = &text[hash..];
+    let close = after.find(qchar)?;
+    let tail = &after[..close];
+    if tail.contains(['"', '\'', '<', '>']) {
+        return None;
+    }
+    Some(text[qpos + 1..hash].to_string())
+}
+
+/// Whether `name` is a kind of file that can hold a fragment reference at all.
+///
+/// This is a **correctness** filter, not an optimization. `Workspace::get_text`
+/// will hand back the bytes of a JPEG as a string, and a cover image reliably
+/// contains a byte pair spelling `#1` somewhere; that occurrence is not a
+/// reference, cannot be classified, and — since an unclassifiable occurrence
+/// makes this fixer decline — one cover image was enough to abandon ten
+/// perfectly repairable ids on a real book. Only markup, styles and script can
+/// point at a fragment, so only those are scanned.
+fn can_reference_a_fragment(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    [
+        ".xhtml", ".html", ".htm", ".xml", ".ncx", ".opf", ".svg", ".css", ".js",
+    ]
+    .iter()
+    .any(|ext| lower.ends_with(ext))
+}
+
+/// `path` resolved against the directory of `from`, as a container-absolute
+/// name. `None` if it escapes the container or is percent-encoded (we do not
+/// guess at an encoding we would then have to re-emit).
+fn resolve_against(from: &str, path: &str) -> Option<String> {
+    if path.contains('%') {
+        return None;
+    }
+    let mut parts: Vec<&str> = match from.rfind('/') {
+        Some(i) => from[..i].split('/').collect(),
+        None => Vec::new(),
+    };
+    for seg in path.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            s => parts.push(s),
+        }
+    }
+    Some(parts.join("/"))
+}
+
+/// `RSC-005` / `opf.content_document.schema_violation`, *value of attribute
+/// "id" is invalid*: a content document carries an `id` that is not a valid XML
+/// NCName. On the 94-book shelf this is **one** defect wearing one shape — all
+/// 312 findings are an id that starts with a digit — so the repair is the same
+/// sanitize-and-rename the NCX fixer does.
+///
+/// **What makes this different from `ncx_ncnames`, and why it is the first
+/// cross-file fixer.** That fixer could rename freely because NCX ids are not
+/// reference targets. These are: 191 of the 312 are pointed at from somewhere —
+/// 181 from the NCX, 150 from other content documents, 2 from the OPF. A rename
+/// that does not move every reference with it trades this finding for a dangling
+/// fragment, which is the self-inflicted-regression class the house rules care
+/// most about.
+///
+/// **The hazard is measured, not hypothetical.** Six bad values on the shelf are
+/// carried by 6–12 *different documents of the same book*, so a global search for
+/// `#value` would rewrite links that legitimately target another document's
+/// identically-named id. Every reference is therefore resolved: the path part of
+/// the attribute value it sits in is resolved against the **referring** file's
+/// own directory (the mistake `frag_diag` made once and `docs/API.md` records)
+/// and rewritten only when it lands on this document.
+///
+/// **Anything it cannot resolve, it declines** — see [`reference_path`]. A
+/// `#value` in a stylesheet, in script or in prose is not a quoted attribute
+/// value, and rather than guess, the whole rename for that id is abandoned.
+///
+/// `ConfirmNeeded`: it renames an anchor and rewrites links across files.
+fn content_document_invalid_ids(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    let mut by_doc: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for m in &report.messages {
+        if m.rule != Some("opf.content_document.schema_violation")
+            || !m.text.starts_with("value of attribute")
+            || m.params.first().map(String::as_str) != Some("id")
+        {
+            continue;
+        }
+        let (Some(doc), Some(value)) = (m.location.as_deref(), m.params.get(1)) else {
+            continue;
+        };
+        if value.is_empty() {
+            continue;
+        }
+        by_doc
+            .entry(doc.to_string())
+            .or_default()
+            .insert(value.clone());
+    }
+
+    let mut fixes = Vec::new();
+    for (doc, values) in by_doc {
+        let Some(plan) = plan_id_renames(ws, &doc, &values) else {
+            continue;
+        };
+        let renamed = plan.renames.len();
+        let listed = plan
+            .renames
+            .iter()
+            .take(3)
+            .map(|(old, new)| format!("{old} → {new}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let refs: usize = plan
+            .edits
+            .iter()
+            .map(|(f, e)| {
+                if *f == doc {
+                    e.len() - renamed
+                } else {
+                    e.len()
+                }
+            })
+            .sum();
+
+        let preview = plan
+            .edits
+            .keys()
+            .map(|f| Change {
+                path: f.clone(),
+                note: if *f == doc {
+                    format!("rename {renamed} invalid id(s): {listed}")
+                } else {
+                    "rewrite the references that pointed at them".to_string()
+                },
+            })
+            .collect();
+
+        let doc_for_apply = doc.clone();
+        let values_for_apply = values.clone();
+        fixes.push(ProposedFix {
+            fix_id: "fix.content_document_invalid_id",
+            addresses_id: "RSC-005".to_string(),
+            addresses_rule: Some("opf.content_document.schema_violation"),
+            addresses_severity: addressed_severity(
+                report,
+                "RSC-005",
+                Some("opf.content_document.schema_violation"),
+            ),
+            tier: Tier::ConfirmNeeded,
+            title: format!(
+                "Rename {renamed} invalid id(s) in {doc}, moving {refs} reference(s) with them"
+            ),
+            rationale: "An XML id must be an NCName, and these are not — on this shelf they \
+                 start with a digit. Each is sanitized to the nearest valid, unique name, and \
+                 every reference that pointed at it is rewritten in the same edit: fragments \
+                 inside this document, links from other documents, and the NCX. References are \
+                 resolved against the referring file's own directory, so a link meaning another \
+                 document's identically-named id is left alone. If any occurrence cannot be \
+                 resolved — a fragment in a stylesheet, in script or in prose — that id is not \
+                 renamed at all."
+                .to_string(),
+            preview,
+            apply_fn: Box::new(move |ws: &mut Workspace| {
+                if let Some(plan) = plan_id_renames(ws, &doc_for_apply, &values_for_apply) {
+                    for (file, edits) in plan.edits {
+                        if let Some(text) = ws.get_text(&file) {
+                            ws.set_text(&file, apply_edits(&text, edits));
+                        }
+                    }
+                }
+            }),
+        });
+    }
+    fixes
+}
+
+/// A rename plan: the (old, new) pairs and every edit they imply, by file.
+struct IdRenamePlan {
+    renames: Vec<(String, String)>,
+    edits: BTreeMap<String, Vec<MetaEdit>>,
+}
+
+/// Build the rename plan for `doc`'s invalid ids, or `None` (decline) when
+/// nothing can be renamed safely.
+///
+/// An individual id is skipped — leaving its finding in place — when it cannot
+/// be sanitized, when it is not carried by exactly one `id=` attribute (two
+/// elements sharing an id is a *different* defect and not this fixer's to guess
+/// at), or when any reference to it cannot be resolved.
+fn plan_id_renames(ws: &Workspace, doc: &str, values: &BTreeSet<String>) -> Option<IdRenamePlan> {
+    let doc_text = ws.get_text(doc)?;
+    let files: Vec<(String, String)> = ws
+        .names()
+        .cloned()
+        .collect::<Vec<_>>()
+        .into_iter()
+        .filter(|n| can_reference_a_fragment(n))
+        .filter_map(|n| ws.get_text(&n).map(|t| (n, t)))
+        .collect();
+
+    let mut used = existing_ids(&doc_text);
+    let mut renames = Vec::new();
+    let mut edits: BTreeMap<String, Vec<MetaEdit>> = BTreeMap::new();
+
+    for old in values {
+        if attr_occurrences(&doc_text, old) != 1 {
+            continue;
+        }
+        let Some(base) = sanitize_ncname(old) else {
+            continue;
+        };
+        let new = make_unique(base, &used);
+        let Some(id_span) = id_attr_value_span(&doc_text, old) else {
+            continue;
+        };
+
+        // Every reference to this id, or a reason to abandon it.
+        let mut ref_edits: Vec<(String, MetaEdit)> = Vec::new();
+        let mut resolvable = true;
+        for (file, text) in &files {
+            for (hash, span) in fragment_spans(text, old) {
+                let Some(path) = reference_path(text, hash) else {
+                    resolvable = false;
+                    break;
+                };
+                let target = if path.is_empty() {
+                    file.clone()
+                } else {
+                    match resolve_against(file, &path) {
+                        Some(t) => t,
+                        None => {
+                            resolvable = false;
+                            break;
+                        }
+                    }
+                };
+                if target == doc {
+                    ref_edits.push((
+                        file.clone(),
+                        MetaEdit {
+                            range: span,
+                            replacement: new.clone(),
+                        },
+                    ));
+                }
+            }
+            if !resolvable {
+                break;
+            }
+        }
+        if !resolvable {
+            continue;
+        }
+
+        used.insert(new.clone());
+        renames.push((old.clone(), new.clone()));
+        edits.entry(doc.to_string()).or_default().push(MetaEdit {
+            range: id_span,
+            replacement: new,
+        });
+        for (file, edit) in ref_edits {
+            edits.entry(file).or_default().push(edit);
+        }
+    }
+
+    (!renames.is_empty()).then_some(IdRenamePlan { renames, edits })
+}
+
 /// `OPF-054`: a `<dc:date>` that holds no date at all. Drop the element.
 ///
 /// **Dispatches on the bare `id`** — this site has no `rule` and needs none: it
@@ -3322,6 +3654,169 @@ mod tests {
     <reference type="cover" title="Cover" href="cover.xhtml"/>
   </guide>
 </package>"#;
+
+    /// A container holding exactly the files given, so a cross-file rename can
+    /// be exercised end to end rather than helper by helper.
+    fn container(files: &[(&str, &str)]) -> Workspace {
+        use std::io::Write;
+        let mut buf = Vec::new();
+        {
+            let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            let opts = zip::write::SimpleFileOptions::default();
+            zip.start_file("mimetype", opts).unwrap();
+            zip.write_all(b"application/epub+zip").unwrap();
+            for (name, body) in files {
+                zip.start_file(*name, opts).unwrap();
+                zip.write_all(body.as_bytes()).unwrap();
+            }
+            zip.finish().unwrap();
+        }
+        Workspace::load(&buf).unwrap()
+    }
+
+    fn planned(ws: &Workspace, doc: &str, bad: &[&str]) -> Option<IdRenamePlan> {
+        let values: BTreeSet<String> = bad.iter().map(|s| s.to_string()).collect();
+        plan_id_renames(ws, doc, &values)
+    }
+
+    /// Apply a plan and return the resulting text of one file.
+    fn applied(ws: &Workspace, plan: &IdRenamePlan, file: &str) -> String {
+        let text = ws.get_text(file).unwrap();
+        let edits = plan.edits.get(file).cloned().unwrap_or_default();
+        apply_edits(&text, edits)
+    }
+
+    #[test]
+    fn invalid_id_is_sanitized_and_its_own_fragment_moves_with_it() {
+        let ws = container(&[(
+            "ch1.xhtml",
+            r##"<html><body><p id="09">x</p><a href="#09">back</a></body></html>"##,
+        )]);
+        let plan = planned(&ws, "ch1.xhtml", &["09"]).unwrap();
+        assert_eq!(plan.renames, vec![("09".into(), "id_09".into())]);
+        let out = applied(&ws, &plan, "ch1.xhtml");
+        assert!(out.contains(r#"id="id_09""#));
+        assert!(
+            out.contains(r##"href="#id_09""##),
+            "the link must follow the anchor: {out}"
+        );
+    }
+
+    #[test]
+    fn a_reference_from_another_document_is_rewritten() {
+        let ws = container(&[
+            ("ch1.xhtml", r#"<html><body><p id="09">x</p></body></html>"#),
+            ("toc.ncx", r##"<ncx><content src="ch1.xhtml#09"/></ncx>"##),
+        ]);
+        let plan = planned(&ws, "ch1.xhtml", &["09"]).unwrap();
+        assert!(applied(&ws, &plan, "toc.ncx").contains(r##"src="ch1.xhtml#id_09""##));
+    }
+
+    /// The measured hazard: six values on the shelf are carried by 6–12
+    /// documents of one book, so a global `#value` rewrite would move links that
+    /// mean a *different* document's identically-named id.
+    #[test]
+    fn an_identically_named_id_in_another_document_is_left_alone() {
+        let ws = container(&[
+            (
+                "ch1.xhtml",
+                r#"<html><body><p id="09">one</p></body></html>"#,
+            ),
+            (
+                "ch2.xhtml",
+                r##"<html><body><p id="09">two</p><a href="#09">its own</a></body></html>"##,
+            ),
+        ]);
+        let plan = planned(&ws, "ch1.xhtml", &["09"]).unwrap();
+        let ch2 = applied(&ws, &plan, "ch2.xhtml");
+        assert!(
+            ch2.contains(r##"href="#09""##) && ch2.contains(r#"id="09""#),
+            "ch2's own anchor and its own link are untouched: {ch2}"
+        );
+    }
+
+    #[test]
+    fn a_reference_resolves_against_the_referring_files_directory() {
+        let ws = container(&[
+            (
+                "OEBPS/text/ch1.xhtml",
+                r#"<html><body><p id="09">x</p></body></html>"#,
+            ),
+            (
+                "OEBPS/toc.ncx",
+                r##"<ncx><content src="text/ch1.xhtml#09"/></ncx>"##,
+            ),
+            (
+                "OEBPS/text/ch2.xhtml",
+                r##"<html><body><a href="ch1.xhtml#09">x</a></body></html>"##,
+            ),
+        ]);
+        let plan = planned(&ws, "OEBPS/text/ch1.xhtml", &["09"]).unwrap();
+        assert!(applied(&ws, &plan, "OEBPS/toc.ncx").contains("#id_09"));
+        assert!(applied(&ws, &plan, "OEBPS/text/ch2.xhtml").contains("#id_09"));
+    }
+
+    #[test]
+    fn an_unclassifiable_fragment_declines_the_rename() {
+        // `#09` in a stylesheet is an id selector we cannot rewrite with
+        // confidence, so the id is not renamed at all.
+        let ws = container(&[
+            ("ch1.xhtml", r#"<html><body><p id="09">x</p></body></html>"#),
+            ("style.css", "#09 { color: red }"),
+        ]);
+        assert!(planned(&ws, "ch1.xhtml", &["09"]).is_none());
+    }
+
+    /// A cover image reliably contains the bytes `#1` somewhere. Scanning it
+    /// cost ten repairable ids on a real book before this filter existed.
+    #[test]
+    fn binary_entries_are_not_scanned_for_references() {
+        assert!(!can_reference_a_fragment("images/cover.jpeg"));
+        assert!(can_reference_a_fragment("OEBPS/toc.ncx"));
+        assert!(can_reference_a_fragment("Styles/main.CSS"));
+    }
+
+    #[test]
+    fn a_longer_id_that_merely_starts_with_the_value_is_not_matched() {
+        // `#09` must not be seen inside `#0912`, nor inside a CSS colour.
+        assert_eq!(fragment_spans(r##"href="#0912""##, "09").len(), 0);
+        assert_eq!(fragment_spans("color:#0099ff", "09").len(), 0);
+        assert_eq!(fragment_spans(r##"href="#09""##, "09").len(), 1);
+    }
+
+    #[test]
+    fn a_new_name_never_collides_with_an_existing_id() {
+        let ws = container(&[(
+            "ch1.xhtml",
+            r#"<html><body><p id="09">x</p><p id="id_09">taken</p></body></html>"#,
+        )]);
+        let plan = planned(&ws, "ch1.xhtml", &["09"]).unwrap();
+        assert_eq!(plan.renames[0].1, "id_09-2");
+    }
+
+    #[test]
+    fn two_elements_sharing_the_invalid_id_are_declined() {
+        // That is a duplicate-id defect, and which element a reference meant is
+        // not ours to guess.
+        let ws = container(&[(
+            "ch1.xhtml",
+            r#"<html><body><p id="09">a</p><p id="09">b</p></body></html>"#,
+        )]);
+        assert!(planned(&ws, "ch1.xhtml", &["09"]).is_none());
+    }
+
+    #[test]
+    fn resolve_against_handles_dot_dot_and_refuses_percent_encoding() {
+        assert_eq!(
+            resolve_against("OEBPS/toc.ncx", "text/ch1.xhtml").as_deref(),
+            Some("OEBPS/text/ch1.xhtml")
+        );
+        assert_eq!(
+            resolve_against("OEBPS/text/ch2.xhtml", "../images/x.svg").as_deref(),
+            Some("OEBPS/images/x.svg")
+        );
+        assert_eq!(resolve_against("a/b.xhtml", "c%20d.xhtml"), None);
+    }
 
     /// One empty date, one malformed-but-real date, one valid one. The middle
     /// element is the point of the whole fixer: `OPF-054` reports it, and we

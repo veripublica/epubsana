@@ -13,7 +13,7 @@ changed**. It never guesses, and it preserves everything it doesn't touch.
 ## Status
 
 Early but working. The core contract (`Workspace` → detect → propose → confirm →
-apply → report) is solid, with twenty-two fixers so far:
+apply → report) is solid, with twenty-three fixers so far:
 
 - **`RSC-016`** — undeclared HTML entities (`&nbsp;`, `&mdash;`, …) → the exact
   character each denotes.
@@ -67,6 +67,13 @@ apply → report) is solid, with twenty-two fixers so far:
 - **`RSC-005` / empty `lang`** — an empty `lang=""` / `xml:lang=""`, which EPUB 2
   doesn't allow → deleted, so the element inherits its parent's language. A
   malformed tag is never guessed at.
+- **`RSC-005` / an invalid `id`** — an `id` that isn't a valid XML NCName (on our
+  shelf, one that starts with a digit) → renamed to the nearest valid, unique
+  name, with **every reference moved with it**: fragments in the document, links
+  from other documents, the NCX. References are resolved against the referring
+  file's own directory rather than replaced globally, so a link meaning another
+  document's identically-named id is left alone. Any occurrence it can't
+  classify — a fragment in a stylesheet or in prose — makes it decline.
 - **`OPF-054`** — a `<dc:date>` with no content → dropped; the element states no
   date and `dc:date` is optional. A malformed but non-empty date (`March 2019`)
   is left exactly as it is: it carries a date the author wrote, and deciding
