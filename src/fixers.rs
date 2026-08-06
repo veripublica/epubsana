@@ -1522,7 +1522,7 @@ fn trimmed_span(range: Range<usize>, raw: &str) -> Option<Range<usize>> {
 fn bare_text_in_body(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
     let mut docs: BTreeSet<String> = BTreeSet::new();
     for m in &report.messages {
-        if is_stray_text_in_body(m)
+        if (is_stray_text_in_body(m) || is_misplaced_inline_element(m))
             && let Some(loc) = m.location.as_deref()
         {
             docs.insert(loc.to_string());
@@ -1566,16 +1566,19 @@ fn bare_text_in_body(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
             ),
             tier: Tier::ConfirmNeeded,
             title: format!(
-                "Wrap {n} run{} of bare text in <div> in {doc}",
+                "Wrap {n} run{} of non-block content in <div> in {doc}",
                 if n == 1 { "" } else { "s" }
             ),
             rationale:
-                "XHTML 1.1 requires `<body>` to hold block-level content, so text sitting directly \
-                 in it is invalid in EPUB 2. The text itself is not altered — a `<div>` is placed \
-                 around it and nothing else is touched. `<div>` rather than `<p>` because it \
-                 claims nothing about what the text is, and because a reading system already lays \
-                 bare text out in an anonymous block — which is what a `<div>` is — so the page \
-                 does not move. Whitespace between elements is left exactly as it is."
+                "XHTML 1.1 requires `<body>` to hold block-level content, so text and inline \
+                 elements sitting directly in it are invalid in EPUB 2. Nothing is altered — a \
+                 `<div>` is placed around each run and nothing else is touched. A run is taken \
+                 whole, text and inline elements together, so a line that rendered as one block \
+                 still does. `<div>` rather than `<p>` because it claims nothing about what the \
+                 content is, and because a reading system already lays it out in an anonymous \
+                 block — which is what a `<div>` is — so the page does not move. An element XHTML \
+                 1.1 does not have at all, such as `<figure>`, ends the run and is left alone: \
+                 wrapping it would move its violation rather than clear it."
                     .to_string(),
             preview,
             apply_fn: Box::new(move |ws: &mut Workspace| {
@@ -1612,6 +1615,31 @@ fn attr_span_with_leading_space(text: &str, attr: Range<usize>) -> Range<usize> 
     start..attr.end
 }
 
+/// Is this finding "an inline element sits where block content is required"?
+///
+/// Two conditions, and neither is the element's position — the message never
+/// says which container it is in. That is fine, because the fixer re-locates by
+/// predicate and only ever wraps children of `<body>`; an `<a>` misplaced inside
+/// an `<ol>` matches here and is then simply never found, which is the safe
+/// direction.
+///
+/// - `params[0]` is the offending element, and it must be one XHTML 1.1 actually
+///   has. `figure`, `section` and `figcaption` arrive through this exact message
+///   and are **excluded**: the grammar does not know them at all, so a `<div>`
+///   around one would move the violation rather than clear it.
+/// - `div` must be among the elements the finding lists as expected. That is the
+///   detector telling us a `<div>` belongs at this position, rather than us
+///   assuming it — and if it is absent, the objection is to something other than
+///   block-level placement.
+fn is_misplaced_inline_element(m: &epubveri::report::Message) -> bool {
+    m.rule == Some("opf.content_document.schema_violation")
+        && m.text.starts_with("element ")
+        && m.params
+            .first()
+            .is_some_and(|e| XHTML11_INLINE.contains(&e.as_str()))
+        && m.params.iter().skip(1).any(|p| p == "div")
+}
+
 /// Is this finding "stray text sits directly in `<body>`"?
 ///
 /// Two conditions, because `opf.content_document.schema_violation` is one rule
@@ -1633,21 +1661,75 @@ fn plan_body_text_wrapping(text: &str) -> Option<Vec<Range<usize>>> {
     let prepared = prepare_content_doc(text);
     let doc = prepared.parse()?;
     let body = doc.descendants().find(|n| n.tag_name().name() == "body")?;
-    let mut spans = Vec::new();
-    for child in body.children() {
-        if !child.is_text() {
-            continue;
-        }
-        let range = prepared.unshift(child.range());
-        // The node's own source, so entity references keep their real width.
-        let Some(raw) = text.get(range.clone()) else {
+    let kids: Vec<_> = body.children().collect();
+
+    let mut spans: Vec<Range<usize>> = Vec::new();
+    let mut i = 0;
+    while i < kids.len() {
+        let BodyChild::Content(start) = classify_body_child(&prepared, text, kids[i]) else {
+            i += 1;
             continue;
         };
-        if let Some(span) = trimmed_span(range, raw) {
-            spans.push(span);
+        // Extend over every following run member, stepping across the
+        // whitespace between them so one rendered line becomes one <div>.
+        let (mut end, mut last) = (start.end, i);
+        let mut j = i + 1;
+        while j < kids.len() {
+            match classify_body_child(&prepared, text, kids[j]) {
+                BodyChild::Content(span) => {
+                    end = span.end;
+                    last = j;
+                    j += 1;
+                }
+                BodyChild::Whitespace => j += 1,
+                BodyChild::Barrier => break,
+            }
         }
+        spans.push(start.start..end);
+        i = last + 1;
     }
     Some(spans)
+}
+
+/// XHTML 1.1's Inline content set — the reference standard's own list, which is
+/// why it can be stated rather than guessed at. An element outside it ends a run
+/// (see [`BodyChild::Barrier`]).
+const XHTML11_INLINE: &[&str] = &[
+    "a", "abbr", "acronym", "b", "bdo", "big", "br", "button", "cite", "code", "dfn", "em", "i",
+    "img", "input", "kbd", "label", "map", "object", "q", "samp", "select", "small", "span",
+    "strong", "sub", "sup", "textarea", "tt", "var",
+];
+
+/// What a child of `<body>` means to the run-builder.
+enum BodyChild {
+    /// Non-block content to wrap: stray text, or an inline element.
+    Content(Range<usize>),
+    /// Whitespace between run members — stepped over, and kept inside the
+    /// wrapper so the source's own line breaks survive.
+    Whitespace,
+    /// Anything else. A block-level element is already valid here; an element
+    /// XHTML 1.1 does not have at all (`figure`, `section`, `figcaption`) is
+    /// **not** repairable by wrapping — the grammar would still not know it, so
+    /// the violation would move rather than clear. Both end the run.
+    Barrier,
+}
+
+fn classify_body_child(prepared: &PreparedDoc, text: &str, node: roxmltree::Node) -> BodyChild {
+    if node.is_text() {
+        let range = prepared.unshift(node.range());
+        // The node's own source, so entity references keep their real width.
+        let Some(raw) = text.get(range.clone()) else {
+            return BodyChild::Whitespace;
+        };
+        return match trimmed_span(range, raw) {
+            Some(span) => BodyChild::Content(span),
+            None => BodyChild::Whitespace,
+        };
+    }
+    if node.is_element() && XHTML11_INLINE.contains(&node.tag_name().name()) {
+        return BodyChild::Content(prepared.unshift(node.range()));
+    }
+    BodyChild::Barrier
 }
 
 /// `RSC-005` / `htm.obsolete_attribute`, the legacy `<a name="…">` anchor: an
@@ -4941,6 +5023,99 @@ mod tests {
             params: vec![param.to_string()],
             element_path: None,
         }
+    }
+
+    /// An `element "X" is not allowed here` message, with the expected set the
+    /// grammar lists after it.
+    fn element_violation(element: &str, expected: &[&str]) -> epubveri::report::Message {
+        let mut params = vec![element.to_string()];
+        params.extend(expected.iter().map(|s| s.to_string()));
+        epubveri::report::Message {
+            id: "RSC-005",
+            severity: Severity::Error,
+            text: format!("element \"{element}\" is not allowed here; expected one of …"),
+            location: Some("OEBPS/ch1.xhtml".to_string()),
+            position: None,
+            rule: Some("opf.content_document.schema_violation"),
+            params,
+            element_path: None,
+        }
+    }
+
+    #[test]
+    fn an_inline_element_the_grammar_wants_wrapped_is_matched() {
+        assert!(is_misplaced_inline_element(&element_violation(
+            "a",
+            &["blockquote", "div", "p"]
+        )));
+        assert!(is_misplaced_inline_element(&element_violation(
+            "br",
+            &["div", "p"]
+        )));
+    }
+
+    /// The decline that carries the most weight: XHTML 1.1 has no `figure`, so a
+    /// `<div>` around one would move the violation rather than clear it.
+    #[test]
+    fn an_element_xhtml11_does_not_have_is_not_matched() {
+        for el in ["figure", "figcaption", "section", "center", "li"] {
+            assert!(
+                !is_misplaced_inline_element(&element_violation(el, &["div", "p"])),
+                "{el} must not be wrapped"
+            );
+        }
+    }
+
+    #[test]
+    fn an_inline_element_is_not_matched_when_div_is_not_expected() {
+        // Then the grammar objects to something other than block-level
+        // placement, and a wrapper is not the repair.
+        assert!(!is_misplaced_inline_element(&element_violation(
+            "a",
+            &["em", "strong"]
+        )));
+    }
+
+    #[test]
+    fn text_and_an_inline_element_become_one_div() {
+        let doc = "<html><body>\n  text <a href=\"x\">link</a>\n</body></html>";
+        let out = wrap_body_text(doc).unwrap();
+        assert!(
+            out.contains("<div>text <a href=\"x\">link</a></div>"),
+            "one run, one block: {out}"
+        );
+        assert_eq!(out.matches("<div>").count(), 1);
+    }
+
+    #[test]
+    fn a_block_element_ends_the_run() {
+        let doc =
+            "<html><body><a href=\"x\">one</a><p>block</p><a href=\"y\">two</a></body></html>";
+        let out = wrap_body_text(doc).unwrap();
+        assert_eq!(out.matches("<div>").count(), 2, "two runs: {out}");
+        assert!(out.contains("<p>block</p>"), "the block is untouched");
+    }
+
+    #[test]
+    fn an_unknown_element_ends_the_run_and_is_left_alone() {
+        let doc =
+            "<html><body><a href=\"x\">one</a><figure><img src=\"i\"/></figure></body></html>";
+        let out = wrap_body_text(doc).unwrap();
+        assert_eq!(out.matches("<div>").count(), 1);
+        assert!(
+            out.contains("<figure><img src=\"i\"/></figure>"),
+            "the figure is not wrapped: {out}"
+        );
+    }
+
+    #[test]
+    fn whitespace_inside_a_run_is_kept_and_around_it_is_left_outside() {
+        let doc = "<html><body>\n\n  <a href=\"x\">one</a>  <b>two</b>\n\n</body></html>";
+        let out = wrap_body_text(doc).unwrap();
+        assert!(
+            out.contains("\n\n  <div><a href=\"x\">one</a>  <b>two</b></div>\n\n"),
+            "the run's own spacing survives, the surrounding indentation stays put: {out:?}"
+        );
     }
 
     /// The finding this fixer used to have to itself now arrives inside

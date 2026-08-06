@@ -10,6 +10,37 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **`fix.bare_text_in_body` now owns all non-block content in `<body>`, not just
+  text.** XHTML 1.1 wants block-level content there, and a converter leaves inline
+  *elements* behind as readily as text: the 94-book shelf holds 281 stray `<a>`,
+  92 `<br>`, and a handful of `<img>`/`<span>`/`<sup>`/`<sub>` sitting directly in
+  `<body>`, reported as `element "a" is not allowed here; expected one of …
+  "div" …`. The detector's own `params` name `div` at that position, so the
+  wrapper this fixer already used is the one the grammar asks for.
+
+  It wraps each **maximal run** — text and inline elements together, in document
+  order — in a single `<div>`. That grouping is the point rather than a detail:
+  of 244 runs on the shelf, **116 mix text and elements**, so wrapping text alone
+  would have split one rendered line into two blocks, and two fixers each owning
+  half a run would have collided, the second silently finding nothing to do while
+  the report claimed it applied.
+
+  **What it refuses is the larger half.** `figure` (151 findings), `section`
+  (92), `figcaption` (90), `center` and a stray `li` arrive through the same
+  message at the same position, and a `<div>` around one would *not* clear it —
+  XHTML 1.1 does not have the element at all, so the violation would move rather
+  than go away. Repairing those means renaming them, which is a different
+  operation and a different argument. They end the run and are left alone.
+
+  The `fix_id` is unchanged even though the name is now narrower than the
+  behaviour: it is a published identifier `epublift` reads out of our JSON.
+
+  **Measured:** findings cleared on the shelf rise by **380**, books receiving at
+  least one proposal go 15 → **18**, and both whole-shelf instruments still report
+  nothing introduced anywhere.
+
 ### Added
 
 - **A fixer for an EPUB 3 attribute on an EPUB 2 package document**

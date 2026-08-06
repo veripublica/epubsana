@@ -32,7 +32,7 @@ grows one carefully-argued entry at a time.
 | `RSC-020` | `opf.manifest_item.unencoded_space_in_href` | AutoSafe | A manifest `href` contains a raw space | [Percent-encode the space as `%20`](#rsc-020--unencoded-space-in-a-manifest-href) |
 | `OPF-014` | `opf.content_document.property_used_undeclared` | AutoSafe | A content document uses a feature its manifest item doesn't declare | [Add the token to that item's `properties`](#opf-014--undeclared-content-property) |
 | `PKG-006` | *(none)* | AutoSafe | The `mimetype` entry is not first in the ZIP, as OCF requires | [Re-emit it first and stored, touching no content](#pkg-006--mimetype-is-not-the-first-entry) |
-| `RSC-005` | `opf.content_document.schema_violation` (stray text, `params[0] == "body"`) | ConfirmNeeded | EPUB 2 text sits directly in `<body>` with no block-level element around it | [Wrap the text in a `<div>`, leaving whitespace alone](#rsc-005--bare-text-directly-in-body-epub-2) |
+| `RSC-005` | `opf.content_document.schema_violation` (stray text or an inline element in `<body>`) | ConfirmNeeded | EPUB 2 text or inline elements sit directly in `<body>` with no block-level element around them | [Wrap each run in one `<div>`, leaving whitespace alone](#rsc-005--non-block-content-directly-in-body-epub-2) |
 | `RSC-001` | `opf.manifest_item.missing_resource` | ConfirmNeeded | A manifest `<item>` declares a resource the container doesn't hold | [Drop the item, and every reference that named it](#rsc-001--dangling-manifest-item) |
 | `OPF-049` | `opf.spine.itemref_idref_not_in_manifest` | ConfirmNeeded | A spine `<itemref>` names a manifest id that doesn't exist | [Drop the itemref](#opf-049--dangling-spine-itemref) |
 | `OPF-034` / `RSC-005` | `opf.spine.duplicate_itemref` | ConfirmNeeded | The spine lists the same manifest item more than once | [Keep the first occurrence, drop the later ones](#opf-034--rsc-005--duplicate-spine-itemref) |
@@ -335,7 +335,7 @@ the repair in the open, where you can see it and decline it.
 
 ---
 
-## RSC-005 — bare text directly in `<body>` (EPUB 2)
+## RSC-005 — non-block content directly in `<body>` (EPUB 2)
 
 **Finding.** `opf.content_document.schema_violation`, message *stray text is not
 allowed directly in "body"; wrap it in an element*, with `params[0] == "body"`.
@@ -368,10 +368,32 @@ anchored. (epubveri restored per-run positions and `…/text()[n]` paths in 0.9.
 its issue #68, after they were lost in the move; useful to a repairer that
 addresses by position, which this one deliberately is not.)
 
-**Fix** (`fix.bare_text_in_body`, ConfirmNeeded). Wrap each run of bare text in a
-`<div>`, grouped one proposal per document. The wrapper goes around the text's
-**non-whitespace span only**: `"\n\n\n50\n"` becomes `"\n\n\n<div>50</div>\n"`,
-so the document's existing line breaks and indentation are untouched.
+**It is not only text, and treating it as only text was wrong.** XHTML 1.1 wants
+*block-level* content in `<body>`, and a converter leaves inline **elements**
+there just as often as it leaves text: on the 94-book shelf, `<body>` holds 281
+stray `<a>`, 92 `<br>`, 5 `<img>`, 4 `<span>` and a few `<sup>`/`<sub>`, reported
+as `element "a" is not allowed here; expected one of … "div" …`. The detector's
+own `params` name `div` among the elements allowed at that position, so the
+wrapper this fixer already uses is the one the grammar asks for.
+
+Crucially the two interleave. Measured on the shelf, of 244 runs of non-block
+content in `<body>`, **116 mix text and inline elements** and only 128 are text
+or elements alone. A fixer that wrapped text and left the `<a>` beside it outside
+would split one rendered line into two blocks — and two fixers each owning half a
+run would collide, with the second one silently finding nothing to do while the
+report claimed it had applied. So **one fixer owns the whole region.**
+
+**Fix** (`fix.bare_text_in_body`, ConfirmNeeded). Wrap each **maximal run** of
+non-block content — stray text and inline elements together, in document order —
+in a single `<div>`, grouped one proposal per document. The wrapper goes around
+the run's **non-whitespace span only**: `"\n\n\n50\n"` becomes
+`"\n\n\n<div>50</div>\n"`, so the document's existing line breaks and
+indentation are untouched, and `"text <a>link</a>"` becomes
+`"<div>text <a>link</a></div>"` — one block, as it rendered before.
+
+The `fix_id` stays `fix.bare_text_in_body` even though the name is now narrower
+than the behaviour: it is a published identifier that `epublift` reads out of our
+JSON, and renaming it would break a consumer to make a docs sentence tidier.
 
 **Why it's safe.** The text itself is never altered — not a character is added,
 removed or re-ordered; a wrapper appears around it and nothing else in the
@@ -384,8 +406,28 @@ document is touched. `<div>` is chosen deliberately over `<p>`:
   text out in an anonymous block, which is exactly what a `<div>` is; a `<p>`
   would add default margins and push the page around.
 
-**When it declines.** If the document doesn't parse, or it has no `<body>`,
-nothing is changed.
+**Which elements count as inline** is XHTML 1.1's own Inline set — `a`, `abbr`,
+`acronym`, `b`, `bdo`, `big`, `br`, `cite`, `code`, `dfn`, `em`, `i`, `img`,
+`input`, `kbd`, `label`, `map`, `object`, `q`, `samp`, `select`, `small`, `span`,
+`strong`, `sub`, `sup`, `textarea`, `tt`, `var`, `button`. The list is the
+reference standard's, not a guess, and everything outside it ends the run.
+
+**When it declines — and the biggest decline is the important one.**
+
+- **An element XHTML 1.1 does not have at all.** `figure` (151 findings on the
+  shelf), `section` (92), `figcaption` (90), `center`, and a stray `li` are all
+  reported at the same position by the same message, and wrapping one in a `<div>`
+  would **not** clear its finding: the element itself is unknown to the grammar,
+  so the violation moves rather than goes away. Repairing those means *renaming*
+  them, which is a different operation and a different argument. They end the run
+  and are left alone — so this fixer covers roughly 387 of the 726 body-level
+  findings, and says so rather than claiming the family.
+- **`div` is not among the expected elements** the finding lists. Then the
+  grammar is objecting to something other than block-level placement, and the
+  wrapper would not be the repair.
+- **Anywhere that is not `<body>`.** An inline element misplaced inside an `<ol>`
+  is a real finding with a different correct answer, exactly as for stray text.
+- If the document doesn't parse, or it has no `<body>`, nothing is changed.
 
 **Whitespace is never wrapped.** Text nodes that are only whitespace — the line
 breaks between sibling elements — are left exactly as they are. They are not the

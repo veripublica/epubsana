@@ -31,10 +31,14 @@ apply → report) is solid, with twenty-four fixers so far:
   its manifest item.
 - **`PKG-006`** — a `mimetype` entry that isn't first in the ZIP → moved to the
   front, stored, with no content touched at all.
-- **`RSC-005` / stray text in `<body>`** — EPUB 2 text sitting directly in
-  `<body>` → wrapped in a `<div>`; the text and the whitespace around it are
-  untouched. Stray text in any other container is declined: there the correct
-  wrapper would assert something about what the text is.
+- **`RSC-005` / non-block content in `<body>`** — EPUB 2 text *and* inline
+  elements (`<a>`, `<br>`, `<img>`, …) sitting directly in `<body>` → each run
+  wrapped whole in one `<div>`, so a line that rendered as one block still does;
+  the content and the whitespace around it are untouched. An element XHTML 1.1
+  doesn't have at all — `<figure>`, `<section>`, `<figcaption>` — ends the run
+  and is left alone, because wrapping it would move its violation rather than
+  clear it. Non-block content in any other container is declined too: there the
+  correct wrapper would assert something about what the content is.
 - **`RSC-001`** — a manifest item declaring a resource the container doesn't hold
   → dropped, together with every reference that named it (the spine entries it
   would orphan, and a legacy cover `<meta>`), in one edit you approve once.
