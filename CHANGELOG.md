@@ -8,6 +8,50 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Tracks `epubveri` 0.9.9** (from 0.9.7). Two releases, **zero source change**,
+  all tests green — the `rule`/`params` contract held again. Re-measured on the
+  shared shelf, which grew the same week: **115 books** (was 94), errors
+  **6220 → 4552** over the 25 books epubsana touches, **5** books taken from
+  invalid to fully valid, **1,668** findings cleared, and **nothing introduced**
+  by either whole-shelf instrument. Two fixers fired on real books for the first
+  time — `fix.manifest_dangling_item` and `fix.mimetype_packaging` — because the
+  new books exercise them, not because anything changed here.
+
+  The dependency floor stays at `0.9.7`, per the tracking policy: it is a
+  *correctness* floor, and nothing in 0.9.8/0.9.9 makes an older detector cause
+  epubsana to repair something wrongly. The caret picks the newer one up anyway.
+
+  What moved upstream, and what it meant here:
+
+  - **epubveri #66 landed in full, ARIA included.** EPUB 2 documents no longer
+    accept 195 global attributes — event handlers, RDFa, microdata, ITS, and now
+    `role` plus all 47 `aria-*`. This is the tightening epubsana cited on
+    2026-08-06 as one of three reasons **not** to build an
+    HTML5-element-downgrade fixer. The forecast is now fact: that surface would
+    today include stripping ARIA from books where it was retrofitted for
+    accessibility. The decision stands, and is recorded with its evidence in
+    `docs/COVERAGE.md`.
+  - **New lettered message IDs** (`OPF-004a`–`f`, `OPF-007a`–`c`, `RSC-006b`,
+    `RSC-007w`, `HTM_060a`/`b`). Audited: **every rule epubsana consumes still
+    maps to exactly one id on the shelf**, so no fixer publishes a wrong code.
+    Worth keeping in view, because 23 of 24 fixers assert their `addresses_id`
+    rather than inheriting it from the finding — correct today, and the reason
+    the spine-duplicate fixer is the one exception is that its condition really
+    does arrive under two ids.
+  - **`RSC-026` now fires on any reference that escapes the container root**, not
+    only manifest hrefs, and is *additive* with the missing-resource rules. On the
+    shelf that is one book, 8 findings, all `css.font_face.leaks_container_root`
+    — a stylesheet at the container root asking for `url(../Fonts/…)`. No fixer
+    of ours is keyed on it and none collides with it.
+  - Smaller upstream corrections that change what a repairer sees but ask nothing
+    of it: an obsolete attribute is no longer reported twice, `RSC-025` no longer
+    fires on EPUB 2 at all, an empty `dc:identifier` no longer cascades into three
+    extra findings, and `epub:trigger` is accepted.
+
 ## [0.7.0] - 2026-08-06
 
 Four fixers' worth of new repair — three added and one widened, twenty-one to
