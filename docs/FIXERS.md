@@ -47,6 +47,7 @@ grows one carefully-argued entry at a time.
 | `RSC-005` | `opf.content_document.schema_violation` (`params[0] == "id"`) | ConfirmNeeded | An `id` that is not a valid XML NCName (on the shelf: it starts with a digit) | [Rename it, moving every reference with it](#rsc-005--an-id-that-is-not-a-valid-ncname-the-first-cross-file-fixer) |
 | `RSC-005` | `opf.package.schema_violation` | AutoSafe | An EPUB 3 attribute on an EPUB 2 package document | [Delete it, once verified it says nothing the book does not](#rsc-005--an-epub-3-attribute-on-an-epub-2-package-document) |
 | `RSC-005` | `opf.content_document.duplicate_id` | ConfirmNeeded | Two or more elements in one document share an `id` | [Keep the first, rename the later ones](#rsc-005--a-duplicate-id-in-a-content-document) |
+| `RSC-007` | `opf.content_document.reference_missing_resource` | ConfirmNeeded | A link's path is stale, but the file it names is still in the book | [Repoint the path, carry the fragment across](#rsc-007--a-reference-whose-path-is-wrong-but-whose-target-is-in-the-book) |
 | `OPF-054` | *(none)* | ConfirmNeeded | A `<dc:date>` holds no date at all (EPUB 2) | [Drop the empty element; never touch a non-empty one](#opf-054--an-empty-dcdate-epub-2) |
 
 **A note on structural fixers.** Fixers that must locate an element (rather than
@@ -1169,3 +1170,67 @@ later run. Zero such cases on the shelf — the guard is reasoning, not measurem
 two to four times each, zero references to any of them. One book is thin
 evidence, and the honest claim is the mechanism rather than the coverage: it
 clears every duplicate-id finding on the shelf and introduces nothing.
+
+---
+
+## RSC-007 — a reference whose path is wrong but whose target is in the book
+
+**Finding.** `opf.content_document.reference_missing_resource`, message
+*reference to a resource missing from the publication: '…'*, with the reference
+exactly as written in `params[0]`.
+
+**This rule was investigated on 2026-08-06 and closed as human-only.** At the
+time all nine findings on the 94-book shelf were scheme-less bare hostnames
+(`www.youtube.com/watch?v=…`) or placeholder junk (`XXXXXXXX…`), and neither has
+a determinate repair. **The shelf grew to 115 books and brought a different
+shape**, which is the whole reason this entry exists — a rule closed on one
+corpus is not closed for good, and re-probing a "dead" rule after the corpus
+moves is cheap.
+
+The new shape is a **real internal link with a stale path**:
+
+    document 1/Bolum013.xhtml links to  ../Text/DiPNOTLAR.xhtml#a8
+    the file actually lives at          1/DiPNOTLAR.xhtml
+
+A book restructured after it was authored — the `../Text/` prefix survived the
+move. The target is still in the container, under the same name, one directory
+away.
+
+**Fix** (`fix.reference_wrong_path`, ConfirmNeeded). Rewrite the **path portion**
+of the reference to point at the entry that carries it, expressed relative to the
+referring document's own directory. The **fragment is carried across untouched**,
+and nothing else in the document changes.
+
+**Why it is determinate.** The reference names a file by basename, and exactly
+one entry in the container has that basename — so that entry is the file it
+meant. There is no candidate set to choose from and nothing is invented.
+
+**The fragment is a guard and a corroboration at once.** Rewriting a path could
+trade `RSC-007` for a dangling `RSC-012` if the fragment does not exist in the
+new target, so the fixer checks that it does before proposing. That check also
+does evidential work: a same-named file that merely *happened* to be elsewhere in
+the container would not contain `#a8`. Measured: **all 24 shelf cases have their
+fragment present in the target**, so on this corpus the two agree every time.
+
+**When it declines.**
+
+- **The basename matches nothing** in the container (2 findings). The file is
+  genuinely absent; a repair would have to invent it.
+- **The basename matches more than one entry.** Which one the reference meant is
+  then a guess, and a wrong guess is a silently broken link rather than a visible
+  error. Zero cases on the shelf; the guard is reasoning.
+- **The fragment is not in the chosen target.** Clearing this finding by creating
+  a dangling one is not a repair.
+- **Anything that is not a container path**: an absolute URL, a scheme-less bare
+  hostname (6 findings — `www.dogankitap.com.tr` and friends, where the repair
+  would be to *assert* the author meant an external URL), and placeholder junk
+  (4 findings, `XXXXXXXX…`). These are the shapes that closed this rule the first
+  time, and they are still declined.
+- A percent-encoded path, on the same principle as the invalid-id fixer: we do
+  not guess at an encoding we would then have to re-emit.
+- The exact reference not being findable as a quoted attribute value in the
+  document — the fixer edits what it can see, and goes quiet otherwise.
+
+**Measured.** 36 findings across 8 books, of which **24 in 3 books** are the
+repairable shape and clear completely; the other 12 are declined by the rules
+above. Both whole-shelf instruments report nothing introduced.

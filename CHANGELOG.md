@@ -12,6 +12,35 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
 ### Added
 
+- **A fixer for a reference whose path is stale but whose target is still in the
+  book** (`opf.content_document.reference_missing_resource`) — and the reason it
+  exists is that **a rule closed as unrepairable is not closed for good.** On
+  2026-08-06 all nine findings on the 94-book shelf were scheme-less bare
+  hostnames or placeholder junk, so this rule was written off as human-only. The
+  shelf grew to 115 books and brought a different shape entirely: a real internal
+  link left behind by a restructured book —
+
+      1/Bolum013.xhtml links to  ../Text/DiPNOTLAR.xhtml#a8
+      the file actually lives at 1/DiPNOTLAR.xhtml
+
+  The path portion is repointed at the entry that carries the name, expressed
+  relative to the referring document, and the **fragment is carried across
+  untouched**. It is determinate because exactly one container entry has that
+  basename, so the target is not chosen from a set.
+
+  **The fragment does double duty.** Repointing could have traded this finding for
+  a dangling `RSC-012`, so the fragment must already exist in the chosen target
+  before anything is proposed — and that check is also evidence, since a
+  same-named file that merely happened to be elsewhere would not carry `#a8`. All
+  24 repairable cases pass it, and the shelf run introduces no `RSC-012`.
+
+  Declined: a basename matching nothing (the file is genuinely absent) or several
+  entries, an external URL, a bare hostname, placeholder junk, a percent-encoded
+  path, and a reference not visible as a quoted attribute value.
+
+  **Measured:** 36 findings across 8 books, of which **24 in 3 books** are the
+  repairable shape and clear completely.
+
 - **A fixer for a duplicate `id` in a content document**
   (`opf.content_document.duplicate_id`). The first occurrence in document order
   keeps the id; every later one is renamed to a unique value.

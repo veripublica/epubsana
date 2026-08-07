@@ -38,6 +38,7 @@ pub fn plan(report: &Report, ws: &Workspace, _goal: Goal) -> Vec<ProposedFix> {
     fixes.extend(guide_duplicate_references(report, ws));
     fixes.extend(content_document_invalid_ids(report, ws));
     fixes.extend(content_document_duplicate_ids(report, ws));
+    fixes.extend(reference_wrong_path(report, ws));
     fixes.extend(epub3_attrs_in_epub2_package(report, ws));
     fixes.extend(empty_dc_date(report, ws));
     fixes.extend(mimetype_packaging(report, ws));
@@ -76,6 +77,7 @@ pub fn handled_rules() -> &'static [&'static str] {
         "opf.content_document.empty_title",
         "opf.content_document.invalid_content_type_meta",
         "opf.content_document.property_used_undeclared",
+        "opf.content_document.reference_missing_resource",
         // Two shapes inside it: stray text in <body>, and an empty lang.
         "opf.content_document.schema_violation",
         "opf.guide.duplicate_reference",
@@ -3277,6 +3279,186 @@ fn content_document_duplicate_ids(report: &Report, ws: &Workspace) -> Vec<Propos
     fixes
 }
 
+/// `RSC-007` / `opf.content_document.reference_missing_resource`: a link whose
+/// path does not resolve, but whose target is still in the container under the
+/// same name — a book restructured after it was authored, with the old prefix
+/// left behind (`../Text/DiPNOTLAR.xhtml#a8` where the file now sits beside the
+/// referring document).
+///
+/// **This rule was closed as human-only on 2026-08-06 and reopened by the
+/// corpus.** On the 94-book shelf every case was a scheme-less bare hostname or
+/// placeholder junk, neither repairable. The 115-book shelf brought this shape,
+/// which is determinate: the reference names a file by basename, exactly one
+/// entry in the container has that basename, so that entry is the file it meant.
+///
+/// **The fragment is a guard and a corroboration at once.** Rewriting a path
+/// could trade this finding for a dangling `RSC-012`, so the fragment must
+/// already exist in the chosen target. That check also does evidential work — a
+/// same-named file that merely happened to be elsewhere would not carry `#a8`.
+///
+/// Everything else declines: a basename matching nothing (the file is genuinely
+/// absent) or several entries (which one it meant is a guess), an external URL, a
+/// bare hostname, placeholder junk, a percent-encoded path, and a reference that
+/// cannot be found as a quoted attribute value in the document.
+fn reference_wrong_path(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    let mut by_doc: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for m in &report.messages {
+        if m.rule != Some("opf.content_document.reference_missing_resource") {
+            continue;
+        }
+        let (Some(doc), Some(raw)) = (m.location.as_deref(), m.params.first()) else {
+            continue;
+        };
+        by_doc
+            .entry(doc.to_string())
+            .or_default()
+            .insert(raw.clone());
+    }
+
+    let mut fixes = Vec::new();
+    for (doc, raws) in by_doc {
+        let Some(text) = ws.get_text(&doc) else {
+            continue;
+        };
+        let names: Vec<String> = ws.names().cloned().collect();
+        let mut repoints: Vec<(String, String)> = Vec::new();
+        for raw in &raws {
+            let Some(fixed) = repointed_reference(ws, &names, &doc, raw) else {
+                continue;
+            };
+            if quoted_attr_span(&text, raw).is_none() {
+                continue; // not visible as an attribute value — go quiet
+            }
+            repoints.push((raw.clone(), fixed));
+        }
+        if repoints.is_empty() {
+            continue;
+        }
+
+        let n = repoints.len();
+        let preview: Vec<Change> = repoints
+            .iter()
+            .take(6)
+            .map(|(from, to)| Change {
+                path: doc.clone(),
+                note: format!("repoint {from} → {to}"),
+            })
+            .collect();
+        let doc_for_apply = doc.clone();
+        let repoints_for_apply = repoints.clone();
+
+        fixes.push(ProposedFix {
+            fix_id: "fix.reference_wrong_path",
+            addresses_id: "RSC-007".to_string(),
+            addresses_rule: Some("opf.content_document.reference_missing_resource"),
+            addresses_severity: addressed_severity(
+                report,
+                "RSC-007",
+                Some("opf.content_document.reference_missing_resource"),
+            ),
+            tier: Tier::ConfirmNeeded,
+            title: format!(
+                "Repoint {n} stale reference{} in {doc}",
+                if n == 1 { "" } else { "s" }
+            ),
+            rationale:
+                "These links name a file the container still holds, by a path that no longer \
+                 resolves — the book was restructured after it was written. Exactly one entry \
+                 carries each name, so the target is not a guess, and the fragment already exists \
+                 in that entry, so the link resolves after the repair rather than dangling. Only \
+                 the path is rewritten; the fragment and everything else are untouched. A name \
+                 matching nothing, or more than one entry, is left alone."
+                    .to_string(),
+            preview,
+            apply_fn: Box::new(move |ws: &mut Workspace| {
+                if let Some(text) = ws.get_text(&doc_for_apply) {
+                    let mut edits = Vec::new();
+                    for (from, to) in &repoints_for_apply {
+                        if let Some(span) = quoted_attr_span(&text, from) {
+                            edits.push(MetaEdit {
+                                range: span,
+                                replacement: to.clone(),
+                            });
+                        }
+                    }
+                    ws.set_text(&doc_for_apply, apply_edits(&text, edits));
+                }
+            }),
+        });
+    }
+    fixes
+}
+
+/// The corrected reference for `raw` as written in `doc`, or `None` to decline.
+fn repointed_reference(ws: &Workspace, names: &[String], doc: &str, raw: &str) -> Option<String> {
+    let (path, fragment) = match raw.split_once('#') {
+        Some((p, f)) => (p, Some(f)),
+        None => (raw, None),
+    };
+    if path.is_empty()
+        || path.contains('%')
+        || path.contains(':')
+        || path.starts_with("www.")
+        || path.chars().all(|c| c == 'X')
+    {
+        return None;
+    }
+    let base = path.rsplit('/').next()?;
+    let mut matches = names.iter().filter(|n| n.rsplit('/').next() == Some(base));
+    let target = matches.next()?;
+    if matches.next().is_some() {
+        return None; // several entries share the name — which one is a guess
+    }
+    // Clearing this finding by creating a dangling fragment is not a repair.
+    if let Some(frag) = fragment.filter(|f| !f.is_empty()) {
+        let text = ws.get_text(target)?;
+        let anchored = [
+            format!("id=\"{frag}\""),
+            format!("id='{frag}'"),
+            format!("name=\"{frag}\""),
+            format!("name='{frag}'"),
+        ];
+        if !anchored.iter().any(|a| text.contains(a.as_str())) {
+            return None;
+        }
+    }
+    let rel = relative_path(doc, target)?;
+    Some(match fragment {
+        Some(f) => format!("{rel}#{f}"),
+        None => rel,
+    })
+}
+
+/// `target` expressed relative to the directory holding `from`, both being
+/// container-absolute entry names.
+fn relative_path(from: &str, target: &str) -> Option<String> {
+    let from_dir: Vec<&str> = from.split('/').collect();
+    let from_dir = &from_dir[..from_dir.len().checked_sub(1)?];
+    let target_parts: Vec<&str> = target.split('/').collect();
+    let shared = from_dir
+        .iter()
+        .zip(target_parts.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let mut out: Vec<&str> = vec![".."; from_dir.len() - shared];
+    out.extend_from_slice(&target_parts[shared..]);
+    (!out.is_empty()).then(|| out.join("/"))
+}
+
+/// The span of `value` where it is a whole quoted attribute value (`="value"`),
+/// so a reference is never rewritten from inside a longer string. `None` if it
+/// does not appear that way.
+fn quoted_attr_span(text: &str, value: &str) -> Option<Range<usize>> {
+    for quote in ['"', '\''] {
+        let needle = format!("={quote}{value}{quote}");
+        if let Some(at) = text.find(needle.as_str()) {
+            let start = at + 2; // past `=` and the opening quote
+            return Some(start..start + value.len());
+        }
+    }
+    None
+}
+
 /// `OPF-054`: a `<dc:date>` that holds no date at all. Drop the element.
 ///
 /// **Dispatches on the bare `id`** — this site has no `rule` and needs none: it
@@ -4002,6 +4184,113 @@ mod tests {
     <reference type="cover" title="Cover" href="cover.xhtml"/>
   </guide>
 </package>"#;
+
+    #[test]
+    fn a_relative_path_is_computed_from_the_referring_documents_directory() {
+        assert_eq!(
+            relative_path("1/Bolum013.xhtml", "1/DiPNOTLAR.xhtml").as_deref(),
+            Some("DiPNOTLAR.xhtml")
+        );
+        assert_eq!(
+            relative_path("OEBPS/text/ch1.xhtml", "OEBPS/images/x.svg").as_deref(),
+            Some("../images/x.svg")
+        );
+        assert_eq!(
+            relative_path("ch1.xhtml", "OEBPS/text/ch2.xhtml").as_deref(),
+            Some("OEBPS/text/ch2.xhtml")
+        );
+    }
+
+    #[test]
+    fn a_reference_is_only_matched_as_a_whole_attribute_value() {
+        let t = r##"<a href="../Text/a.xhtml#k1">x</a><a href='../Text/a.xhtml#k2'>y</a>"##;
+        let span = quoted_attr_span(t, "../Text/a.xhtml#k1").unwrap();
+        assert_eq!(&t[span], "../Text/a.xhtml#k1");
+        assert!(
+            quoted_attr_span(t, "../Text/a.xhtml#k2").is_some(),
+            "single quotes too"
+        );
+        // A prefix of a longer value must not match: the value ends at `#k1`.
+        assert!(quoted_attr_span(t, "../Text/a.xhtml").is_none());
+    }
+
+    /// The book the shelf brought: a document links one directory up to a file
+    /// that now sits beside it.
+    #[test]
+    fn a_stale_path_is_repointed_and_the_fragment_carried_across() {
+        let ws = container(&[
+            (
+                "1/Bolum013.xhtml",
+                r##"<html><body><a href="../Text/NOTES.xhtml#a8">note</a></body></html>"##,
+            ),
+            (
+                "1/NOTES.xhtml",
+                r#"<html><body><p id="a8">the note</p></body></html>"#,
+            ),
+        ]);
+        let names: Vec<String> = ws.names().cloned().collect();
+        assert_eq!(
+            repointed_reference(&ws, &names, "1/Bolum013.xhtml", "../Text/NOTES.xhtml#a8")
+                .as_deref(),
+            Some("NOTES.xhtml#a8")
+        );
+    }
+
+    /// Clearing RSC-007 by creating a dangling RSC-012 is not a repair.
+    #[test]
+    fn a_fragment_missing_from_the_target_declines() {
+        let ws = container(&[
+            ("1/ch.xhtml", "<html><body/></html>"),
+            (
+                "1/NOTES.xhtml",
+                r#"<html><body><p id="other">x</p></body></html>"#,
+            ),
+        ]);
+        let names: Vec<String> = ws.names().cloned().collect();
+        assert!(repointed_reference(&ws, &names, "1/ch.xhtml", "../Text/NOTES.xhtml#a8").is_none());
+    }
+
+    #[test]
+    fn an_ambiguous_basename_declines() {
+        let ws = container(&[
+            ("1/ch.xhtml", "<html><body/></html>"),
+            ("1/NOTES.xhtml", r#"<html><body id="a8"/></html>"#),
+            ("2/NOTES.xhtml", r#"<html><body id="a8"/></html>"#),
+        ]);
+        let names: Vec<String> = ws.names().cloned().collect();
+        assert!(
+            repointed_reference(&ws, &names, "1/ch.xhtml", "../Text/NOTES.xhtml#a8").is_none(),
+            "which NOTES.xhtml it meant is a guess"
+        );
+    }
+
+    #[test]
+    fn a_basename_matching_nothing_declines() {
+        let ws = container(&[("1/ch.xhtml", "<html><body/></html>")]);
+        let names: Vec<String> = ws.names().cloned().collect();
+        assert!(repointed_reference(&ws, &names, "1/ch.xhtml", "gone.xhtml").is_none());
+    }
+
+    /// The shapes that closed this rule the first time, still declined.
+    #[test]
+    fn external_and_junk_references_decline() {
+        let ws = container(&[
+            ("1/ch.xhtml", "<html><body/></html>"),
+            ("1/copenhagen.htm", "<html><body/></html>"),
+        ]);
+        let names: Vec<String> = ws.names().cloned().collect();
+        for raw in [
+            "https://example.com/copenhagen.htm",
+            "www.mfa.gov.tr/grupa/copenhagen.htm",
+            "XXXXXXXXXXXXXXXX",
+            "1/copen%20hagen.htm",
+        ] {
+            assert!(
+                repointed_reference(&ws, &names, "1/ch.xhtml", raw).is_none(),
+                "{raw} must decline"
+            );
+        }
+    }
 
     /// Plan and apply the duplicate-id renames the way the fixer does.
     fn dedup_ids(doc: &str, dups: &[&str]) -> String {

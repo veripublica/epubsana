@@ -13,7 +13,7 @@ changed**. It never guesses, and it preserves everything it doesn't touch.
 ## Status
 
 Early but working. The core contract (`Workspace` → detect → propose → confirm →
-apply → report) is solid, with twenty-five fixers so far:
+apply → report) is solid, with twenty-six fixers so far:
 
 - **`RSC-016`** — undeclared HTML entities (`&nbsp;`, `&mdash;`, …) → the exact
   character each denotes.
@@ -90,6 +90,12 @@ apply → report) is solid, with twenty-five fixers so far:
   link moves and none needs to: a `#fragment` already resolves to the first
   element carrying the id, so keeping the first leaves every reference pointing
   exactly where it pointed.
+- **`RSC-007` / a stale reference path** — a link like `../Text/notes.xhtml#a8`
+  whose target now sits elsewhere in the book → the path is repointed at the one
+  container entry carrying that name, with the fragment carried across. Declines
+  when the name matches nothing or several entries, when the fragment isn't in
+  the target (that would trade one error for a broken link), and for external
+  URLs or junk.
 - **`OPF-054`** — a `<dc:date>` with no content → dropped; the element states no
   date and `dc:date` is optional. A malformed but non-empty date (`March 2019`)
   is left exactly as it is: it carries a date the author wrote, and deciding
