@@ -8,7 +8,20 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
-## [Unreleased]
+## [0.8.0] - 2026-08-07
+
+Two fixers, twenty-five to **twenty-six**, and the epubveri 0.9.9 bump. Measured
+on the shared shelf — which grew to **115 books** the same week — errors fall
+**6220 → 4475** over the 25 books epubsana touches, **5** books reach fully
+valid, and both whole-shelf instruments report **nothing introduced anywhere**.
+
+The release's own lesson is in the second fixer: `reference_missing_resource` was
+investigated on 2026-08-06, found to be nine unrepairable bare hostnames, and
+written off as human-only. The shelf grew, the new books carried a different
+shape entirely, and a fixer shipped for it a day later with the detector
+unchanged. **A rule closed as unrepairable is closed for that corpus, not for
+good** — recorded in `docs/COVERAGE.md` with the habit it argues for.
+
 
 ### Added
 
