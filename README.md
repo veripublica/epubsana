@@ -13,7 +13,7 @@ changed**. It never guesses, and it preserves everything it doesn't touch.
 ## Status
 
 Early but working. The core contract (`Workspace` → detect → propose → confirm →
-apply → report) is solid, with twenty-four fixers so far:
+apply → report) is solid, with twenty-five fixers so far:
 
 - **`RSC-016`** — undeclared HTML entities (`&nbsp;`, `&mdash;`, …) → the exact
   character each denotes.
@@ -85,6 +85,11 @@ apply → report) is solid, with twenty-four fixers so far:
   A `properties="nav"`, a cover with no legacy declaration, or an `rtl` reading
   direction are left alone — EPUB 2 has nowhere to put that information, which
   is a reason not to erase it.
+- **`RSC-005` / `opf.content_document.duplicate_id`** — two or more elements
+  sharing an `id` → the first keeps it, the later ones are renamed uniquely. No
+  link moves and none needs to: a `#fragment` already resolves to the first
+  element carrying the id, so keeping the first leaves every reference pointing
+  exactly where it pointed.
 - **`OPF-054`** — a `<dc:date>` with no content → dropped; the element states no
   date and `dc:date` is optional. A malformed but non-empty date (`March 2019`)
   is left exactly as it is: it carries a date the author wrote, and deciding

@@ -37,6 +37,7 @@ pub fn plan(report: &Report, ws: &Workspace, _goal: Goal) -> Vec<ProposedFix> {
     fixes.extend(guide_dangling_references(report, ws));
     fixes.extend(guide_duplicate_references(report, ws));
     fixes.extend(content_document_invalid_ids(report, ws));
+    fixes.extend(content_document_duplicate_ids(report, ws));
     fixes.extend(epub3_attrs_in_epub2_package(report, ws));
     fixes.extend(empty_dc_date(report, ws));
     fixes.extend(mimetype_packaging(report, ws));
@@ -71,6 +72,7 @@ pub fn handled_rules() -> &'static [&'static str] {
         "ncx.ids.duplicate_id",
         "ncx.ids.invalid_ncname",
         "ncx.play_order.duplicate",
+        "opf.content_document.duplicate_id",
         "opf.content_document.empty_title",
         "opf.content_document.invalid_content_type_meta",
         "opf.content_document.property_used_undeclared",
@@ -3161,6 +3163,120 @@ fn compute_epub3_attr_edits(opf: &str, attrs: &BTreeSet<String>) -> Option<Vec<D
     (!out.is_empty()).then_some(out)
 }
 
+/// `RSC-005` / `opf.content_document.duplicate_id`: two or more elements in one
+/// content document carry the same `id`, which XML forbids. The **first**
+/// occurrence keeps it; every later one is renamed to a unique value.
+///
+/// **Why no reference moves, which is the whole argument here.** Content-document
+/// ids *are* reference targets, unlike the NCX ids of [`ncx_duplicate_ids`], so
+/// "rename and touch nothing else" has to be justified rather than assumed. It
+/// holds because a fragment into a document with a duplicated id already resolves
+/// to the **first** element in tree order carrying it — that is what every
+/// conforming processor does, and what a reader has been seeing. Keeping the
+/// first therefore leaves every `#fragment` pointing at the element it already
+/// pointed at. Renaming the first and moving references would be the riskier
+/// repair for no gain.
+///
+/// On the shelf the point is moot twice over: none of the 21 duplicated ids is
+/// referenced from anywhere in its book. The reasoning carries this fixer, not
+/// the corpus.
+///
+/// **Disjoint from [`content_document_invalid_ids`] by construction.** That fixer
+/// renames an id it can prove occurs exactly once and declines a duplicated one,
+/// because which element a reference meant would then be a guess; this one takes
+/// the other case. New names are built from the *sanitized* stem, so a value that
+/// is both duplicated and not a valid NCName cannot yield more invalid names than
+/// it found.
+fn content_document_duplicate_ids(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    // file -> ordered, de-duplicated reported id values.
+    let mut by_file: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for m in &report.messages {
+        if m.rule != Some("opf.content_document.duplicate_id") {
+            continue;
+        }
+        let (Some(file), Some(dup)) = (m.location.as_deref(), m.params.first()) else {
+            continue;
+        };
+        let list = by_file.entry(file.to_string()).or_default();
+        if !list.contains(dup) {
+            list.push(dup.clone());
+        }
+    }
+
+    let mut fixes = Vec::new();
+    for (file, dups) in by_file {
+        let Some(text) = ws.get_text(&file) else {
+            continue;
+        };
+        let mut used = existing_ids(&text);
+        // Plan the fixed new-id per later occurrence, so apply is deterministic
+        // and robust to any earlier edit of this document.
+        let mut plan: Vec<(String, Vec<String>)> = Vec::new();
+        for dup in &dups {
+            let occ = attr_occurrences(&text, dup);
+            if occ < 2 {
+                continue; // stale finding — nothing duplicated
+            }
+            let stem = sanitize_ncname(dup).unwrap_or_else(|| dup.clone());
+            let news: Vec<String> = (1..occ)
+                .map(|_| {
+                    let new = make_unique(stem.clone(), &used);
+                    used.insert(new.clone());
+                    new
+                })
+                .collect();
+            plan.push((dup.clone(), news));
+        }
+        if plan.is_empty() {
+            continue;
+        }
+
+        let preview: Vec<Change> = plan
+            .iter()
+            .map(|(dup, news)| Change {
+                path: file.clone(),
+                note: format!("rename {} duplicate id(s) \"{dup}\" → {news:?}", news.len()),
+            })
+            .collect();
+        let n: usize = plan.iter().map(|(_, news)| news.len()).sum();
+        let plan_for_apply = plan.clone();
+        let file_for_apply = file.clone();
+
+        fixes.push(ProposedFix {
+            fix_id: "fix.content_document_duplicate_id",
+            addresses_id: "RSC-005".to_string(),
+            addresses_rule: Some("opf.content_document.duplicate_id"),
+            addresses_severity: addressed_severity(
+                report,
+                "RSC-005",
+                Some("opf.content_document.duplicate_id"),
+            ),
+            tier: Tier::ConfirmNeeded,
+            title: format!(
+                "Make {n} duplicate id{} unique in {file}",
+                if n == 1 { "" } else { "s" },
+            ),
+            rationale:
+                "Two or more elements in this document share an id, which XML forbids. The first \
+                 occurrence keeps it and each later one is renamed to a unique value. No reference \
+                 is rewritten, and none needs to be: a fragment into a document with a duplicated \
+                 id already resolves to the first element carrying it, so keeping the first leaves \
+                 every link pointing exactly where it pointed before."
+                    .to_string(),
+            preview,
+            apply_fn: Box::new(move |ws: &mut Workspace| {
+                if let Some(mut text) = ws.get_text(&file_for_apply) {
+                    for (dup, news) in &plan_for_apply {
+                        text = rename_later_id_occurrences(&text, dup, news);
+                    }
+                    ws.set_text(&file_for_apply, text);
+                }
+            }),
+        });
+    }
+    fixes
+}
+
 /// `OPF-054`: a `<dc:date>` that holds no date at all. Drop the element.
 ///
 /// **Dispatches on the bare `id`** — this site has no `rule` and needs none: it
@@ -3886,6 +4002,100 @@ mod tests {
     <reference type="cover" title="Cover" href="cover.xhtml"/>
   </guide>
 </package>"#;
+
+    /// Plan and apply the duplicate-id renames the way the fixer does.
+    fn dedup_ids(doc: &str, dups: &[&str]) -> String {
+        let mut used = existing_ids(doc);
+        let mut out = doc.to_string();
+        for dup in dups {
+            let occ = attr_occurrences(doc, dup);
+            if occ < 2 {
+                continue;
+            }
+            let stem = sanitize_ncname(dup).unwrap_or_else(|| (*dup).to_string());
+            let news: Vec<String> = (1..occ)
+                .map(|_| {
+                    let new = make_unique(stem.clone(), &used);
+                    used.insert(new.clone());
+                    new
+                })
+                .collect();
+            out = rename_later_id_occurrences(&out, dup, &news);
+        }
+        out
+    }
+
+    #[test]
+    fn the_first_occurrence_keeps_the_id_and_later_ones_are_renamed() {
+        let doc =
+            r#"<html><body><p id="a">one</p><p id="a">two</p><p id="a">three</p></body></html>"#;
+        let out = dedup_ids(doc, &["a"]);
+        assert_eq!(
+            out,
+            r#"<html><body><p id="a">one</p><p id="a-2">two</p><p id="a-3">three</p></body></html>"#
+        );
+    }
+
+    /// The load-bearing claim of the spec: a fragment already resolves to the
+    /// first element carrying the id, so keeping the first means every link
+    /// still points where it pointed.
+    #[test]
+    fn a_reference_to_the_duplicated_id_still_resolves_to_the_same_element() {
+        let doc = r##"<html><body><a href="#a">go</a><p id="a">first</p><p id="a">second</p></body></html>"##;
+        let out = dedup_ids(doc, &["a"]);
+        assert!(
+            out.contains(r##"href="#a""##),
+            "the reference is untouched: {out}"
+        );
+        assert!(
+            out.contains(r#"<p id="a">first</p>"#),
+            "and its target is unchanged: {out}"
+        );
+        assert!(out.contains(r#"id="a-2""#));
+    }
+
+    #[test]
+    fn a_new_name_avoids_ids_already_in_the_document() {
+        let doc =
+            r#"<html><body><p id="a">1</p><p id="a">2</p><p id="a-2">taken</p></body></html>"#;
+        let out = dedup_ids(doc, &["a"]);
+        assert!(out.contains(r#"id="a-3""#), "must skip a-2: {out}");
+        assert!(
+            out.contains(r#"id="a-2">taken"#),
+            "the squatter is untouched"
+        );
+    }
+
+    /// A value that is both duplicated and not an NCName must not yield more
+    /// invalid names than it found.
+    #[test]
+    fn a_duplicated_invalid_ncname_is_renamed_from_a_sanitized_stem() {
+        let doc = r#"<html><body><p id="09">1</p><p id="09">2</p></body></html>"#;
+        let out = dedup_ids(doc, &["09"]);
+        assert!(out.contains(r#"id="id_09""#), "{out}");
+        assert!(
+            out.contains(r#"<p id="09">1</p>"#),
+            "the first keeps its value, for the invalid-id fixer to consider"
+        );
+    }
+
+    #[test]
+    fn a_stale_finding_renames_nothing() {
+        // The value no longer occurs twice — an earlier fix already moved it.
+        let doc = r#"<html><body><p id="a">only</p></body></html>"#;
+        assert_eq!(dedup_ids(doc, &["a"]), doc);
+    }
+
+    #[test]
+    fn only_the_reported_id_is_touched() {
+        let doc = r#"<html><body><p id="a">1</p><p id="a">2</p><p id="b">3</p><p id="b">4</p></body></html>"#;
+        let out = dedup_ids(doc, &["a"]);
+        assert!(out.contains(r#"id="a-2""#));
+        assert!(
+            out.contains(r#"<p id="b">3</p><p id="b">4</p>"#),
+            "b was not reported, so it is left alone: {out}"
+        );
+    }
 
     /// An EPUB 2 package with `{cover}` and `{spine}` substituted in.
     fn package(cover_item: &str, meta: &str, spine: &str) -> String {

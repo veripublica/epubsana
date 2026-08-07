@@ -10,6 +10,33 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
 ## [Unreleased]
 
+### Added
+
+- **A fixer for a duplicate `id` in a content document**
+  (`opf.content_document.duplicate_id`). The first occurrence in document order
+  keeps the id; every later one is renamed to a unique value.
+
+  **No reference is rewritten, and the reason is the fixer's whole argument.**
+  Content-document ids *are* reference targets — unlike the NCX ids of the
+  sibling fixer — so "rename and touch nothing else" needed justifying rather
+  than asserting. It holds because a fragment into a document with a duplicated
+  id already resolves to the **first** element in tree order carrying it, which
+  is what every conforming processor does and what a reader has been seeing.
+  Keeping the first therefore leaves every `#fragment` pointing at exactly the
+  element it already pointed at; renaming the first and moving references would
+  be the riskier repair for no gain.
+
+  Disjoint from the invalid-id fixer by construction: that one renames an id it
+  can prove occurs exactly once and declines a duplicated one, because which
+  element a reference meant would then be a guess. Where a value is both
+  duplicated and not a valid NCName, the new names are built from the sanitized
+  stem, so the repair cannot manufacture more invalid names than it found.
+
+  **Measured:** 53 findings across 21 distinct ids in **one** book, ids repeating
+  two to four times each, and **none of them referenced anywhere in its book** —
+  so the reasoning carries this fixer, not the corpus. All 53 clear; both
+  whole-shelf instruments report nothing introduced.
+
 ### Changed
 
 - **Tracks `epubveri` 0.9.9** (from 0.9.7). Two releases, **zero source change**,

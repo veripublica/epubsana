@@ -46,6 +46,7 @@ grows one carefully-argued entry at a time.
 | `RSC-005` | `opf.content_document.schema_violation` (empty `lang`/`xml:lang`) | ConfirmNeeded | An empty language tag, which EPUB 2's grammar does not allow | [Delete the attribute](#rsc-005--an-empty-lang--xmllang) |
 | `RSC-005` | `opf.content_document.schema_violation` (`params[0] == "id"`) | ConfirmNeeded | An `id` that is not a valid XML NCName (on the shelf: it starts with a digit) | [Rename it, moving every reference with it](#rsc-005--an-id-that-is-not-a-valid-ncname-the-first-cross-file-fixer) |
 | `RSC-005` | `opf.package.schema_violation` | AutoSafe | An EPUB 3 attribute on an EPUB 2 package document | [Delete it, once verified it says nothing the book does not](#rsc-005--an-epub-3-attribute-on-an-epub-2-package-document) |
+| `RSC-005` | `opf.content_document.duplicate_id` | ConfirmNeeded | Two or more elements in one document share an `id` | [Keep the first, rename the later ones](#rsc-005--a-duplicate-id-in-a-content-document) |
 | `OPF-054` | *(none)* | ConfirmNeeded | A `<dc:date>` holds no date at all (EPUB 2) | [Drop the empty element; never touch a non-empty one](#opf-054--an-empty-dcdate-epub-2) |
 
 **A note on structural fixers.** Fixers that must locate an element (rather than
@@ -1121,3 +1122,50 @@ rule goes to zero on the shelf. Both whole-shelf instruments report nothing
 introduced. Note what the declines cost here: **nothing on this shelf**, because
 no book carries the shapes they guard against. They are written from the
 specification rather than from the corpus, and should be described that way.
+
+---
+
+## RSC-005 — a duplicate `id` in a content document
+
+**Finding.** `opf.content_document.duplicate_id`, message *Duplicate ID "…"*,
+with the value in `params[0]`. Two or more elements in one content document carry
+the same `id`, which XML forbids outright.
+
+**Fix** (`fix.content_document_duplicate_id`, ConfirmNeeded). The **first**
+occurrence in document order keeps the id; every later one is renamed to a unique
+value (the same value suffixed `-2`, `-3`, … until it collides with nothing in
+the document). One proposal per document.
+
+**Why no reference moves — and this is the whole argument.** Content-document ids
+*are* reference targets, unlike the NCX ids of the sibling fixer, so "rename and
+touch nothing else" needs justifying rather than asserting. It holds because a
+fragment reference into a document with a duplicated id already resolves to the
+**first** element in tree order with that id; that is what every conforming
+processor does, and it is what a reader has been seeing. Keeping the first
+occurrence therefore leaves every `#fragment` pointing at exactly the element it
+already pointed at. Renaming the *first* and moving references would be the
+riskier repair for no gain.
+
+On the shelf the point is moot twice over: **none of the 21 duplicated ids is
+referenced from anywhere in its book**. So the reasoning carries this fixer, not
+the corpus — say it that way.
+
+**Where it sits next to the invalid-id fixer.** They are disjoint by
+construction. `fix.content_document_invalid_id` renames an id it can prove occurs
+**exactly once**, and declines a duplicated one precisely because which element a
+reference meant would then be a guess. This fixer handles the other case. Where a
+value is *both* duplicated and not a valid NCName, the new names are built from
+the sanitized stem, so the repair cannot manufacture more invalid names than it
+found; the surviving first occurrence stays for the other fixer to consider on a
+later run. Zero such cases on the shelf — the guard is reasoning, not measurement.
+
+**When it declines.**
+
+- **A stale finding**: the reported value no longer occurs twice in the document
+  (an earlier approved fix already moved it). Nothing is renamed.
+- A document `Workspace` cannot read.
+
+**Measured.** 53 findings across **21 distinct ids in one book**, ids repeating
+two to four times each, zero references to any of them. One book is thin
+evidence, and the honest claim is the mechanism rather than the coverage: it
+clears every duplicate-id finding on the shelf and introduces nothing.
