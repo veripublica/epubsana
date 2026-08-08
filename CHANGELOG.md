@@ -12,6 +12,37 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
 ### Changed
 
+- **The body-level wrapper now also works inside `<blockquote>` — the single
+  largest lever this project has found.** XHTML 1.1 requires block content in
+  `<blockquote>` exactly as it does in `<body>`, and the 10 EPUB 2 books added on
+  2026-08-08 carry 2,508 stray-text and 3,009 incomplete-content findings there.
+
+  **The two messages are one defect seen from opposite ends**, which is why both
+  now trigger the fixer: a `<blockquote>` holding only text is *stray text is not
+  allowed directly in "blockquote"* **and** *element "blockquote" has incomplete
+  content*, because its model needs at least one block child. One wrap clears
+  whichever fired — verified on real books before a line was written: one file
+  went `{incomplete 53, stray 54, span 1}` → `{}`, another
+  `{incomplete 96, span 98, img 7}` → `{img 7}`, the inline elements clearing as
+  part of the run.
+
+  **The container set is now a principle rather than a name:** the containers
+  whose XHTML 1.1 model requires block content and admits `<div>` — `body` and
+  `blockquote`. `<ol>`/`<ul>` want an `<li>` and `<head>` a `<title>`, wrappers
+  that assert what the content *is*, so they stay declined. On the 125-book shelf
+  that rule is not a compromise but the whole population: stray text is reported
+  in exactly those two containers and nowhere else.
+
+  **Measured:** findings cleared through `schema_violation` go **1,273 →
+  8,624**, total cleared 1,745 → **9,096**, books touched 25 → 26, and both
+  whole-shelf instruments still report **nothing introduced anywhere**.
+
+  Honest ceiling: this does *not* clear all 3,009 incomplete-content findings,
+  any more than it clears all 403 on `<body>` (it clears 2 of those). The rest
+  are containers whose only children are `<figure>`/`<section>` — elements XHTML
+  1.1 does not have — where the repair would be renaming, which epubsana
+  deliberately does not do.
+
 - **Tracks `epubveri` 0.9.12** (from 0.9.9). Zero source change again; the shelf
   grew to **125 books** the same day. Re-measured: errors **6376 → 4631** over
   the 25 books epubsana touches, **5** books reach fully valid, **nothing

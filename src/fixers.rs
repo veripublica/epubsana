@@ -1534,7 +1534,9 @@ fn trimmed_span(range: Range<usize>, raw: &str) -> Option<Range<usize>> {
 fn bare_text_in_body(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
     let mut docs: BTreeSet<String> = BTreeSet::new();
     for m in &report.messages {
-        if (is_stray_text_in_body(m) || is_misplaced_inline_element(m))
+        if (is_stray_text_in_body(m)
+            || is_misplaced_inline_element(m)
+            || is_incomplete_container(m))
             && let Some(loc) = m.location.as_deref()
         {
             docs.insert(loc.to_string());
@@ -1652,7 +1654,34 @@ fn is_misplaced_inline_element(m: &epubveri::report::Message) -> bool {
         && m.params.iter().skip(1).any(|p| p == "div")
 }
 
-/// Is this finding "stray text sits directly in `<body>`"?
+/// The containers whose XHTML 1.1 content model **requires block content and
+/// admits `<div>`** — the ones a neutral wrapper actually repairs.
+///
+/// `<ol>`/`<ul>` want an `<li>` and `<head>` wants a `<title>`; those wrappers
+/// assert what the content *is*, which is a judgement rather than a determinate
+/// repair, so they are declined. On the 125-book shelf this list is not a
+/// compromise but the whole population: stray text is reported in exactly these
+/// two containers and nowhere else.
+const WRAPPABLE_CONTAINERS: &[&str] = &["blockquote", "body"];
+
+/// Is this finding "the container has non-block content where the grammar wants
+/// block content"?
+///
+/// Two messages describe that one defect from opposite ends, and both are
+/// matched. A `<blockquote>` holding only text draws *stray text is not allowed
+/// directly in "blockquote"* **and** *element "blockquote" has incomplete
+/// content*, because its model requires at least one block child; a container
+/// holding only an inline element draws just the second. Wrapping the run clears
+/// whichever of them fired.
+fn is_incomplete_container(m: &epubveri::report::Message) -> bool {
+    m.rule == Some("opf.content_document.schema_violation")
+        && m.text.contains("has incomplete content")
+        && m.params
+            .first()
+            .is_some_and(|c| WRAPPABLE_CONTAINERS.contains(&c.as_str()))
+}
+
+/// Is this finding "stray text sits directly in a container that wants blocks"?
 ///
 /// Two conditions, because `opf.content_document.schema_violation` is one rule
 /// over a whole grammar: the message shape identifies the *kind* of violation
@@ -1662,23 +1691,44 @@ fn is_misplaced_inline_element(m: &epubveri::report::Message) -> bool {
 /// other violation that happens to name `body`.
 fn is_stray_text_in_body(m: &epubveri::report::Message) -> bool {
     m.rule == Some("opf.content_document.schema_violation")
-        && m.params.first().is_some_and(|p| p == "body")
+        && m.params
+            .first()
+            .is_some_and(|c| WRAPPABLE_CONTAINERS.contains(&c.as_str()))
         && m.text.starts_with("stray text is not allowed directly in")
 }
 
-/// The non-whitespace spans of every text node sitting directly in `<body>`.
-/// `None` (decline) if the document doesn't parse or has no `<body>`; an empty
-/// vec means there was nothing bare to wrap.
+/// The spans to wrap: every maximal run of non-block content sitting directly
+/// inside a [`WRAPPABLE_CONTAINERS`] element. `None` (decline) if the document
+/// doesn't parse or holds no such container; an empty vec means there was
+/// nothing to wrap.
+///
+/// The containers never overlap. A `<blockquote>` is a block element, so it ends
+/// a run in whatever holds it, and its own children are walked separately.
 fn plan_body_text_wrapping(text: &str) -> Option<Vec<Range<usize>>> {
     let prepared = prepare_content_doc(text);
     let doc = prepared.parse()?;
-    let body = doc.descendants().find(|n| n.tag_name().name() == "body")?;
-    let kids: Vec<_> = body.children().collect();
+    let containers: Vec<_> = doc
+        .descendants()
+        .filter(|n| n.is_element() && WRAPPABLE_CONTAINERS.contains(&n.tag_name().name()))
+        .collect();
+    if containers.is_empty() {
+        return None;
+    }
+    let mut spans: Vec<Range<usize>> = Vec::new();
+    for container in containers {
+        spans.extend(runs_in(&prepared, text, container));
+    }
+    spans.sort_by_key(|r| r.start);
+    Some(spans)
+}
 
+/// The maximal runs of non-block content among `container`'s direct children.
+fn runs_in(prepared: &PreparedDoc, text: &str, container: roxmltree::Node) -> Vec<Range<usize>> {
+    let kids: Vec<_> = container.children().collect();
     let mut spans: Vec<Range<usize>> = Vec::new();
     let mut i = 0;
     while i < kids.len() {
-        let BodyChild::Content(start) = classify_body_child(&prepared, text, kids[i]) else {
+        let BodyChild::Content(start) = classify_body_child(prepared, text, kids[i]) else {
             i += 1;
             continue;
         };
@@ -1687,7 +1737,7 @@ fn plan_body_text_wrapping(text: &str) -> Option<Vec<Range<usize>>> {
         let (mut end, mut last) = (start.end, i);
         let mut j = i + 1;
         while j < kids.len() {
-            match classify_body_child(&prepared, text, kids[j]) {
+            match classify_body_child(prepared, text, kids[j]) {
                 BodyChild::Content(span) => {
                     end = span.end;
                     last = j;
@@ -1700,7 +1750,7 @@ fn plan_body_text_wrapping(text: &str) -> Option<Vec<Range<usize>>> {
         spans.push(start.start..end);
         i = last + 1;
     }
-    Some(spans)
+    spans
 }
 
 /// XHTML 1.1's Inline content set — the reference standard's own list, which is
@@ -5581,6 +5631,69 @@ mod tests {
             "a",
             &["em", "strong"]
         )));
+    }
+
+    #[test]
+    fn stray_text_in_a_blockquote_is_wrapped() {
+        let doc = "<html><body><blockquote>quoted words</blockquote></body></html>";
+        let out = wrap_body_text(doc).unwrap();
+        assert!(
+            out.contains("<blockquote><div>quoted words</div></blockquote>"),
+            "{out}"
+        );
+    }
+
+    /// The two containers must not fight: a `<blockquote>` is a block element,
+    /// so it ends a run in `<body>`, and its own children are walked separately.
+    #[test]
+    fn a_blockquote_ends_the_body_run_and_is_walked_itself() {
+        let doc = "<html><body>loose <blockquote>quoted</blockquote></body></html>";
+        let out = wrap_body_text(doc).unwrap();
+        assert!(out.contains("<div>loose</div>"), "the body run: {out}");
+        assert!(
+            out.contains("<blockquote><div>quoted</div></blockquote>"),
+            "and the blockquote's own run: {out}"
+        );
+        assert_eq!(out.matches("<div>").count(), 2, "two runs, not one: {out}");
+    }
+
+    #[test]
+    fn a_nested_blockquote_is_walked_too() {
+        let doc =
+            "<html><body><blockquote><blockquote>inner</blockquote></blockquote></body></html>";
+        let out = wrap_body_text(doc).unwrap();
+        assert_eq!(out.matches("<div>").count(), 1);
+        assert!(
+            out.contains("<blockquote><div>inner</div></blockquote>"),
+            "{out}"
+        );
+    }
+
+    /// `<ol>` wants an `<li>` and `<head>` wants a `<title>` — wrappers that
+    /// assert what the content is. Only containers admitting a neutral `<div>`
+    /// are in scope.
+    #[test]
+    fn a_container_that_needs_an_asserting_wrapper_is_not_touched() {
+        let doc = "<html><body><ol>stray</ol></body></html>";
+        let out = wrap_body_text(doc).unwrap();
+        assert!(out.contains("<ol>stray</ol>"), "left alone: {out}");
+        assert!(!WRAPPABLE_CONTAINERS.contains(&"ol"));
+        assert!(!WRAPPABLE_CONTAINERS.contains(&"head"));
+    }
+
+    #[test]
+    fn the_incomplete_content_message_triggers_only_for_wrappable_containers() {
+        // The same defect, reported from the other end.
+        for c in ["body", "blockquote"] {
+            let mut m = element_violation(c, &[]);
+            m.text = format!("element \"{c}\" has incomplete content");
+            assert!(is_incomplete_container(&m), "{c} must trigger");
+        }
+        for c in ["ol", "ul", "head"] {
+            let mut m = element_violation(c, &[]);
+            m.text = format!("element \"{c}\" has incomplete content");
+            assert!(!is_incomplete_container(&m), "{c} must not");
+        }
     }
 
     #[test]

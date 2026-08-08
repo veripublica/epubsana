@@ -31,9 +31,10 @@ apply → report) is solid, with twenty-six fixers so far:
   its manifest item.
 - **`PKG-006`** — a `mimetype` entry that isn't first in the ZIP → moved to the
   front, stored, with no content touched at all.
-- **`RSC-005` / non-block content in `<body>`** — EPUB 2 text *and* inline
-  elements (`<a>`, `<br>`, `<img>`, …) sitting directly in `<body>` → each run
-  wrapped whole in one `<div>`, so a line that rendered as one block still does;
+- **`RSC-005` / non-block content in `<body>` or `<blockquote>`** — EPUB 2 text
+  *and* inline elements (`<a>`, `<br>`, `<img>`, …) sitting where the grammar
+  wants block content → each run wrapped whole in one `<div>`, so a line that
+  rendered as one block still does;
   the content and the whitespace around it are untouched. An element XHTML 1.1
   doesn't have at all — `<figure>`, `<section>`, `<figcaption>` — ends the run
   and is left alone, because wrapping it would move its violation rather than

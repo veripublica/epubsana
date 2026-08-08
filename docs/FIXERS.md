@@ -32,7 +32,7 @@ grows one carefully-argued entry at a time.
 | `RSC-020` | `opf.manifest_item.unencoded_space_in_href` | AutoSafe | A manifest `href` contains a raw space | [Percent-encode the space as `%20`](#rsc-020--unencoded-space-in-a-manifest-href) |
 | `OPF-014` | `opf.content_document.property_used_undeclared` | AutoSafe | A content document uses a feature its manifest item doesn't declare | [Add the token to that item's `properties`](#opf-014--undeclared-content-property) |
 | `PKG-006` | *(none)* | AutoSafe | The `mimetype` entry is not first in the ZIP, as OCF requires | [Re-emit it first and stored, touching no content](#pkg-006--mimetype-is-not-the-first-entry) |
-| `RSC-005` | `opf.content_document.schema_violation` (stray text or an inline element in `<body>`) | ConfirmNeeded | EPUB 2 text or inline elements sit directly in `<body>` with no block-level element around them | [Wrap each run in one `<div>`, leaving whitespace alone](#rsc-005--non-block-content-directly-in-body-epub-2) |
+| `RSC-005` | `opf.content_document.schema_violation` (stray text / inline element / incomplete content, in `<body>` or `<blockquote>`) | ConfirmNeeded | EPUB 2 text or inline elements sit where the grammar requires block content | [Wrap each run in one `<div>`, leaving whitespace alone](#rsc-005--non-block-content-in-body-or-blockquote-epub-2) |
 | `RSC-001` | `opf.manifest_item.missing_resource` | ConfirmNeeded | A manifest `<item>` declares a resource the container doesn't hold | [Drop the item, and every reference that named it](#rsc-001--dangling-manifest-item) |
 | `OPF-049` | `opf.spine.itemref_idref_not_in_manifest` | ConfirmNeeded | A spine `<itemref>` names a manifest id that doesn't exist | [Drop the itemref](#opf-049--dangling-spine-itemref) |
 | `OPF-034` / `RSC-005` | `opf.spine.duplicate_itemref` | ConfirmNeeded | The spine lists the same manifest item more than once | [Keep the first occurrence, drop the later ones](#opf-034--rsc-005--duplicate-spine-itemref) |
@@ -337,7 +337,7 @@ the repair in the open, where you can see it and decline it.
 
 ---
 
-## RSC-005 — non-block content directly in `<body>` (EPUB 2)
+## RSC-005 — non-block content in `<body>` or `<blockquote>` (EPUB 2)
 
 **Finding.** `opf.content_document.schema_violation`, message *stray text is not
 allowed directly in "body"; wrap it in an element*, with `params[0] == "body"`.
@@ -353,10 +353,17 @@ grammar already reported, and the detection moved into `schema_violation` — sa
 book, same file, same count, verified file-by-file upstream. Since `schema_violation`
 is one rule spanning a whole grammar, matching it takes two conditions:
 
-- **`params[0]` is the containing element**, and epubsana acts only on `body`.
-  Stray text in an `<ol>` is a real finding too, but its correct wrapper is an
-  `<li>` — which asserts the text *is* a list item, a judgement rather than a
-  determinate repair. Every other container is declined.
+- **`params[0]` is the containing element**, and epubsana acts on the containers
+  whose XHTML 1.1 content model **requires block content and admits `<div>`**:
+  `body` and `blockquote`. Stray text in an `<ol>` is a real finding too, but its
+  correct wrapper is an `<li>` — which asserts the text *is* a list item, a
+  judgement rather than a determinate repair. `<head>` wants a `<title>`, which is
+  a different repair again. Every other container is declined.
+
+  Measured on the 125-book shelf, that rule is not a compromise — it is the whole
+  population: **stray text is reported in exactly two containers**, `blockquote`
+  (2,508 findings) and `body` (289), and nothing else. `ol`, `ul` and `head`
+  appear only under *incomplete content*, at one or two findings each.
 - **The message prefix identifies the kind of violation.** `params[0]` cannot do
   it alone (`element "body" is not allowed here` carries the same param), and the
   prefix cannot do it alone either (it matches the `<ol>` case). This is a
@@ -385,9 +392,23 @@ would split one rendered line into two blocks — and two fixers each owning hal
 run would collide, with the second one silently finding nothing to do while the
 report claimed it had applied. So **one fixer owns the whole region.**
 
+**The same defect is reported twice, and one wrap clears both.** A
+`<blockquote>` holding only text also *has incomplete content*, because its model
+requires at least one block child — so the shelf carries `stray text is not
+allowed directly in "blockquote"` (2,508) and `element "blockquote" has
+incomplete content` (3,009) over the same elements. Verified on real books rather
+than reasoned: in one file `{incomplete 53, stray 54, span 1}` becomes `{}`, and
+in another `{incomplete 96, span 98, img 7}` becomes `{img 7}` — the inline
+elements inside the blockquote clear as a side effect, since they are part of the
+run being wrapped. The fixer therefore also triggers on the incomplete-content
+message for those two containers.
+
 **Fix** (`fix.bare_text_in_body`, ConfirmNeeded). Wrap each **maximal run** of
 non-block content — stray text and inline elements together, in document order —
-in a single `<div>`, grouped one proposal per document. The wrapper goes around
+in a single `<div>`, inside every `<body>` and every `<blockquote>`, grouped one
+proposal per document. The two never overlap: a `<blockquote>` is a block element
+and therefore ends a run in its parent, while its own children are walked
+separately. The wrapper goes around
 the run's **non-whitespace span only**: `"\n\n\n50\n"` becomes
 `"\n\n\n<div>50</div>\n"`, so the document's existing line breaks and
 indentation are untouched, and `"text <a>link</a>"` becomes
@@ -427,8 +448,16 @@ reference standard's, not a guess, and everything outside it ends the run.
 - **`div` is not among the expected elements** the finding lists. Then the
   grammar is objecting to something other than block-level placement, and the
   wrapper would not be the repair.
-- **Anywhere that is not `<body>`.** An inline element misplaced inside an `<ol>`
-  is a real finding with a different correct answer, exactly as for stray text.
+- **Any container outside `{body, blockquote}`.** An inline element misplaced
+  inside an `<ol>` is a real finding with a different correct answer, exactly as
+  for stray text.
+- **Incomplete content a wrapper cannot complete.** `<body>` carries 403
+  incomplete-content findings on the shelf and this fixer clears **2** of them —
+  the rest are bodies whose only children are `<figure>`/`<section>`, elements
+  XHTML 1.1 does not have at all. Wrapping one changes nothing; the repair there
+  would be renaming, which epubsana deliberately does not do (see
+  `docs/COVERAGE.md`, 2026-08-06). Expect the same shortfall on `blockquote`:
+  the ceiling is the part whose children are text or inline, not the whole 3,009.
 - If the document doesn't parse, or it has no `<body>`, nothing is changed.
 
 **Whitespace is never wrapped.** Text nodes that are only whitespace — the line
