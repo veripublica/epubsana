@@ -57,8 +57,14 @@ pub fn plan(report: &Report, ws: &Workspace, _goal: Goal) -> Vec<ProposedFix> {
 /// like a fixer that does not exist), which is precisely the confusion that made
 /// this list necessary.
 ///
-/// Findings epubveri reports with no `rule` at all (`NCX-001`, `PKG-006`,
-/// `OPF-054`) are addressed by id and so cannot appear here.
+/// **Three fixers dispatch on a bare `id`, and two of those ids have since grown
+/// a rule.** `NCX-001` and `PKG-006` were rule-less when their fixers were
+/// written; epubveri 0.9.11 named them `ncx.uid.package_identifier_mismatch` and
+/// `ocf.mimetype.not_first_entry`. The dispatch still keys on the id, because
+/// our floor is 0.9.7 where the slugs do not exist — but the rules belong in
+/// this list, since a census that reads it would otherwise file two rules we
+/// fix under *no fixer at all*, which is precisely the mislabelling this list
+/// exists to prevent. `OPF-054` is still rule-less.
 ///
 /// **Keep this in sync with [`plan`].** Nothing enforces it at compile time; the
 /// census cross-checks at runtime and reports any rule a proposal addressed that
@@ -73,6 +79,8 @@ pub fn handled_rules() -> &'static [&'static str] {
         "ncx.ids.duplicate_id",
         "ncx.ids.invalid_ncname",
         "ncx.play_order.duplicate",
+        "ncx.uid.package_identifier_mismatch",
+        "ocf.mimetype.not_first_entry",
         "opf.content_document.duplicate_id",
         "opf.content_document.empty_title",
         "opf.content_document.invalid_content_type_meta",

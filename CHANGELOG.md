@@ -8,6 +8,37 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Tracks `epubveri` 0.9.12** (from 0.9.9). Zero source change again; the shelf
+  grew to **125 books** the same day. Re-measured: errors **6376 → 4631** over
+  the 25 books epubsana touches, **5** books reach fully valid, **nothing
+  introduced** by either whole-shelf instrument. Every fixer's proposal count is
+  unchanged, which is the answer to upstream's heads-up: 0.9.12 adds **171**
+  `element "img" is missing a required attribute` findings across 10 books, and
+  none of them reaches a fixer of ours.
+
+- **`handled_rules()` now lists `ncx.uid.package_identifier_mismatch` and
+  `ocf.mimetype.not_first_entry`.** Both sites were rule-less when their fixers
+  were written, so those fixers dispatch on the bare `NCX-001` / `PKG-006` id;
+  epubveri 0.9.11 named them. The dispatch is unchanged — our floor is 0.9.7,
+  where the slugs do not exist — but a census reading this list would otherwise
+  have filed two rules we *do* fix under "no fixer at all", which is exactly the
+  mislabelling the list exists to prevent.
+
+### Not built, deliberately
+
+- **`<img>` with no `alt` (171 findings / 10 books, the widest-spread shape on
+  the shelf) is a decline, and upstream predicted it would be.** XHTML 1.1 makes
+  `alt` required where HTML5 does not, so this is one of the few places EPUB 2 is
+  the stricter version. There is no determinate repair: `alt=""` is correct for a
+  decorative image and wrong for a meaningful one, and nothing in the finding —
+  or in the book — says which. Supplying either would be inventing content, which
+  is the line `empty_title` already draws. Recorded in `docs/COVERAGE.md` rather
+  than left to be re-derived.
+
 ## [0.8.0] - 2026-08-07
 
 Two fixers, twenty-five to **twenty-six**, and the epubveri 0.9.9 bump. Measured
