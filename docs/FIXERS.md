@@ -49,6 +49,7 @@ grows one carefully-argued entry at a time.
 | `RSC-005` | `opf.content_document.duplicate_id` | ConfirmNeeded | Two or more elements in one document share an `id` | [Keep the first, rename the later ones](#rsc-005--a-duplicate-id-in-a-content-document) |
 | `RSC-007` | `opf.content_document.reference_missing_resource` | ConfirmNeeded | A link's path is stale, but the file it names is still in the book | [Repoint the path, carry the fragment across](#rsc-007--a-reference-whose-path-is-wrong-but-whose-target-is-in-the-book) |
 | `OPF-030` / `RSC-005` | `opf.package.unique_identifier_unresolved`, `opf.package.opf_identifier_not_empty` | ConfirmNeeded | The package's declared unique identifier resolves to nothing usable | [Attach the declared id to the book's one real identifier](#opf-030--rsc-005--the-packages-declared-identifier-points-at-nothing-usable) |
+| `RSC-005` | `htm.epub2_dom.nested_anchor` | ConfirmNeeded | An `<a>` with only an `id` wraps a real link | [Unwrap it, moving the `id` to the child](#rsc-005--an-anchor-target-wrapped-around-a-link) |
 | `OPF-054` | *(none)* | ConfirmNeeded | A `<dc:date>` holds no date at all (EPUB 2) | [Drop the empty element; never touch a non-empty one](#opf-054--an-empty-dcdate-epub-2) |
 
 **A note on structural fixers.** Fixers that must locate an element (rather than
@@ -1362,3 +1363,50 @@ consistent with every other structural fixer here, and stricter than before.
 
 **Measured.** 14 `duplicate` + 8 `target_mismatch` + 1 `gap` cleared across the
 shelf, nothing introduced, and one more book reaches fully valid (5 → **6**).
+
+---
+
+## RSC-005 — an anchor target wrapped around a link
+
+**Finding.** `htm.epub2_dom.nested_anchor`, message *The "a" element cannot
+contain any nested "a" elements*. `params` is empty, so the finding gives the
+file and nothing else; the element is re-located by parsing, as the other
+structural fixers do.
+
+**The shape, and why it is determinate.** On the shelf every case is the same
+thing — a footnote reference where the *outer* `<a>` carries no `href`:
+
+    <a id="bookmark1"><sup><a href="#footnote1">1</a></sup></a>
+
+The outer element is not a link at all; it is an **anchor target**, the legacy
+way of naming a position before every element could carry an `id`. XHTML forbids
+nesting anchors, and the `id` does not need an `<a>` to live on.
+
+**Fix** (`fix.nested_anchor`, ConfirmNeeded). Unwrap the outer `<a>` and move its
+`id` onto its single element child:
+
+    <sup id="bookmark1"><a href="#footnote1">1</a></sup>
+
+`#bookmark1` still resolves, to an element at the same place in the same
+rendered line. Nothing is deleted but a wrapper that carried no information of
+its own.
+
+**When it declines.**
+
+- **The outer `<a>` has an `href`.** Then it is a real link, and unwrapping it
+  destroys a navigation the author wrote. Which of two nested links to keep is
+  not ours to decide.
+- **The outer `<a>` carries any attribute other than `id`** — a `class`, a
+  `style`, an `epub:type`. Those would be lost, and moving them onto a different
+  element asserts they apply to it.
+- **The single child already has an `id`.** Two ids cannot share one element and
+  choosing between them is not a repair.
+- **More than one element child, or non-whitespace text beside the child.** The
+  `id` would then have to be attached to something that covers less than the
+  anchor did.
+- A document that will not parse.
+
+**Measured.** 6 findings in **one** book, all the footnote shape above, all
+repaired. One book is thin evidence and the honest claim is the mechanism: it
+moves an id off a wrapper that exists only to hold it, and refuses every case
+where the wrapper carries anything else.

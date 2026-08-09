@@ -40,6 +40,7 @@ pub fn plan(report: &Report, ws: &Workspace, _goal: Goal) -> Vec<ProposedFix> {
     fixes.extend(content_document_duplicate_ids(report, ws));
     fixes.extend(reference_wrong_path(report, ws));
     fixes.extend(package_identifier(report, ws));
+    fixes.extend(nested_anchors(report, ws));
     fixes.extend(epub3_attrs_in_epub2_package(report, ws));
     fixes.extend(empty_dc_date(report, ws));
     fixes.extend(mimetype_packaging(report, ws));
@@ -76,6 +77,7 @@ pub fn handled_rules() -> &'static [&'static str] {
         "htm.doctype.epub3_obsolete_public_id",
         "htm.entity.missing_semicolon",
         "htm.entity.undeclared",
+        "htm.epub2_dom.nested_anchor",
         "htm.obsolete_attribute",
         "ncx.ids.duplicate_id",
         "ncx.ids.invalid_ncname",
@@ -3817,6 +3819,146 @@ fn element_name_end(text: &str, tag_start: usize) -> Option<usize> {
     None
 }
 
+/// `RSC-005` / `htm.epub2_dom.nested_anchor`: an `<a>` containing another `<a>`,
+/// which XHTML forbids. On the shelf every case is one shape — a footnote
+/// reference whose **outer** anchor carries no `href`:
+///
+/// ```text
+/// <a id="bookmark1"><sup><a href="#footnote1">1</a></sup></a>
+/// ```
+///
+/// The outer element is not a link; it is an **anchor target**, the legacy way of
+/// naming a position from before every element could carry an `id`. So the repair
+/// is to unwrap it and move the `id` to its single element child — `#bookmark1`
+/// still resolves, to an element at the same place in the same rendered line, and
+/// nothing is deleted but a wrapper that held no information of its own.
+///
+/// Declines when the outer anchor has an `href` (it is then a real link, and
+/// which of two nested links to keep is not ours to decide), when it carries any
+/// attribute besides `id` (they would be lost, and re-attaching them to a
+/// different element asserts they apply to it), when the child already has an
+/// `id`, or when the anchor wraps more than that one child.
+fn nested_anchors(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    let docs: BTreeSet<&str> = report
+        .messages
+        .iter()
+        .filter(|m| m.rule == Some("htm.epub2_dom.nested_anchor"))
+        .filter_map(|m| m.location.as_deref())
+        .collect();
+
+    let mut fixes = Vec::new();
+    for doc in docs {
+        let Some(text) = ws.get_text(doc) else {
+            continue;
+        };
+        let Some(edits) = plan_nested_anchor_unwraps(&text) else {
+            continue;
+        };
+        let n = edits.len();
+
+        let doc_for_apply = doc.to_string();
+        fixes.push(ProposedFix {
+            fix_id: "fix.nested_anchor",
+            addresses_id: "RSC-005".to_string(),
+            addresses_rule: Some("htm.epub2_dom.nested_anchor"),
+            addresses_severity: addressed_severity(
+                report,
+                "RSC-005",
+                Some("htm.epub2_dom.nested_anchor"),
+            ),
+            tier: Tier::ConfirmNeeded,
+            title: format!(
+                "Unwrap {n} anchor target{} wrapped around a link in {doc}",
+                if n == 1 { "" } else { "s" }
+            ),
+            rationale:
+                "An <a> cannot contain another <a>. Here the outer one carries no href — it is \
+                 not a link but an anchor target, the legacy way of naming a position before \
+                 every element could hold an id. It is unwrapped and its id moves to its single \
+                 child, so the fragment still resolves, to an element in the same place on the \
+                 page. An outer anchor that is a real link, or that carries anything besides an \
+                 id, is left alone."
+                    .to_string(),
+            preview: vec![Change {
+                path: doc.to_string(),
+                note: format!("unwrap {n} <a id=\"…\"> wrapper(s), moving the id to the child"),
+            }],
+            apply_fn: Box::new(move |ws: &mut Workspace| {
+                if let Some(text) = ws.get_text(&doc_for_apply)
+                    && let Some(edits) = plan_nested_anchor_unwraps(&text)
+                {
+                    ws.set_text(&doc_for_apply, apply_edits(&text, edits));
+                }
+            }),
+        });
+    }
+    fixes
+}
+
+/// Replace each qualifying outer `<a>` with its child, `id` moved across.
+/// `None` (decline) if the document won't parse or nothing qualifies.
+fn plan_nested_anchor_unwraps(text: &str) -> Option<Vec<MetaEdit>> {
+    let prepared = prepare_content_doc(text);
+    let doc = prepared.parse()?;
+    let mut edits = Vec::new();
+
+    for outer in doc
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "a")
+    {
+        // Only anchors that actually contain another anchor are in scope.
+        if !outer
+            .descendants()
+            .skip(1) // `descendants()` yields the node itself first
+            .any(|d| d.is_element() && d.tag_name().name() == "a")
+        {
+            continue;
+        }
+        // A link, not a target: not ours to unwrap. And `id` must be the only
+        // attribute, or unwrapping loses something.
+        let mut attrs = outer.attributes();
+        let Some(id_attr) = attrs.next().filter(|a| a.name() == "id") else {
+            continue;
+        };
+        if attrs.next().is_some() {
+            continue;
+        }
+        // Exactly one element child, and nothing else but whitespace.
+        let mut child = None;
+        let mut extra = false;
+        for c in outer.children() {
+            if c.is_element() {
+                if child.is_some() {
+                    extra = true;
+                }
+                child = Some(c);
+            } else if c.is_text() && !c.text().unwrap_or("").trim().is_empty() {
+                extra = true;
+            }
+        }
+        let (Some(child), false) = (child, extra) else {
+            continue;
+        };
+        if child.attribute("id").is_some() {
+            continue;
+        }
+
+        let outer_span = prepared.unshift(outer.range());
+        let child_span = prepared.unshift(child.range());
+        let child_src = text.get(child_span.clone())?;
+        let insert_at = element_name_end(child_src, 0)?;
+        let mut replacement = String::with_capacity(child_src.len() + 16);
+        replacement.push_str(&child_src[..insert_at]);
+        replacement.push_str(&format!(" id=\"{}\"", id_attr.value()));
+        replacement.push_str(&child_src[insert_at..]);
+        edits.push(MetaEdit {
+            range: outer_span,
+            replacement,
+        });
+    }
+    (!edits.is_empty()).then_some(edits)
+}
+
 /// `OPF-054`: a `<dc:date>` that holds no date at all. Drop the element.
 ///
 /// **Dispatches on the bare `id`** — this site has no `rule` and needs none: it
@@ -4542,6 +4684,72 @@ mod tests {
     <reference type="cover" title="Cover" href="cover.xhtml"/>
   </guide>
 </package>"#;
+
+    fn unwrap_anchors(body: &str) -> Option<String> {
+        let doc = format!("<html><body>{body}</body></html>");
+        plan_nested_anchor_unwraps(&doc).map(|e| apply_edits(&doc, e))
+    }
+
+    /// The shelf's shape: a footnote reference whose outer anchor is a target,
+    /// not a link.
+    #[test]
+    fn an_anchor_target_wrapped_around_a_link_is_unwrapped() {
+        let out = unwrap_anchors(
+            r##"<p><a id="bookmark1"><sup><a href="#footnote1">1</a></sup></a></p>"##,
+        )
+        .unwrap();
+        assert!(
+            out.contains(r##"<sup id="bookmark1"><a href="#footnote1">1</a></sup>"##),
+            "{out}"
+        );
+    }
+
+    /// Which of two nested links to keep is not ours to decide.
+    #[test]
+    fn an_outer_anchor_that_is_a_real_link_declines() {
+        assert!(unwrap_anchors(r##"<p><a href="a.xhtml"><a href="#f">1</a></a></p>"##).is_none());
+    }
+
+    #[test]
+    fn an_outer_anchor_carrying_more_than_an_id_declines() {
+        // The class would be lost, and re-attaching it to <sup> asserts it
+        // applies there.
+        assert!(
+            unwrap_anchors(r##"<p><a id="b" class="note"><sup><a href="#f">1</a></sup></a></p>"##)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_child_that_already_has_an_id_declines() {
+        assert!(
+            unwrap_anchors(r##"<p><a id="b"><sup id="s"><a href="#f">1</a></sup></a></p>"##)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn an_anchor_wrapping_more_than_one_child_declines() {
+        assert!(
+            unwrap_anchors(r##"<p><a id="b"><sup><a href="#f">1</a></sup><em>x</em></a></p>"##)
+                .is_none()
+        );
+        assert!(
+            unwrap_anchors(r##"<p><a id="b">text<sup><a href="#f">1</a></sup></a></p>"##).is_none()
+        );
+    }
+
+    /// The id can also land on the inner anchor itself, which then carries both.
+    #[test]
+    fn an_anchor_directly_wrapping_an_anchor_merges_the_two() {
+        let out = unwrap_anchors(r##"<p><a id="b"><a href="#f">1</a></a></p>"##).unwrap();
+        assert!(out.contains(r##"<a id="b" href="#f">1</a>"##), "{out}");
+    }
+
+    #[test]
+    fn an_anchor_with_no_nested_anchor_is_untouched() {
+        assert!(unwrap_anchors(r##"<p><a id="b"><sup>1</sup></a></p>"##).is_none());
+    }
 
     /// A package with the given `unique-identifier` and `<dc:identifier>` list,
     /// each entry an `(id, value)` pair where an empty id means none.

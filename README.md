@@ -13,7 +13,7 @@ changed**. It never guesses, and it preserves everything it doesn't touch.
 ## Status
 
 Early but working. The core contract (`Workspace` → detect → propose → confirm →
-apply → report) is solid, with twenty-seven fixers so far:
+apply → report) is solid, with twenty-eight fixers so far:
 
 - **`RSC-016`** — undeclared HTML entities (`&nbsp;`, `&mdash;`, …) → the exact
   character each denotes.
@@ -104,6 +104,11 @@ apply → report) is solid, with twenty-seven fixers so far:
   what makes that comparison possible). Declines when the book has two candidate
   identifiers — choosing between a UUID and an ISBN is editorial — or none at
   all, where a repair would have to invent one.
+- **`RSC-005` / a nested anchor** — `<a id="x"><sup><a href="#f">1</a></sup></a>`,
+  where the outer element is an anchor *target* rather than a link → unwrapped,
+  with the `id` moved to its child so the fragment still resolves in the same
+  place. An outer anchor that is a real link, or that carries anything besides
+  an `id`, is left alone.
 - **`OPF-054`** — a `<dc:date>` with no content → dropped; the element states no
   date and `dc:date` is optional. A malformed but non-empty date (`March 2019`)
   is left exactly as it is: it carries a date the author wrote, and deciding

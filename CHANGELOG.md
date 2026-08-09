@@ -12,6 +12,22 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
 ### Added
 
+- **A fixer for an anchor target wrapped around a link**
+  (`htm.epub2_dom.nested_anchor`). On the shelf every case is one shape — a
+  footnote reference whose **outer** `<a>` carries no `href`:
+
+      <a id="bookmark1"><sup><a href="#footnote1">1</a></sup></a>
+
+  That outer element is not a link but an **anchor target**, the legacy way of
+  naming a position from before every element could hold an `id`. It is unwrapped
+  and the `id` moves to its single child, so `#bookmark1` still resolves, to an
+  element at the same place in the same rendered line.
+
+  Declines when the outer anchor has an `href` (a real link, and which of two
+  nested links to keep is not ours to decide), when it carries any attribute
+  besides `id`, when the child already has one, or when it wraps more than that
+  one child. 6 findings in one book, all repaired, nothing introduced.
+
 - **A fixer for a package whose declared identifier points at nothing usable**
   (`opf.package.unique_identifier_unresolved` + `opf.package.opf_identifier_not_empty`).
   Two rules, one defect at two stages, hitting disjoint sets of five books each:
