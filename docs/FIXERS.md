@@ -48,6 +48,7 @@ grows one carefully-argued entry at a time.
 | `RSC-005` | `opf.package.schema_violation` | AutoSafe | An EPUB 3 attribute on an EPUB 2 package document | [Delete it, once verified it says nothing the book does not](#rsc-005--an-epub-3-attribute-on-an-epub-2-package-document) |
 | `RSC-005` | `opf.content_document.duplicate_id` | ConfirmNeeded | Two or more elements in one document share an `id` | [Keep the first, rename the later ones](#rsc-005--a-duplicate-id-in-a-content-document) |
 | `RSC-007` | `opf.content_document.reference_missing_resource` | ConfirmNeeded | A link's path is stale, but the file it names is still in the book | [Repoint the path, carry the fragment across](#rsc-007--a-reference-whose-path-is-wrong-but-whose-target-is-in-the-book) |
+| `OPF-030` / `RSC-005` | `opf.package.unique_identifier_unresolved`, `opf.package.opf_identifier_not_empty` | ConfirmNeeded | The package's declared unique identifier resolves to nothing usable | [Attach the declared id to the book's one real identifier](#opf-030--rsc-005--the-packages-declared-identifier-points-at-nothing-usable) |
 | `OPF-054` | *(none)* | ConfirmNeeded | A `<dc:date>` holds no date at all (EPUB 2) | [Drop the empty element; never touch a non-empty one](#opf-054--an-empty-dcdate-epub-2) |
 
 **A note on structural fixers.** Fixers that must locate an element (rather than
@@ -1263,3 +1264,67 @@ fragment present in the target**, so on this corpus the two agree every time.
 **Measured.** 36 findings across 8 books, of which **24 in 3 books** are the
 repairable shape and clear completely; the other 12 are declined by the rules
 above. Both whole-shelf instruments report nothing introduced.
+
+---
+
+## OPF-030 / RSC-005 — the package's declared identifier points at nothing usable
+
+**Findings.** Two rules, one defect seen at two stages:
+
+- `opf.package.unique_identifier_unresolved` (`OPF-030`) — `<package
+  unique-identifier="X">` names an id no `<dc:identifier>` carries.
+- `opf.package.opf_identifier_not_empty` (`RSC-005`) — the `<dc:identifier>` that
+  *does* carry `id="X"` is empty.
+
+Either way the package declares which identifier is canonical and that
+declaration lands on nothing a reading system can use. On the 125-book shelf the
+two rules hit **disjoint sets of five books each**.
+
+**Fix** (`fix.package_identifier`, ConfirmNeeded). Make the declaration point at
+the identifier the book actually has — **when there is exactly one candidate**:
+
+- *Unresolved*: give `id="X"` to the single `<dc:identifier>` that has no `id`
+  and a non-empty value.
+- *Empty*: give `id="X"` to the single non-empty sibling that has no `id`, and
+  drop the now-redundant empty element with the whitespace before it.
+
+**Why it invents nothing.** The value is already in the book, written by its
+producer; the id is already in the book, written in the `unique-identifier`
+attribute. The repair only attaches the one to the other. Compare `empty_title`,
+which moves a TOC label the author wrote — same principle, different pair.
+
+**Why not the alternatives.** Copying a sibling's value *into* the empty element
+would leave two `<dc:identifier>`s asserting the same string; repointing
+`unique-identifier` at some other identifier would be choosing which of the
+book's identities is canonical. Moving the declared id onto the sole real
+identifier does neither.
+
+**It carries the NCX with it, in the same proposal.** Making the package
+identifier resolvable is what first lets epubveri compare the NCX's `dtb:uid`
+against it — so on three shelf books the first cut of this fixer *unmasked* a
+pre-existing mismatch and produced `NCX-001` where there had been none. A
+whole-shelf audit caught it; no unit test could have, because the edit was
+correct and the *book* ended up worse. The `dtb:uid` is therefore synced to the
+same value in the same edit, on the pattern
+[`fix.manifest_dangling_item`](#rsc-001--dangling-manifest-item) already sets:
+approving half of this would leave a finding epubsana created itself.
+
+**When it declines — and it declines on 7 of the 10 books.**
+
+- **More than one candidate.** Four books carry both a UUID and an ISBN with no
+  `id` on either. Both are legitimate publication identifiers and **which one is
+  canonical is an editorial decision**, not a repair. The attribute's *name*
+  hints (`uuid_id`), and hints are not evidence.
+- **No `<dc:identifier>` at all** (two books). The repair would have to generate
+  one — a UUID from nowhere — which is the invention this project does not do.
+  Note the standing question in `CLAUDE.md` about generated identifiers is
+  therefore still unanswered and still not needed.
+- **The single candidate is itself empty.** Attaching the id would clear
+  `OPF-030` and raise the empty-identifier finding in its place, which is not a
+  repair.
+- A package document that doesn't parse.
+
+**Measured.** 10 findings across 10 books; **3 repaired, 7 declined**. That ratio
+is the honest headline: this fixer's value is that it refuses to guess about a
+book's identity six times out of ten, and the three it does repair need no guess
+at all.

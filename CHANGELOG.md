@@ -10,6 +10,33 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
 ## [Unreleased]
 
+### Added
+
+- **A fixer for a package whose declared identifier points at nothing usable**
+  (`opf.package.unique_identifier_unresolved` + `opf.package.opf_identifier_not_empty`).
+  Two rules, one defect at two stages, hitting disjoint sets of five books each:
+  either no `<dc:identifier>` carries the id `unique-identifier` names, or the one
+  that does is empty. The declared id is attached to the book's single real
+  identifier, and any leftover empty element is dropped.
+
+  **It invents nothing.** The value was already in the book, written by its
+  producer; the id was already in the package, written in the attribute. The
+  repair only attaches one to the other — the same principle as `empty_title`
+  moving a TOC label the author wrote.
+
+  **The whole-shelf audit earned its keep here.** The first cut cleared `OPF-030`
+  and produced **three new `NCX-001`s**: making the package identifier resolvable
+  is what first lets epubveri compare the NCX's `dtb:uid` against it, so the
+  repair *unmasked* a pre-existing mismatch. No unit test could have caught that —
+  the edit was correct and the book ended up worse. The `dtb:uid` now syncs in the
+  same proposal, on the pattern `fix.manifest_dangling_item` already set.
+
+  **Measured: 10 findings across 10 books, 3 repaired and 7 declined** — and the
+  declines are the point. Four books carry both a UUID and an ISBN with no `id` on
+  either, where which identity is canonical is an editorial decision; two carry no
+  `<dc:identifier>` at all, where the repair would have to generate one. With the
+  NCX syncs the run clears 8 findings and introduces nothing.
+
 ### Changed
 
 - **The body-level wrapper now also works inside `<blockquote>` — the single

@@ -39,6 +39,7 @@ pub fn plan(report: &Report, ws: &Workspace, _goal: Goal) -> Vec<ProposedFix> {
     fixes.extend(content_document_invalid_ids(report, ws));
     fixes.extend(content_document_duplicate_ids(report, ws));
     fixes.extend(reference_wrong_path(report, ws));
+    fixes.extend(package_identifier(report, ws));
     fixes.extend(epub3_attrs_in_epub2_package(report, ws));
     fixes.extend(empty_dc_date(report, ws));
     fixes.extend(mimetype_packaging(report, ws));
@@ -92,7 +93,9 @@ pub fn handled_rules() -> &'static [&'static str] {
         "opf.guide.reference_missing_resource",
         "opf.manifest_item.missing_resource",
         "opf.manifest_item.unencoded_space_in_href",
+        "opf.package.opf_identifier_not_empty",
         "opf.package.schema_violation",
+        "opf.package.unique_identifier_unresolved",
         "opf.spine.duplicate_itemref",
         "opf.spine.itemref_idref_not_in_manifest",
     ]
@@ -3517,6 +3520,253 @@ fn quoted_attr_span(text: &str, value: &str) -> Option<Range<usize>> {
     None
 }
 
+/// `OPF-030` / `RSC-005`: the package declares which identifier is canonical and
+/// that declaration lands on nothing usable — either no `<dc:identifier>` carries
+/// the named id (`opf.package.unique_identifier_unresolved`), or the one that
+/// does is empty (`opf.package.opf_identifier_not_empty`). Two rules, one defect
+/// at two stages; on the shelf they hit disjoint sets of five books each.
+///
+/// **Nothing is invented.** The value is already in the book, written by its
+/// producer; the id is already in the book, written in `unique-identifier`. The
+/// repair only attaches the one to the other — the same principle as
+/// [`empty_titles`], which moves a TOC label the author already wrote.
+///
+/// **Why not the alternatives.** Copying a sibling's value *into* the empty
+/// element would leave two identifiers asserting the same string; repointing
+/// `unique-identifier` elsewhere would be choosing which of the book's identities
+/// is canonical. Moving the declared id onto the sole real identifier does
+/// neither.
+///
+/// **It carries the NCX with it, in the same proposal.** Making the package
+/// identifier resolvable is what first lets epubveri compare the NCX's `dtb:uid`
+/// against it — so on three shelf books the repair *unmasked* a pre-existing
+/// mismatch and produced `NCX-001` where there had been none. A whole-shelf audit
+/// caught that; no unit test could have, because the edit was correct and the
+/// *book* ended up worse. So the `dtb:uid` is synced to the same value in the
+/// same edit, on the pattern [`manifest_dangling_items`] already sets: approving
+/// half of this would leave a finding epubsana created itself.
+///
+/// **It declines on 7 of the 10 shelf books**, and that is the point of it: four
+/// carry both a UUID and an ISBN with no `id` on either, where which is canonical
+/// is an editorial decision (the attribute's *name* hints, and hints are not
+/// evidence); two carry no `<dc:identifier>` at all, where the repair would have
+/// to generate one.
+fn package_identifier(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    let mut files: BTreeMap<String, &'static str> = BTreeMap::new();
+    for m in &report.messages {
+        let stage = match m.rule {
+            Some("opf.package.unique_identifier_unresolved") => "OPF-030",
+            Some("opf.package.opf_identifier_not_empty") => "RSC-005",
+            _ => continue,
+        };
+        if let Some(f) = m.location.as_deref() {
+            files.insert(f.to_string(), stage);
+        }
+    }
+
+    let mut fixes = Vec::new();
+    for (file, id_code) in files {
+        let Some(text) = ws.get_text(&file) else {
+            continue;
+        };
+        let Some(plan) = plan_package_identifier(&text, ws) else {
+            continue;
+        };
+        let note = match plan.drop_empty {
+            Some(_) => format!(
+                "give id=\"{}\" to the identifier holding {:?}, and drop the empty one",
+                plan.uid, plan.value
+            ),
+            None => format!(
+                "give id=\"{}\" to the identifier holding {:?}",
+                plan.uid, plan.value
+            ),
+        };
+        let rule = if id_code == "OPF-030" {
+            "opf.package.unique_identifier_unresolved"
+        } else {
+            "opf.package.opf_identifier_not_empty"
+        };
+
+        let file_for_apply = file.clone();
+        fixes.push(ProposedFix {
+            fix_id: "fix.package_identifier",
+            addresses_id: id_code.to_string(),
+            addresses_rule: Some(rule),
+            addresses_severity: addressed_severity(report, id_code, Some(rule)),
+            tier: Tier::ConfirmNeeded,
+            title: format!("Point the package's unique-identifier at a real identifier in {file}"),
+            rationale:
+                "The package says which identifier is canonical, and that declaration lands on \
+                 nothing a reading system can use — either no dc:identifier carries the named id, \
+                 or the one that does is empty. The book holds exactly one identifier that could \
+                 be meant, so the declared id is attached to it and, where an empty element is \
+                 left over, that element is dropped. Nothing is invented: the value was already \
+                 in the book and the id was already in the package. Where a book carries two \
+                 candidates — a UUID and an ISBN, say — which is canonical is an editorial \
+                 decision and this declines."
+                    .to_string(),
+            preview: {
+                let mut p = vec![Change {
+                    path: file.clone(),
+                    note,
+                }];
+                p.extend(plan.ncx.iter().map(|(ncx, _)| Change {
+                    path: ncx.clone(),
+                    note: format!("sync dtb:uid to {:?} so the NCX still agrees", plan.value),
+                }));
+                p
+            },
+            apply_fn: Box::new(move |ws: &mut Workspace| {
+                if let Some(text) = ws.get_text(&file_for_apply)
+                    && let Some(plan) = plan_package_identifier(&text, ws)
+                {
+                    let mut edits = vec![MetaEdit {
+                        range: plan.insert_at..plan.insert_at,
+                        replacement: format!(" id=\"{}\"", plan.uid),
+                    }];
+                    if let Some(drop) = plan.drop_empty {
+                        edits.push(MetaEdit {
+                            range: drop,
+                            replacement: String::new(),
+                        });
+                    }
+                    ws.set_text(&file_for_apply, apply_edits(&text, edits));
+                    for (ncx, edit) in plan.ncx {
+                        if let Some(ncx_text) = ws.get_text(&ncx) {
+                            ws.set_text(&ncx, apply_edits(&ncx_text, vec![edit]));
+                        }
+                    }
+                }
+            }),
+        });
+    }
+    fixes
+}
+
+/// Where to attach the declared id, which empty element (if any) to drop, and
+/// the NCX edits that must travel with it.
+struct IdentifierPlan {
+    uid: String,
+    value: String,
+    /// Byte offset just past the target element's name, where ` id="…"` goes.
+    insert_at: usize,
+    drop_empty: Option<Range<usize>>,
+    /// `dtb:uid` syncs, by NCX path. Empty when the book has no NCX or it
+    /// already agrees.
+    ncx: Vec<(String, MetaEdit)>,
+}
+
+/// The `dtb:uid` edits needed so every NCX in the container agrees with `value`.
+///
+/// Read [`package_identifier`] for why this is not a separate fix: the package
+/// repair is what makes the comparison possible at all, so leaving the NCX behind
+/// trades one finding for another.
+fn ncx_uid_syncs(ws: &Workspace, value: &str) -> Vec<(String, MetaEdit)> {
+    let mut out = Vec::new();
+    for name in ws.names().cloned().collect::<Vec<_>>() {
+        if !name.to_ascii_lowercase().ends_with(".ncx") {
+            continue;
+        }
+        let Some(text) = ws.get_text(&name) else {
+            continue;
+        };
+        let Some((range, old)) = find_dtb_uid_meta(&text) else {
+            continue;
+        };
+        if old.trim() == value {
+            continue;
+        }
+        let Some(new_element) = set_content_attr(&text[range.clone()], value) else {
+            continue;
+        };
+        out.push((
+            name,
+            MetaEdit {
+                range,
+                replacement: new_element,
+            },
+        ));
+    }
+    out
+}
+
+/// `None` (decline) unless the package names a `unique-identifier` and the book
+/// holds **exactly one** `<dc:identifier>` that is a candidate for it: no `id` of
+/// its own, and a non-empty value.
+fn plan_package_identifier(opf: &str, ws: &Workspace) -> Option<IdentifierPlan> {
+    let doc = parse_xml(opf)?;
+    let package = doc
+        .descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "package")?;
+    let uid = package.attr_no_ns("unique-identifier")?.trim().to_string();
+    if uid.is_empty() {
+        return None;
+    }
+    let metadata = doc
+        .descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "metadata")?;
+    let identifiers: Vec<_> = metadata
+        .children()
+        .filter(|n| n.is_element() && n.tag_name().name() == "identifier")
+        .collect();
+
+    let text_of = |n: &roxmltree::Node| -> String {
+        n.descendants()
+            .filter(|t| t.is_text())
+            .filter_map(|t| t.text())
+            .collect::<String>()
+            .trim()
+            .to_string()
+    };
+
+    // The element the declaration currently lands on, if any.
+    let declared = identifiers
+        .iter()
+        .find(|n| n.attr_no_ns("id").map(str::trim) == Some(uid.as_str()));
+    let drop_empty = match declared {
+        // Already resolved and non-empty: nothing to do (or a stale finding).
+        Some(n) if !text_of(n).is_empty() => return None,
+        Some(n) => Some(with_leading_whitespace(opf, n.range())),
+        None => None,
+    };
+
+    // Candidates: no id of their own, a real value, and not the empty element.
+    let mut candidates = identifiers
+        .iter()
+        .filter(|n| n.attr_no_ns("id").is_none() && !text_of(n).is_empty());
+    let target = candidates.next()?;
+    if candidates.next().is_some() {
+        return None; // which identity is canonical is not ours to choose
+    }
+
+    let value = text_of(target);
+    let ncx = ncx_uid_syncs(ws, &value);
+    Some(IdentifierPlan {
+        uid,
+        value,
+        insert_at: element_name_end(opf, target.range().start)?,
+        drop_empty,
+        ncx,
+    })
+}
+
+/// The byte offset just past an element's name in its start tag, where a new
+/// attribute can be inserted. `<dc:identifier …` → the offset after `identifier`.
+fn element_name_end(text: &str, tag_start: usize) -> Option<usize> {
+    let rest = text.get(tag_start..)?;
+    let mut it = rest.char_indices();
+    if it.next()?.1 != '<' {
+        return None;
+    }
+    for (i, c) in it {
+        if !(c.is_alphanumeric() || matches!(c, ':' | '-' | '_' | '.')) {
+            return Some(tag_start + i);
+        }
+    }
+    None
+}
+
 /// `OPF-054`: a `<dc:date>` that holds no date at all. Drop the element.
 ///
 /// **Dispatches on the bare `id`** — this site has no `rule` and needs none: it
@@ -4242,6 +4492,147 @@ mod tests {
     <reference type="cover" title="Cover" href="cover.xhtml"/>
   </guide>
 </package>"#;
+
+    /// A package with the given `unique-identifier` and `<dc:identifier>` list,
+    /// each entry an `(id, value)` pair where an empty id means none.
+    fn ident_package(uid: &str, idents: &[(&str, &str)]) -> String {
+        let body: String = idents
+            .iter()
+            .map(|(id, v)| {
+                let attr = if id.is_empty() {
+                    String::new()
+                } else {
+                    format!(" id=\"{id}\"")
+                };
+                if v.is_empty() {
+                    format!("    <dc:identifier{attr}/>\n")
+                } else {
+                    format!("    <dc:identifier{attr}>{v}</dc:identifier>\n")
+                }
+            })
+            .collect();
+        format!(
+            r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="{uid}">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+{body}    <dc:title>A Book</dc:title>
+  </metadata>
+</package>"#
+        )
+    }
+
+    fn ident_plan(opf: &str, extra: &[(&str, &str)]) -> Option<String> {
+        let mut files = vec![("OEBPS/package.opf", opf)];
+        files.extend_from_slice(extra);
+        let ws = container(&files);
+        let plan = plan_package_identifier(opf, &ws)?;
+        let mut edits = vec![MetaEdit {
+            range: plan.insert_at..plan.insert_at,
+            replacement: format!(" id=\"{}\"", plan.uid),
+        }];
+        if let Some(d) = plan.drop_empty {
+            edits.push(MetaEdit {
+                range: d,
+                replacement: String::new(),
+            });
+        }
+        Some(apply_edits(opf, edits))
+    }
+
+    #[test]
+    fn the_declared_id_is_attached_to_the_one_real_identifier() {
+        let opf = ident_package("uuid", &[("", "urn:uuid:abc")]);
+        let out = ident_plan(&opf, &[]).unwrap();
+        assert!(
+            out.contains(r#"<dc:identifier id="uuid">urn:uuid:abc</dc:identifier>"#),
+            "{out}"
+        );
+    }
+
+    /// A UUID and an ISBN are both legitimate publication identifiers, and which
+    /// is canonical is an editorial decision.
+    #[test]
+    fn two_candidate_identifiers_decline() {
+        let opf = ident_package("uuid", &[("", "urn:uuid:abc"), ("", "978-1-2345-6789-0")]);
+        assert!(ident_plan(&opf, &[]).is_none());
+    }
+
+    #[test]
+    fn no_identifier_at_all_declines_rather_than_generating_one() {
+        let opf = ident_package("uuid_id", &[]);
+        assert!(ident_plan(&opf, &[]).is_none());
+    }
+
+    #[test]
+    fn an_empty_declared_identifier_hands_its_id_over_and_is_dropped() {
+        let opf = ident_package("bookid", &[("bookid", ""), ("", "urn:uuid:abc")]);
+        let out = ident_plan(&opf, &[]).unwrap();
+        assert!(
+            out.contains(r#"<dc:identifier id="bookid">urn:uuid:abc</dc:identifier>"#),
+            "the real identifier takes the declared id: {out}"
+        );
+        assert!(
+            !out.contains(r#"<dc:identifier id="bookid"/>"#),
+            "and the empty element is gone: {out}"
+        );
+    }
+
+    #[test]
+    fn an_empty_declared_identifier_with_two_siblings_declines() {
+        let opf = ident_package(
+            "bookid",
+            &[("bookid", ""), ("", "urn:uuid:abc"), ("", "9786050918120")],
+        );
+        assert!(ident_plan(&opf, &[]).is_none());
+    }
+
+    /// Attaching the id to an empty element would clear OPF-030 and raise the
+    /// empty-identifier finding in its place.
+    #[test]
+    fn a_candidate_that_is_itself_empty_declines() {
+        let opf = ident_package("uuid", &[("", "")]);
+        assert!(ident_plan(&opf, &[]).is_none());
+    }
+
+    #[test]
+    fn an_identifier_that_already_resolves_is_left_alone() {
+        let opf = ident_package("uuid", &[("uuid", "urn:uuid:abc"), ("", "isbn")]);
+        assert!(ident_plan(&opf, &[]).is_none());
+    }
+
+    /// The repair is what first lets the NCX be compared against the package, so
+    /// the `dtb:uid` travels in the same proposal — approving half would leave a
+    /// finding epubsana created itself.
+    #[test]
+    fn the_ncx_uid_is_synced_in_the_same_proposal() {
+        let opf = ident_package("uuid", &[("", "urn:uuid:abc")]);
+        let ncx = "<ncx><head><meta name=\"dtb:uid\" content=\"stale\"/></head></ncx>";
+        let ws = container(&[("OEBPS/package.opf", &opf), ("OEBPS/toc.ncx", ncx)]);
+        let plan = plan_package_identifier(&opf, &ws).unwrap();
+        assert_eq!(plan.ncx.len(), 1, "the NCX must come along");
+        let (name, edit) = &plan.ncx[0];
+        let out = apply_edits(ncx, vec![edit.clone()]);
+        assert_eq!(name, "OEBPS/toc.ncx");
+        assert!(out.contains("urn:uuid:abc"), "{out}");
+    }
+
+    #[test]
+    fn an_ncx_that_already_agrees_produces_no_edit() {
+        let opf = ident_package("uuid", &[("", "urn:uuid:abc")]);
+        let ncx = "<ncx><head><meta name=\"dtb:uid\" content=\"urn:uuid:abc\"/></head></ncx>";
+        let ws = container(&[("OEBPS/package.opf", &opf), ("OEBPS/toc.ncx", ncx)]);
+        assert!(plan_package_identifier(&opf, &ws).unwrap().ncx.is_empty());
+    }
+
+    #[test]
+    fn an_attribute_is_inserted_just_past_the_element_name() {
+        assert_eq!(
+            element_name_end("<dc:identifier>x</dc:identifier>", 0),
+            Some(14)
+        );
+        assert_eq!(element_name_end("<identifier/>", 0), Some(11));
+        assert_eq!(element_name_end("<dc:identifier a=\"1\"/>", 0), Some(14));
+    }
 
     #[test]
     fn a_relative_path_is_computed_from_the_referring_documents_directory() {

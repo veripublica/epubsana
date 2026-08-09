@@ -13,7 +13,7 @@ changed**. It never guesses, and it preserves everything it doesn't touch.
 ## Status
 
 Early but working. The core contract (`Workspace` → detect → propose → confirm →
-apply → report) is solid, with twenty-six fixers so far:
+apply → report) is solid, with twenty-seven fixers so far:
 
 - **`RSC-016`** — undeclared HTML entities (`&nbsp;`, `&mdash;`, …) → the exact
   character each denotes.
@@ -97,6 +97,13 @@ apply → report) is solid, with twenty-six fixers so far:
   when the name matches nothing or several entries, when the fragment isn't in
   the target (that would trade one error for a broken link), and for external
   URLs or junk.
+- **`OPF-030` / `RSC-005` — a package identifier that resolves to nothing** —
+  `unique-identifier` naming an id no `<dc:identifier>` carries, or naming one
+  that's empty → the declared id is attached to the book's single real
+  identifier (and the NCX `dtb:uid` synced in the same edit, since the repair is
+  what makes that comparison possible). Declines when the book has two candidate
+  identifiers — choosing between a UUID and an ISBN is editorial — or none at
+  all, where a repair would have to invent one.
 - **`OPF-054`** — a `<dc:date>` with no content → dropped; the element states no
   date and `dc:date` is optional. A malformed but non-empty date (`March 2019`)
   is left exactly as it is: it carries a date the author wrote, and deciding
