@@ -8,7 +8,24 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
-## [Unreleased]
+## [0.9.0] - 2026-08-09
+
+Twenty-four fixers to **twenty-eight**, plus the widest single extension this
+project has made. On the shared shelf — 125 books, epubveri 0.9.14 — errors fall
+**13,141 → 4,027** over the 28 books epubsana touches, **six** books reach fully
+valid, and both whole-shelf instruments report **nothing introduced anywhere**.
+
+Two things in here were found by the instruments rather than by reading code, and
+both are the reason those instruments exist. The `<blockquote>` extension came
+from a shape census that showed stray text is reported in exactly two containers
+on 125 books. The identity fixer's first cut cleared `OPF-030` and produced three
+new `NCX-001`s — an edit that was correct while the *book* got worse, which no
+unit test can see.
+
+One was found the other way, by reading epubveri's source: the `playOrder`
+renumbering was target-blind and could have *created* the mismatch it now
+repairs, on a book shape the corpus does not contain.
+
 
 ### Added
 
