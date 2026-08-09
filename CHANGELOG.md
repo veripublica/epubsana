@@ -43,6 +43,28 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
   1.1 does not have — where the repair would be renaming, which epubsana
   deliberately does not do.
 
+- **Tracks `epubveri` 0.9.14.** Zero source change; `styloria` 0.8 → 0.9 comes
+  along transitively. Upstream's own figure verified from here: the only
+  `(id, rule)` pair that moved is `CSS-008 / css.stylesheet.invalid_selector`,
+  **0 → 21** in one book, and the shelf run confirms it passes straight through —
+  errors before **13087 → 13108** and after **3991 → 4012**, the same +21 on both
+  sides, because no fixer of ours consumes it. Everything else identical, zero
+  regressions.
+
+  Two upstream items worth recording even though they move nothing here:
+
+  - **`RSC-010` gained its fallback clause**, the defect diagnosed from this side
+    on 2026-08-08 (a nav/NCX link to a non-Content-Document is legal when the
+    manifest declares a fallback chain reaching one). No shelf book has the
+    shape; the IDPF `haruko-jpeg` sample that prompted it loses its three errors.
+  - **epubcheck's JSON and XML reports cap identical messages at 25**
+    (`CheckMessage.java`, `MAX_LOCATIONS`), with the "N additional locations"
+    line commented out — so a consumer sees a truncated list with no indication
+    anything was dropped. epubsana runs no second oracle, so nothing here is
+    affected, but any cross-tool count taken from epubcheck's JSON is
+    incomparable above 25 per message. Recorded so it is never quoted by
+    accident.
+
 - **Tracks `epubveri` 0.9.12** (from 0.9.9). Zero source change again; the shelf
   grew to **125 books** the same day. Re-measured: errors **6376 → 4631** over
   the 25 books epubsana touches, **5** books reach fully valid, **nothing
