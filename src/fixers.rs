@@ -80,6 +80,8 @@ pub fn handled_rules() -> &'static [&'static str] {
         "ncx.ids.duplicate_id",
         "ncx.ids.invalid_ncname",
         "ncx.play_order.duplicate",
+        "ncx.play_order.gap",
+        "ncx.play_order.target_mismatch",
         "ncx.uid.package_identifier_mismatch",
         "ocf.mimetype.not_first_entry",
         "opf.content_document.duplicate_id",
@@ -746,16 +748,38 @@ fn rename_later_id_occurrences(text: &str, dup: &str, news: &[String]) -> String
     out
 }
 
-/// `RSC-005` / `ncx.play_order.duplicate`: navigation elements repeat a
-/// `playOrder`. Renumber **every** `playOrder` in the NCX to its 1-based position
-/// in document order — the canonical assignment (`playOrder` mirrors document
-/// order), unique in one pass. `playOrder` is only a hint; the real reading order
-/// is the spine, untouched. `ConfirmNeeded` (rewrites values broadly).
+/// `RSC-005` — the three `playOrder` faults, repaired by one correct assignment.
+///
+/// epubveri reports them separately and they interlock: `ncx.play_order.duplicate`
+/// (different targets sharing a number), `ncx.play_order.target_mismatch` (one
+/// target reached by elements carrying different numbers) and
+/// `ncx.play_order.gap` (a number with no predecessor). Satisfying any one of
+/// them naively breaks another, so this renumbers the whole NCX the way the
+/// format defines: **1-based, dense, in document order, and elements naming the
+/// same target share the first number that target was given.**
+///
+/// **That last clause is why this fixer was rewritten.** It used to number every
+/// `playOrder` by its position in the file, which is unique but target-blind — on
+/// a book whose navigation reaches one position by two routes it would have
+/// *created* `target_mismatch`. No shelf book had that shape, so nothing showed;
+/// the defect was found by reading epubveri's rule, which skips a repeated number
+/// when all its holders share a target ("one position, reached by several routes —
+/// legitimate").
+///
+/// `playOrder` is only a hint; the real reading order is the spine, untouched.
+/// `ConfirmNeeded` (rewrites values broadly).
 fn ncx_play_order(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
     let files: BTreeSet<&str> = report
         .messages
         .iter()
-        .filter(|m| m.rule == Some("ncx.play_order.duplicate"))
+        .filter(|m| {
+            matches!(
+                m.rule,
+                Some("ncx.play_order.duplicate")
+                    | Some("ncx.play_order.target_mismatch")
+                    | Some("ncx.play_order.gap")
+            )
+        })
         .filter_map(|m| m.location.as_deref())
         .collect();
 
@@ -780,16 +804,22 @@ fn ncx_play_order(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
                 Some("ncx.play_order.duplicate"),
             ),
             tier: Tier::ConfirmNeeded,
-            title: format!("Renumber {count} NCX playOrder values by document order in {file}"),
+            title: format!("Renumber {count} NCX playOrder values in {file}"),
             rationale:
-                "Navigation elements repeat a playOrder value. playOrder is defined to mirror \
-                 document order, so renumbering every one to its 1-based document position makes \
-                 the values unique and canonical. It is only a hint — the reading order a system \
+                "The NCX's playOrder values are inconsistent — repeated across different targets, \
+                 disagreeing about one target, or leaving a gap. playOrder is defined to mirror \
+                 document order, so every value is reassigned densely from 1 in document order, \
+                 with elements naming the same target sharing the number that target was first \
+                 given. That is the assignment the format defines, and it satisfies all three \
+                 conditions at once. playOrder is only a hint — the reading order a system \
                  follows is the spine, which is not touched."
                     .to_string(),
             preview: vec![Change {
                 path: file.to_string(),
-                note: format!("renumber {count} playOrder values → 1, 2, 3, … (document order)"),
+                note: format!(
+                    "renumber {count} playOrder values densely by document order, \
+                     same target → same number"
+                ),
             }],
             apply_fn: Box::new(move |ws: &mut Workspace| {
                 if let Some(text) = ws.get_text(&file_for_apply) {
@@ -807,35 +837,55 @@ fn ncx_play_order(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
 /// tags). Returns the new text and how many values were renumbered. Boundary-
 /// checked so a longer attribute name never matches.
 fn renumber_play_order(text: &str) -> (String, usize) {
-    let mut out = String::with_capacity(text.len());
-    let mut pos = 0usize;
+    let Some(doc) = parse_xml(text) else {
+        return (text.to_string(), 0);
+    };
+    // Document order, every element that carries a playOrder.
+    let mut assigned: BTreeMap<String, u32> = BTreeMap::new();
     let mut counter = 0u32;
-    let bytes = text.as_bytes();
-    while let Some(rel) = text[pos..].find("playOrder=") {
-        let attr = pos + rel;
-        // Attribute-name boundary: the char before `playOrder` must not continue
-        // a name (else this is a suffix of some other attribute).
-        let preceded_ok = attr == 0
-            || !matches!(bytes[attr - 1], b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b':');
-        let vstart = attr + "playOrder=".len();
-        let quote = bytes.get(vstart).copied();
-        if !preceded_ok || !matches!(quote, Some(b'"') | Some(b'\'')) {
-            out.push_str(&text[pos..vstart.min(text.len())]);
-            pos = vstart.min(text.len());
+    let mut edits: Vec<MetaEdit> = Vec::new();
+    let mut n = 0usize;
+
+    for node in doc.descendants().filter(|d| d.is_element()) {
+        let Some(attr) = node.attributes().find(|a| a.name() == "playOrder") else {
             continue;
-        }
-        let q = quote.unwrap() as char;
-        let Some(vend_rel) = text[vstart + 1..].find(q) else {
-            break;
         };
-        let vend = vstart + 1 + vend_rel;
-        counter += 1;
-        out.push_str(&text[pos..=vstart]); // through the opening quote
-        out.push_str(&counter.to_string());
-        pos = vend; // resume at the closing quote (copied next round)
+        // The target this element navigates to, if it names one. An element with
+        // no `<content src>` cannot share a position with anything, so it is
+        // keyed uniquely by its own byte offset.
+        let target = node
+            .children()
+            .find(|c| c.is_element() && c.tag_name().name() == "content")
+            .and_then(|c| c.attr_no_ns("src"))
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|| format!("\u{0}{}", node.range().start));
+
+        let value = *assigned.entry(target).or_insert_with(|| {
+            counter += 1;
+            counter
+        });
+
+        if let Some(span) = attr_value_span(text, attr.range()) {
+            n += 1;
+            edits.push(MetaEdit {
+                range: span,
+                replacement: value.to_string(),
+            });
+        }
     }
-    out.push_str(&text[pos..]);
-    (out, counter as usize)
+    if edits.is_empty() {
+        return (text.to_string(), 0);
+    }
+    (apply_edits(text, edits), n)
+}
+
+/// The span of an attribute's *value* given the whole `name="value"` range.
+fn attr_value_span(text: &str, attr: Range<usize>) -> Option<Range<usize>> {
+    let raw = text.get(attr.clone())?;
+    let open = raw.find(['"', '\''])?;
+    let quote = raw.as_bytes()[open] as char;
+    let close = raw[open + 1..].find(quote)? + open + 1;
+    Some((attr.start + open + 1)..(attr.start + close))
 }
 
 /// Derive a valid XML NCName from an invalid `id`, preserving as much of the
@@ -5274,9 +5324,41 @@ mod tests {
 
     #[test]
     fn play_order_handles_single_quotes() {
-        let (out, n) = renumber_play_order("<x playOrder='5'/><y playOrder='5'/>");
+        // One root, because the renumbering now parses the NCX rather than
+        // scanning it — see `an_ncx_that_will_not_parse_is_declined`.
+        let (out, n) = renumber_play_order("<navMap><x playOrder='5'/><y playOrder='5'/></navMap>");
         assert_eq!(n, 2);
-        assert_eq!(out, "<x playOrder='1'/><y playOrder='2'/>");
+        assert_eq!(out, "<navMap><x playOrder='1'/><y playOrder='2'/></navMap>");
+    }
+
+    /// Elements naming the same target must carry the *same* playOrder — one
+    /// position reached by two routes. The old scan numbered by file position and
+    /// would have created `ncx.play_order.target_mismatch` here.
+    #[test]
+    fn play_order_gives_one_target_one_number() {
+        let ncx = r#"<navMap><navPoint playOrder="9"><content src="a.xhtml"/></navPoint><navPoint playOrder="4"><content src="b.xhtml"/></navPoint><navPoint playOrder="7"><content src="a.xhtml"/></navPoint></navMap>"#;
+        let (out, n) = renumber_play_order(ncx);
+        assert_eq!(n, 3);
+        assert_eq!(
+            out,
+            r#"<navMap><navPoint playOrder="1"><content src="a.xhtml"/></navPoint><navPoint playOrder="2"><content src="b.xhtml"/></navPoint><navPoint playOrder="1"><content src="a.xhtml"/></navPoint></navMap>"#,
+            "a.xhtml keeps the number it was first given; numbering stays dense"
+        );
+    }
+
+    /// Dense from 1, so a gap cannot survive the renumbering either.
+    #[test]
+    fn play_order_closes_gaps() {
+        let ncx = r#"<navMap><navPoint playOrder="1"><content src="a.xhtml"/></navPoint><navPoint playOrder="17"><content src="b.xhtml"/></navPoint></navMap>"#;
+        let (out, _) = renumber_play_order(ncx);
+        assert!(out.contains(r#"playOrder="2""#), "{out}");
+    }
+
+    #[test]
+    fn an_ncx_that_will_not_parse_is_declined() {
+        let (out, n) = renumber_play_order("<navMap><navPoint playOrder=\"1\">");
+        assert_eq!(n, 0, "nothing is rewritten in a document we cannot read");
+        assert_eq!(out, "<navMap><navPoint playOrder=\"1\">");
     }
 
     #[test]

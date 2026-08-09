@@ -39,6 +39,29 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
 ### Changed
 
+- **`fix.ncx_play_order` now repairs all three `playOrder` faults, and no longer
+  risks creating one.** epubveri reports `duplicate` (different targets sharing a
+  number), `target_mismatch` (one target reached by different numbers) and `gap`
+  separately, and they interlock — satisfying one naively breaks another. The
+  fixer now reassigns the whole NCX as the format defines: 1-based, dense, in
+  document order, with elements naming the same target sharing the first number
+  that target was given.
+
+  The previous version numbered by position in the file — unique and dense, but
+  **target-blind**, so on a book whose navigation reaches one position by two
+  routes it would have *created* `target_mismatch`. No shelf book had that shape,
+  so no audit could have shown it; the defect surfaced from reading epubveri's own
+  rule, which skips a repeated number when all its holders name the same target.
+  A corpus cannot find that class of defect; the detector's source can.
+
+  The renumbering now **parses** the NCX rather than scanning it for
+  `playOrder=`, since a target cannot be read off a string — so an NCX that will
+  not parse is declined rather than rewritten, consistent with the other
+  structural fixers.
+
+  **Measured:** 8 `target_mismatch` and 1 `gap` cleared on top of the 14
+  `duplicate`, nothing introduced, and **one more book reaches fully valid**.
+
 - **The body-level wrapper now also works inside `<blockquote>` — the single
   largest lever this project has found.** XHTML 1.1 requires block content in
   `<blockquote>` exactly as it does in `<body>`, and the 10 EPUB 2 books added on

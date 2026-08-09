@@ -39,7 +39,7 @@ grows one carefully-argued entry at a time.
 | `HTM-004` | `htm.doctype.epub3_obsolete_public_id` | AutoSafe | An EPUB 3 document's DOCTYPE carries an obsolete PUBLIC identifier | [Reduce it to `<!DOCTYPE html>`](#htm-004--obsolete-or-unrecognized-doctype) |
 | `HTM-004` | `htm.doctype.epub2_unrecognized_public_id` | ConfirmNeeded | An EPUB 2 document's DOCTYPE isn't a recognized XHTML 1.1 / OEB identifier | [Canonicalize a malformed XHTML 1.1 id; decline a genuinely different DTD](#htm-004--obsolete-or-unrecognized-doctype) |
 | `RSC-005` | `ncx.ids.duplicate_id` | ConfirmNeeded | Two or more NCX elements share an `id` | [Keep the first, rename later duplicates uniquely](#rsc-005--ncx-internal-consistency) |
-| `RSC-005` | `ncx.play_order.duplicate` | ConfirmNeeded | Navigation elements repeat a `playOrder` value | [Renumber `playOrder` by document order](#rsc-005--ncx-internal-consistency) |
+| `RSC-005` | `ncx.play_order.duplicate`, `…target_mismatch`, `…gap` | ConfirmNeeded | The NCX's `playOrder` values are inconsistent | [Reassign densely by document order, same target → same number](#rsc-005--ncx-internal-consistency) |
 | `RSC-007` | `opf.guide.reference_missing_resource` | ConfirmNeeded | A `<guide>` reference points at a resource that doesn't exist | [Drop the reference; drop the guide if it empties](#rsc-007--rsc-017--guide-references) |
 | `RSC-017` | `opf.guide.duplicate_reference` | ConfirmNeeded | Two `<guide>` references share a `type` and `href` | [Keep the first, drop the duplicates](#rsc-007--rsc-017--guide-references) |
 | `RSC-005` | `htm.obsolete_attribute` (`params[0] == "name"`) | AutoSafe | A legacy `<a name>` anchor duplicating the element's own `id` | [Drop the `name` attribute](#rsc-005--a-legacy-name-attribute-on-a) |
@@ -1328,3 +1328,37 @@ approving half of this would leave a finding epubsana created itself.
 is the honest headline: this fixer's value is that it refuses to guess about a
 book's identity six times out of ten, and the three it does repair need no guess
 at all.
+
+---
+
+## RSC-005 — the three `playOrder` faults (an addendum to NCX internal consistency)
+
+epubveri reports three separate `playOrder` rules and they interlock, so
+satisfying one naively breaks another:
+
+- `ncx.play_order.duplicate` — **different** targets sharing a number.
+- `ncx.play_order.target_mismatch` — **one** target reached by elements carrying
+  different numbers.
+- `ncx.play_order.gap` — a number with no predecessor.
+
+`fix.ncx_play_order` now reassigns the whole NCX the way the format defines:
+**1-based, dense, in document order, and elements naming the same target share
+the first number that target was given.** That satisfies all three at once, and
+no assignment satisfying all three differs from it.
+
+**Why it was rewritten, and the defect it removes.** The first version numbered
+every `playOrder` by its position in the file — unique, dense, and *target-blind*.
+On a book whose navigation reaches one position by two routes it would have
+**created** `target_mismatch`. No shelf book had that shape, so no audit could
+show it; the defect surfaced by reading epubveri's own rule, which skips a
+repeated number when all its holders name the same target ("one position, reached
+by several routes — legitimate"). This is the class of defect a corpus cannot
+find, and reading the detector's source can.
+
+**A behaviour change worth naming:** the renumbering now **parses** the NCX
+instead of scanning it for `playOrder=`, because a target cannot be read off a
+string. An NCX that will not parse is therefore declined rather than rewritten —
+consistent with every other structural fixer here, and stricter than before.
+
+**Measured.** 14 `duplicate` + 8 `target_mismatch` + 1 `gap` cleared across the
+shelf, nothing introduced, and one more book reaches fully valid (5 → **6**).
