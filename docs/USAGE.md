@@ -307,6 +307,7 @@ safe, and when epubsana declines, see the **[fix catalogue](./FIXERS.md)**.
 | `RSC-005` | `ncx.play_order.duplicate`, `…target_mismatch`, `…gap` | ConfirmNeeded | The NCX's `playOrder` values are inconsistent — repeated across different targets, disagreeing about one target, or leaving a gap. All three interlock, so every value is reassigned the way the format defines: 1-based, dense, in document order, with elements naming the same target sharing the number that target was first given. `playOrder` is only a hint; the real reading order (the spine) is untouched. An NCX that will not parse is declined. |
 | `RSC-007` | `opf.guide.reference_missing_resource` | ConfirmNeeded | Drops an EPUB 2 `<guide>` reference whose `href` resolves to no resource in the container — a landmark pointing at a hole. If that leaves the `<guide>` empty (invalid, and the element is optional), the `<guide>` is dropped too. Matches on the reported `href`; paths aren't re-resolved. |
 | `RSC-017` | `opf.guide.duplicate_reference` | ConfirmNeeded | Two or more `<guide>` references share the same `type` **and** `href`. Keeps the first and drops the redundant repeats. References with the same `type` but different `href` (e.g. several `type="text"`) are not duplicates and are left alone. |
+| `RSC-012` | `opf.guide.reference_fragment_not_defined` | ConfirmNeeded | A `<guide>` reference points into a document that **exists**, at a `#fragment` that document doesn't define — typically an anchor left behind by a conversion. The fragment is dropped and the path kept. This changes no behaviour: a fragment resolving to no `id` already opens that document at the top, exactly where the fragment-less href lands, so the edit writes down what the book already does. The landmark's target document is untouched, and the fragment is never repointed at some other `id` — that would be a guess. Declines when dropping the fragment would make the reference identical in `type` and `href` to another one in the same guide, which would trade this finding for a duplicate-reference one. |
 | `RSC-005` | `htm.obsolete_attribute` (`name` on `<a>`) | AutoSafe | Drops the legacy `<a name="x">` attribute where the element already carries `id="x"` — the anchor is declared the modern way too, so every `#fragment` pointing at it still resolves and nothing is lost. An `<a name>` with **no** `id`, or with a *different* `id`, is left alone (renaming could produce an invalid or duplicate id; dropping would break the fragment). Other obsolete attributes in the same family, such as `<br clear>`, are left alone too — presentational intent has no single markup equivalent. |
 | `RSC-005` | `opf.content_document.schema_violation` (empty `lang`/`xml:lang`) | ConfirmNeeded | Deletes an empty `lang=""` / `xml:lang=""`, which EPUB 2's grammar does not allow. Not a no-op, which is why you are asked: the element declared "undetermined" and will now inherit its parent's language, and reading systems use that for hyphenation, text-to-speech and font selection. A *malformed* tag (`en_US`) is left alone — repairing it would mean guessing the language. |
 
@@ -331,6 +332,11 @@ Note the shape of the two dangling-reference fixers: they only ever delete a
 pointer to something that **isn't there**, which is why deleting loses nothing.
 A reference to a resource that *does* exist is never dropped to silence a
 finding — that would be destroying content to make a validator happy.
+
+The dangling-fragment fixer is the other side of that same rule. There the
+target document *does* exist, so the reference is real and only the position
+inside it is broken — which is exactly why that fixer drops the fragment and
+keeps the reference, instead of deleting the whole thing.
 
 More fixers land in real-world impact order. See
 [epubveri](https://github.com/veripublica/epubveri) for the full catalogue of

@@ -363,7 +363,7 @@ is one rule spanning a whole grammar, matching it takes two conditions:
   judgement rather than a determinate repair. `<head>` wants a `<title>`, which is
   a different repair again. Every other container is declined.
 
-  Measured on the 125-book shelf, that rule is not a compromise — it is the whole
+  Measured on the then-125-book shelf (2026-08-09), that rule is not a compromise — it is the whole
   population: **stray text is reported in exactly two containers**, `blockquote`
   (2,508 findings) and `body` (289), and nothing else. `ol`, `ul` and `head`
   appear only under *incomplete content*, at one or two findings each.
@@ -1338,7 +1338,7 @@ above. Both whole-shelf instruments report nothing introduced.
   *does* carry `id="X"` is empty.
 
 Either way the package declares which identifier is canonical and that
-declaration lands on nothing a reading system can use. On the 125-book shelf the
+declaration lands on nothing a reading system can use. On the then-125-book shelf (2026-08-09) the
 two rules hit **disjoint sets of five books each**.
 
 **Fix** (`fix.package_identifier`, ConfirmNeeded). Make the declaration point at
