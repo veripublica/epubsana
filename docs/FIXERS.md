@@ -40,8 +40,9 @@ grows one carefully-argued entry at a time.
 | `HTM-004` | `htm.doctype.epub2_unrecognized_public_id` | ConfirmNeeded | An EPUB 2 document's DOCTYPE isn't a recognized XHTML 1.1 / OEB identifier | [Canonicalize a malformed XHTML 1.1 id; decline a genuinely different DTD](#htm-004--obsolete-or-unrecognized-doctype) |
 | `RSC-005` | `ncx.ids.duplicate_id` | ConfirmNeeded | Two or more NCX elements share an `id` | [Keep the first, rename later duplicates uniquely](#rsc-005--ncx-internal-consistency) |
 | `RSC-005` | `ncx.play_order.duplicate`, `…target_mismatch`, `…gap` | ConfirmNeeded | The NCX's `playOrder` values are inconsistent | [Reassign densely by document order, same target → same number](#rsc-005--ncx-internal-consistency) |
-| `RSC-007` | `opf.guide.reference_missing_resource` | ConfirmNeeded | A `<guide>` reference points at a resource that doesn't exist | [Drop the reference; drop the guide if it empties](#rsc-007--rsc-017--guide-references) |
-| `RSC-017` | `opf.guide.duplicate_reference` | ConfirmNeeded | Two `<guide>` references share a `type` and `href` | [Keep the first, drop the duplicates](#rsc-007--rsc-017--guide-references) |
+| `RSC-007` | `opf.guide.reference_missing_resource` | ConfirmNeeded | A `<guide>` reference points at a resource that doesn't exist | [Drop the reference; drop the guide if it empties](#rsc-007--rsc-017--rsc-012--guide-references) |
+| `RSC-017` | `opf.guide.duplicate_reference` | ConfirmNeeded | Two `<guide>` references share a `type` and `href` | [Keep the first, drop the duplicates](#rsc-007--rsc-017--rsc-012--guide-references) |
+| `RSC-012` | `opf.guide.reference_fragment_not_defined` | ConfirmNeeded | A `<guide>` reference's `#fragment` resolves to no `id` in a target that does exist | [Drop the fragment, keep the document](#rsc-007--rsc-017--rsc-012--guide-references) |
 | `RSC-005` | `htm.obsolete_attribute` (`params[0] == "name"`) | AutoSafe | A legacy `<a name>` anchor duplicating the element's own `id` | [Drop the `name` attribute](#rsc-005--a-legacy-name-attribute-on-a) |
 | `RSC-005` | `opf.content_document.schema_violation` (empty `lang`/`xml:lang`) | ConfirmNeeded | An empty language tag, which EPUB 2's grammar does not allow | [Delete the attribute](#rsc-005--an-empty-lang--xmllang) |
 | `RSC-005` | `opf.content_document.schema_violation` (`params[0] == "id"`) | ConfirmNeeded | An `id` that is not a valid XML NCName (on the shelf: it starts with a digit) | [Rename it, moving every reference with it](#rsc-005--an-id-that-is-not-a-valid-ncname-the-first-cross-file-fixer) |
@@ -800,13 +801,18 @@ member is fixed where determinate and declined where it would require invention.
 
 ---
 
-## RSC-007 / RSC-017 — guide references
+## RSC-007 / RSC-017 / RSC-012 — guide references
 
 The EPUB 2 `<guide>` is a list of `<reference type="…" href="…"/>` pointers to
-structural landmarks (cover, toc, text). Both defects here are cleared by
-**deleting** a reference — a guide reference is pure navigation, so removing a
-broken or redundant one loses nothing a reader can reach. This closes the whole
-`opf.guide` family (its only two rules).
+structural landmarks (cover, toc, text). All three defects here are cleared by
+**deleting** something — a whole reference, a redundant repeat, or a fragment
+that resolves nowhere. A guide reference is pure navigation, so removing a broken
+or redundant pointer loses nothing a reader can reach. This closes the whole
+`opf.guide` family (all three of its rules).
+
+The family was "complete" at two rules until epubveri 0.9.16 added the third,
+which is the ordinary way a closed family reopens: **a family is closed against
+the rules that exist, not for good.**
 
 ### `opf.guide.reference_missing_resource` — `fix.guide_dangling_reference`, ConfirmNeeded
 
@@ -847,6 +853,60 @@ Removing it cannot change what any landmark resolves to. It cannot empty the gui
 
 **When it declines.** If the OPF won't parse, or fewer than two references share a
 `(type, href)` (a stale finding never deletes anything).
+
+### `opf.guide.reference_fragment_not_defined` — `fix.guide_dangling_fragment`, ConfirmNeeded
+
+**Finding.** `RSC-012`, new in epubveri 0.9.16. A `<guide>` reference's `href`
+carries a `#fragment`, the **document it names exists**, and the fragment resolves
+to no `id` in it. epubveri reports `params[0]` = the fragment, `params[1]` = the
+resolved path of the target document. It is the guide-side sibling of
+`opf.ncx.content_fragment_not_defined`.
+
+The detector has already excluded the cases that are not this defect: an empty
+fragment (which addresses the document itself), a fragment carrying `=`, `:` or
+`(` (a CFI or media fragment, not an id), and a target that could not be read or
+parsed — where whether the fragment resolves is *unknown*, and epubveri says
+nothing rather than guessing. So a finding that arrives here means the target
+parsed cleanly and genuinely does not contain that `id`.
+
+**Fix.** Drop the `#fragment`, keeping the `href`'s path. The reference goes on
+naming the same document; it stops claiming a position inside it.
+
+    <reference type="toc" href="Text/ch1.html#filepos16691"/>
+    →
+    <reference type="toc" href="Text/ch1.html"/>
+
+**Why it's safe.** This is the one repair in the family that deletes nothing a
+reader could otherwise reach, because **the behaviour is already what the repair
+writes down.** A fragment that resolves to no `id` does not take a reading system
+anywhere: it opens the document and lands at the top — exactly where the
+fragment-less href lands. The edit makes the file state what already happens, and
+the author's real choice, *which document is the landmark*, is preserved
+untouched.
+
+The corpus case is the shape that produces this: a `filepos…` anchor left behind
+by a MOBI conversion, pointing into a document that a later split rewrote to hold
+no ids at all. Nothing in the book records the position it meant, so there is
+nothing to recover — and inventing a target `id`, or picking the "nearest" one,
+would be guessing at the author's intent, which this project does not do.
+
+Two repairs were considered and rejected. **Dropping the whole `<reference>`**
+(what the two sibling fixers do) is wrong here: the target document exists, so the
+landmark is real and only its sub-position is broken — deleting it would throw
+away working navigation to fix a dangling anchor. **Retargeting the fragment to
+some other `id`** is inventing.
+
+**When it declines.**
+
+- The OPF won't parse, or no `<reference>` carries the exact reported `href`.
+- **Dropping the fragment would collide with another reference.** If the
+  post-edit `(type, href)` pair equals that of any other reference in the same
+  guide, the edit would clear an `RSC-012` and create an `RSC-017`
+  (`opf.guide.duplicate_reference`) — a fix that leaves the book no better. That
+  reference is left alone; any other flagged reference in the same guide is still
+  repaired. Collisions are checked against the **whole post-edit guide**, so two
+  flagged references that would become identical to *each other* are both
+  declined, not silently merged.
 
 **Note on `OPF-031`.** A dangling guide reference is often co-reported as `OPF-031`
 ("not declared in the manifest"), which carries no `rule` sub-code. Dropping the

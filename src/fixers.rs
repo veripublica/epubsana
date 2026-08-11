@@ -36,6 +36,7 @@ pub fn plan(report: &Report, ws: &Workspace, _goal: Goal) -> Vec<ProposedFix> {
     fixes.extend(spine_duplicate_itemrefs(report, ws));
     fixes.extend(guide_dangling_references(report, ws));
     fixes.extend(guide_duplicate_references(report, ws));
+    fixes.extend(guide_dangling_fragments(report, ws));
     fixes.extend(content_document_invalid_ids(report, ws));
     fixes.extend(content_document_duplicate_ids(report, ws));
     fixes.extend(reference_wrong_path(report, ws));
@@ -94,6 +95,7 @@ pub fn handled_rules() -> &'static [&'static str] {
         // Two shapes inside it: stray text in <body>, and an empty lang.
         "opf.content_document.schema_violation",
         "opf.guide.duplicate_reference",
+        "opf.guide.reference_fragment_not_defined",
         "opf.guide.reference_missing_resource",
         "opf.manifest_item.missing_resource",
         "opf.manifest_item.unencoded_space_in_href",
@@ -2798,6 +2800,178 @@ fn compute_guide_duplicate_edits(opf: &str) -> Option<Vec<MetaEdit>> {
         }
     }
     (!edits.is_empty()).then_some(edits)
+}
+
+/// `RSC-012` / `opf.guide.reference_fragment_not_defined` (epubveri 0.9.16+): a
+/// `<guide>` reference's `#fragment` resolves to no `id` in a target document
+/// that **does** exist. Drop the fragment and keep the path: the reference goes
+/// on naming the same document and stops claiming a position inside it.
+///
+/// This is the one member of the family that deletes nothing reachable. A
+/// fragment resolving to no `id` already takes a reading system to the top of the
+/// document — exactly where the fragment-less href lands — so the edit writes
+/// down the behaviour the book already has, and the author's real choice (*which*
+/// document is the landmark) is untouched. Dropping the whole reference, as the
+/// two sibling fixers do, would throw away working navigation; retargeting the
+/// fragment at some other `id` would be inventing.
+///
+/// `params[0]` is the fragment and `params[1]` the resolved target path. Both are
+/// matched, so a reference is only edited when it is the one epubveri blamed.
+/// `ConfirmNeeded`.
+fn guide_dangling_fragments(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    // file -> the (fragment, resolved target) pairs flagged in it.
+    let mut by_file: BTreeMap<String, BTreeSet<(String, String)>> = BTreeMap::new();
+    for m in &report.messages {
+        if m.rule != Some("opf.guide.reference_fragment_not_defined") {
+            continue;
+        }
+        let (Some(file), Some(frag), Some(target)) =
+            (m.location.as_deref(), m.params.first(), m.params.get(1))
+        else {
+            continue;
+        };
+        by_file
+            .entry(file.to_string())
+            .or_default()
+            .insert((frag.clone(), target.clone()));
+    }
+
+    let mut fixes = Vec::new();
+    for (file, flagged) in by_file {
+        let Some(text) = ws.get_text(&file) else {
+            continue;
+        };
+        let Some(rewrites) = compute_guide_fragment_edits(&text, &file, &flagged) else {
+            continue;
+        };
+        let n = rewrites.len();
+        let listed = rewrites
+            .iter()
+            .map(|(from, to, _)| format!("{from} → {to}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let file_for_apply = file.clone();
+        let flagged_for_apply = flagged.clone();
+        fixes.push(ProposedFix {
+            fix_id: "fix.guide_dangling_fragment",
+            addresses_id: "RSC-012".to_string(),
+            addresses_rule: Some("opf.guide.reference_fragment_not_defined"),
+            addresses_severity: addressed_severity(
+                report,
+                "RSC-012",
+                Some("opf.guide.reference_fragment_not_defined"),
+            ),
+            tier: Tier::ConfirmNeeded,
+            title: format!("Drop {n} dangling guide fragment(s) in {file} ({listed})"),
+            rationale:
+                "A guide reference points into a document that exists, at a fragment that document \
+                 does not define — typically an anchor left behind by a conversion. It already \
+                 takes a reader to the top of that document, because there is nothing else for it \
+                 to resolve to, so dropping the fragment changes no behaviour: it makes the file \
+                 say what already happens. The path, and with it the landmark's target document, \
+                 is kept exactly as written. Nothing in the book records the position the fragment \
+                 meant, so it is not repointed — that would be a guess."
+                    .to_string(),
+            preview: rewrites
+                .iter()
+                .take(6)
+                .map(|(from, to, _)| Change {
+                    path: file.clone(),
+                    note: format!("rewrite href {from} → {to}"),
+                })
+                .collect(),
+            apply_fn: Box::new(move |ws: &mut Workspace| {
+                if let Some(text) = ws.get_text(&file_for_apply)
+                    && let Some(rewrites) =
+                        compute_guide_fragment_edits(&text, &file_for_apply, &flagged_for_apply)
+                {
+                    let edits = rewrites.into_iter().map(|(_, _, edit)| edit).collect();
+                    ws.set_text(&file_for_apply, apply_edits(&text, edits));
+                }
+            }),
+        });
+    }
+    fixes
+}
+
+/// The href rewrites clearing every flagged dangling fragment in one OPF, as
+/// `(href before, href after, edit)`. `None` (decline) if the OPF won't parse or
+/// no reference matches a flagged `(fragment, target)` pair.
+///
+/// **The collision guard is the reason this returns the whole post-edit guide's
+/// worth of state rather than one edit at a time.** Dropping a fragment can make
+/// a reference identical to another one — clearing an `RSC-012` by creating an
+/// `RSC-017` (`opf.guide.duplicate_reference`), which leaves the book no better.
+/// A reference whose post-edit `(type, href)` pair is already claimed is left
+/// alone; every other flagged reference in the same guide is still repaired. The
+/// pairs are collected over the whole guide **after** the edits, so two flagged
+/// references that would collide with *each other* are both declined rather than
+/// silently merged.
+#[allow(clippy::type_complexity)]
+fn compute_guide_fragment_edits(
+    opf: &str,
+    opf_path: &str,
+    flagged: &BTreeSet<(String, String)>,
+) -> Option<Vec<(String, String, MetaEdit)>> {
+    let doc = parse_xml(opf)?;
+    let base = dir_of(opf_path);
+    let refs = guide_references(&doc);
+
+    // Every reference that epubveri blamed, with the href it would become.
+    let mut candidates: Vec<(roxmltree::Node, String, String)> = Vec::new();
+    for r in &refs {
+        let Some(href) = r.attr_no_ns("href") else {
+            continue;
+        };
+        let Some((path, frag)) = href.split_once('#') else {
+            continue;
+        };
+        if !flagged.contains(&(frag.to_string(), resolve_href(&base, href))) {
+            continue;
+        }
+        candidates.push((*r, href.to_string(), path.to_string()));
+    }
+    if candidates.is_empty() {
+        return None;
+    }
+
+    // The `(type, href)` pairs the guide would hold once every candidate is
+    // rewritten — the set a collision is measured against.
+    let dropping: BTreeSet<u32> = candidates.iter().map(|(r, _, _)| r.id().get()).collect();
+    let mut occupied: BTreeMap<(String, String), usize> = BTreeMap::new();
+    for r in &refs {
+        let ty = r.attr_no_ns("type").unwrap_or("").to_string();
+        let href = match r.attr_no_ns("href") {
+            Some(h) if dropping.contains(&r.id().get()) => {
+                h.split('#').next().unwrap_or(h).to_string()
+            }
+            Some(h) => h.to_string(),
+            None => continue,
+        };
+        *occupied.entry((ty, href)).or_insert(0) += 1;
+    }
+
+    let mut out = Vec::new();
+    for (r, before, after) in candidates {
+        let ty = r.attr_no_ns("type").unwrap_or("").to_string();
+        // >1 holder of the post-edit pair means this rewrite would collide.
+        if occupied.get(&(ty, after.clone())).copied().unwrap_or(0) > 1 {
+            continue;
+        }
+        let Some(rewritten) = set_attr_value(&opf[r.range()], "href", &after) else {
+            continue;
+        };
+        out.push((
+            before,
+            after,
+            MetaEdit {
+                range: r.range(),
+                replacement: rewritten,
+            },
+        ));
+    }
+    (!out.is_empty()).then_some(out)
 }
 
 /// True if `c` may appear inside an id/fragment, so `#09` is not seen inside
@@ -5508,6 +5682,110 @@ mod tests {
     fn guide_duplicate_declines_when_nothing_repeats() {
         let opf = r#"<package><guide><reference type="cover" href="c.xhtml"/><reference type="text" href="t.xhtml"/></guide></package>"#;
         assert!(compute_guide_duplicate_edits(opf).is_none());
+    }
+
+    /// A guide with one reference carrying a fragment, in an OPF that sits in a
+    /// subdirectory — so the test also pins the `params[1]` resolution.
+    const FRAG_OPF: &str = r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0">
+  <guide>
+    <reference type="toc" title="Contents" href="Text/ch1.html#filepos16691"/>
+    <reference type="cover" title="Cover" href="Text/cover.xhtml"/>
+  </guide>
+</package>"#;
+
+    fn flagged(pairs: &[(&str, &str)]) -> BTreeSet<(String, String)> {
+        pairs
+            .iter()
+            .map(|(f, t)| (f.to_string(), t.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn guide_fragment_is_dropped_and_the_path_is_kept() {
+        let f = flagged(&[("filepos16691", "OEBPS/Text/ch1.html")]);
+        let rewrites = compute_guide_fragment_edits(FRAG_OPF, "OEBPS/content.opf", &f).unwrap();
+        assert_eq!(rewrites.len(), 1);
+        assert_eq!(rewrites[0].0, "Text/ch1.html#filepos16691");
+        assert_eq!(rewrites[0].1, "Text/ch1.html");
+
+        let out = apply_edits(FRAG_OPF, rewrites.into_iter().map(|(_, _, e)| e).collect());
+        assert!(out.contains(r#"href="Text/ch1.html""#));
+        assert!(!out.contains("filepos16691"), "the fragment is gone: {out}");
+        // The rest of the reference — and the rest of the guide — is untouched.
+        assert!(out.contains(r#"type="toc" title="Contents""#));
+        assert!(out.contains(r#"href="Text/cover.xhtml""#));
+    }
+
+    #[test]
+    fn guide_fragment_declines_when_the_target_does_not_match() {
+        // Right fragment, wrong document: this finding is about another book's
+        // reference, so nothing here is touched.
+        let f = flagged(&[("filepos16691", "OEBPS/Text/elsewhere.html")]);
+        assert!(compute_guide_fragment_edits(FRAG_OPF, "OEBPS/content.opf", &f).is_none());
+    }
+
+    #[test]
+    fn guide_fragment_declines_when_the_fragment_does_not_match() {
+        let f = flagged(&[("other", "OEBPS/Text/ch1.html")]);
+        assert!(compute_guide_fragment_edits(FRAG_OPF, "OEBPS/content.opf", &f).is_none());
+    }
+
+    #[test]
+    fn guide_fragment_declines_rather_than_creating_a_duplicate_reference() {
+        // Dropping the fragment would make this reference identical to the
+        // second one — clearing an RSC-012 by creating an RSC-017.
+        let opf = FRAG_OPF.replace(
+            r#"<reference type="cover" title="Cover" href="Text/cover.xhtml"/>"#,
+            r#"<reference type="toc" title="Contents" href="Text/ch1.html"/>"#,
+        );
+        let f = flagged(&[("filepos16691", "OEBPS/Text/ch1.html")]);
+        assert!(
+            compute_guide_fragment_edits(&opf, "OEBPS/content.opf", &f).is_none(),
+            "the repair would introduce a duplicate guide reference"
+        );
+    }
+
+    #[test]
+    fn guide_fragment_declines_a_pair_that_would_collide_with_each_other() {
+        // Two flagged references that would become identical: both are left
+        // alone rather than silently merged.
+        let opf = FRAG_OPF.replace(
+            r#"<reference type="cover" title="Cover" href="Text/cover.xhtml"/>"#,
+            r#"<reference type="toc" title="Contents" href="Text/ch1.html#filepos99"/>"#,
+        );
+        let f = flagged(&[
+            ("filepos16691", "OEBPS/Text/ch1.html"),
+            ("filepos99", "OEBPS/Text/ch1.html"),
+        ]);
+        assert!(compute_guide_fragment_edits(&opf, "OEBPS/content.opf", &f).is_none());
+    }
+
+    #[test]
+    fn guide_fragment_repairs_the_others_when_one_collides() {
+        // One flagged reference collides; a second, on a different document,
+        // does not — and is still repaired.
+        let opf = FRAG_OPF.replace(
+            r#"<reference type="cover" title="Cover" href="Text/cover.xhtml"/>"#,
+            r#"<reference type="toc" title="Contents" href="Text/ch1.html"/>
+    <reference type="text" title="Start" href="Text/ch2.html#nope"/>"#,
+        );
+        let f = flagged(&[
+            ("filepos16691", "OEBPS/Text/ch1.html"),
+            ("nope", "OEBPS/Text/ch2.html"),
+        ]);
+        let rewrites = compute_guide_fragment_edits(&opf, "OEBPS/content.opf", &f).unwrap();
+        assert_eq!(rewrites.len(), 1, "only the non-colliding one is repaired");
+        assert_eq!(rewrites[0].1, "Text/ch2.html");
+    }
+
+    #[test]
+    fn guide_fragment_leaves_a_fragmentless_reference_alone() {
+        // A reference with no `#` can never be this defect, whatever is flagged.
+        let opf =
+            r#"<package><guide><reference type="toc" href="Text/ch1.html"/></guide></package>"#;
+        let f = flagged(&[("filepos16691", "Text/ch1.html")]);
+        assert!(compute_guide_fragment_edits(opf, "content.opf", &f).is_none());
     }
 
     #[test]

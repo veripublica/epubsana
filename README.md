@@ -13,7 +13,7 @@ changed**. It never guesses, and it preserves everything it doesn't touch.
 ## Status
 
 Early but working. The core contract (`Workspace` → detect → propose → confirm →
-apply → report) is solid, with twenty-eight fixers so far:
+apply → report) is solid, with twenty-nine fixers so far:
 
 - **`RSC-016`** — undeclared HTML entities (`&nbsp;`, `&mdash;`, …) → the exact
   character each denotes.
@@ -65,6 +65,12 @@ apply → report) is solid, with twenty-eight fixers so far:
   itself if that empties it).
 - **`RSC-017` / `opf.guide.duplicate_reference`** — two guide references with the
   same `type` and `href` → the first kept, the duplicate dropped.
+- **`RSC-012` / `opf.guide.reference_fragment_not_defined`** — a guide reference
+  whose `#fragment` names no `id` in a target document that *does* exist → the
+  fragment dropped, the path kept. The reference already lands at the top of that
+  document, so this writes down what already happens; the fragment is never
+  repointed at some other `id`, and a rewrite that would collide with another
+  reference is declined instead.
 - **`RSC-005` / `htm.obsolete_attribute`** — a legacy `<a name="x">` on an element
   that already carries `id="x"` → the `name` dropped. Nothing that linked to the
   anchor moves; the fragment resolves through the `id`. An anchor with no `id`, or
