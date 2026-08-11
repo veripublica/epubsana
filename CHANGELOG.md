@@ -8,6 +8,60 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [0.9.1] - 2026-08-11
+
+### Added
+
+- **A fixer for a `<guide>` reference whose fragment resolves to nothing**
+  (`RSC-012` / `opf.guide.reference_fragment_not_defined`, a rule new in epubveri
+  0.9.16). The reference names a document that exists and parses, at a `#fragment`
+  that document does not define — on the shelf, a `filepos…` anchor left behind by
+  a MOBI conversion, pointing into a split file that holds no ids at all.
+
+  The fragment is dropped and the path kept:
+
+      <reference type="toc" href="Text/ch1.html#filepos16691"/>
+      →
+      <reference type="toc" href="Text/ch1.html"/>
+
+  This changes no behaviour, which is the argument for it: a fragment resolving to
+  no `id` already opens the document and lands at the top, exactly where the
+  fragment-less href lands, so the edit writes down what the book already does.
+  The author's real choice — *which* document is the landmark — is untouched.
+  Dropping the whole reference, as the two sibling guide fixers do, would have
+  thrown away working navigation; repointing the fragment at some other `id` would
+  have been inventing.
+
+  It declines when dropping the fragment would make the reference identical in
+  `(type, href)` to another one in the same guide — that would clear an `RSC-012`
+  by creating an `RSC-017` (`duplicate_reference`), leaving the book no better.
+  The check runs over the whole post-edit guide, so two flagged references that
+  would collide with *each other* are both declined rather than silently merged.
+
+  This completes the `opf.guide` family for the second time: it was closed at two
+  rules on 2026-07-18, and epubveri 0.9.16 added a third. A family is closed
+  against the rules that exist, not for good.
+
+### Changed
+
+- **The `epubveri` floor moves `0.9.7` → `0.9.16`**, for the same kind of reason
+  the 0.9.7 floor exists. Below 0.9.16, a package in the OEBPS 1.2
+  (`openebook.org`) namespace was judged by EPUB 2's rules and drew six invented
+  errors, one of them from a package grammar bound to the OPF namespace — which is
+  exactly what `fix.epub3_attr_in_epub2_package` dispatches on. On such a book that
+  fixer could have proposed deleting attributes from a package that was correct.
+
+  Unlike the `empty_title` case that set the previous floor, this one is **argued
+  rather than measured**: the corpus holds no OEBPS 1.2 book, so there is nothing
+  to reproduce it on.
+
+  Measured across the bump on 146 books, nothing else moved: the whole-shelf
+  regression audit is byte-identical between 0.9.14 and 0.9.16, and the full rule
+  census differs by exactly one row — the new guide-fragment rule, 1 finding in 1
+  book. epubveri 0.9.16 also lengthened two message texts; the three fixers that
+  match `opf.content_document.schema_violation` by message shape match a prefix,
+  so they are unaffected.
+
 ## [0.9.0] - 2026-08-09
 
 Twenty-four fixers to **twenty-eight**, plus the widest single extension this

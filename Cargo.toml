@@ -1,6 +1,6 @@
 [package]
 name = "epubsana"
-version = "0.9.0"
+version = "0.9.1"
 edition = "2024"
 rust-version = "1.88"
 description = "Repairs the EPUB defects epubveri detects — a pure-Rust, confirm-each-step EPUB fixer."
@@ -23,12 +23,25 @@ members = ["epubsana-wasm"]
 # into an error) and the `rule`/`params` sub-codes epubsana's fixers dispatch on
 # both arrived on the 0.5 line, the conventions-v0.4 one.
 #
-# **The floor is 0.9.7, and it is a correctness floor, not a preference.** On
-# 0.5.x, `opf.content_document.empty_title` was an EPUB 3 rule firing on EPUB 2
-# books, so epubsana's most active fixer wrote TOC labels into the `<title>` of
-# valid books (606 proposals on the 94-book shelf; 3 after the bump). 0.9.7 also
-# restores the per-run positions this crate's stray-text fixer follows upstream to
-# (epubveri #68). Nothing in between is safe to build against.
+# **The floor is 0.9.16, and it is a correctness floor, not a preference** — each
+# raise has been made for the same reason: below it, a detector false positive
+# makes some fixer here repair a book that was not broken.
+#
+# - **0.9.7.** On 0.5.x, `opf.content_document.empty_title` was an EPUB 3 rule
+#   firing on EPUB 2 books, so epubsana's most active fixer wrote TOC labels into
+#   the `<title>` of valid books (606 proposals on the 94-book shelf; 3 after the
+#   bump). 0.9.7 also restores the per-run positions this crate's stray-text fixer
+#   follows upstream to (epubveri #68).
+# - **0.9.16.** Below it, a package in the OEBPS 1.2 (`openebook.org`) namespace
+#   was judged by EPUB 2's rules and drew six invented errors, one of them from a
+#   package grammar bound to the OPF namespace — which is exactly the rule
+#   `fix.epub3_attr_in_epub2_package` dispatches on
+#   (`opf.package.schema_violation`). On such a book that fixer could have
+#   proposed deleting attributes from a package that was correct.
+#
+#   Unlike `empty_title` this one is **argued, not measured**: the shared shelf
+#   holds no OEBPS 1.2 book, so there is nothing here to reproduce it on. It is
+#   the same class, and the floor is where that class gets handled.
 #
 # The bump itself cost no source change: epubsana's whole surface is
 # `validate_bytes`, `report::{Report, Severity}` and the three `envelope` types
@@ -38,11 +51,14 @@ members = ["epubsana-wasm"]
 # Tracking policy, agreed with epubveri 2026-08-05: **track loosely** — a caret on
 # 0.9, re-measure when a minor lands, don't chase patches. For an irreversible
 # repairer, a newer detector only matters when the rules we consume move, and
-# across 24 releases exactly two of ours did.
+# across 24 releases exactly two of ours did. 0.9.14 → 0.9.16 was the same story
+# measured again: on the 146-book shelf the whole-shelf regression audit is
+# byte-identical across the two, and the full rule census differs by exactly one
+# row — the new `opf.guide.reference_fragment_not_defined`, 1 finding in 1 book.
 #
 # For local co-development of epubveri, add an uncommitted override:
 #   [patch.crates-io] epubveri = { path = "../epubveri" }
-epubveri = "0.9.7"
+epubveri = "0.9.16"
 # Pure-Rust only (no C deps), same philosophy as epubveri: zip's "deflate"
 # feature uses zlib-rs (Rust) on the 8.x line; bzip2/zstd (C) stay disabled.
 # Aligned to epubveri's zip major — the family shares one zip version because
