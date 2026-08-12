@@ -44,6 +44,8 @@ pub fn plan(report: &Report, ws: &Workspace, _goal: Goal) -> Vec<ProposedFix> {
     fixes.extend(nested_anchors(report, ws));
     fixes.extend(epub3_attrs_in_epub2_package(report, ws));
     fixes.extend(empty_dc_date(report, ws));
+    fixes.extend(empty_metadata_element(report, ws));
+    fixes.extend(non_preferred_media_type(report, ws));
     fixes.extend(mimetype_packaging(report, ws));
     // Future fixers append here, in a sensible confirm order — and in
     // `handled_rules()` below.
@@ -98,7 +100,9 @@ pub fn handled_rules() -> &'static [&'static str] {
         "opf.guide.reference_fragment_not_defined",
         "opf.guide.reference_missing_resource",
         "opf.manifest_item.missing_resource",
+        "opf.manifest_item.non_preferred_media_type",
         "opf.manifest_item.unencoded_space_in_href",
+        "opf.metadata.empty_element",
         "opf.package.opf_identifier_not_empty",
         "opf.package.schema_violation",
         "opf.package.unique_identifier_unresolved",
@@ -4252,6 +4256,244 @@ fn compute_empty_dc_date_edits(opf: &str) -> Option<Vec<MetaEdit>> {
     (!edits.is_empty()).then_some(edits)
 }
 
+/// `OPF-072` / `opf.metadata.empty_element`: an optional Dublin Core element in
+/// `<metadata>` with no content. The sibling of [`empty_dc_date`], generalised to
+/// the rest of the optional DC set, and safe for the identical reason: an empty
+/// element states nothing, so there is no value in it to lose.
+///
+/// **Most of the safety lives upstream, deliberately.** epubveri emits this rule
+/// on EPUB 2 only and excludes `identifier`, `date`, `title` and `language` by
+/// name, so the three required elements can never reach here and `dc:date` —
+/// which has its own rule and its own fixer — cannot draw two proposals for one
+/// element. The exclusion is re-stated below anyway: a fixer that deletes things
+/// and depends silently on an upstream list breaks quietly the day that list
+/// moves.
+///
+/// `ConfirmNeeded`, matching its sibling: the edit is a deletion, however empty
+/// the thing deleted.
+fn empty_metadata_element(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    let files: BTreeSet<&str> = report
+        .messages
+        .iter()
+        .filter(|m| m.rule == Some("opf.metadata.empty_element"))
+        .filter_map(|m| m.location.as_deref())
+        .collect();
+
+    let mut fixes = Vec::new();
+    for file in files {
+        let Some(text) = ws.get_text(file) else {
+            continue;
+        };
+        let Some(edits) = compute_empty_metadata_edits(&text) else {
+            continue;
+        };
+        let n = edits.len();
+
+        let file_for_apply = file.to_string();
+        fixes.push(ProposedFix {
+            fix_id: "fix.empty_metadata_element",
+            addresses_id: "OPF-072".to_string(),
+            addresses_rule: Some("opf.metadata.empty_element"),
+            addresses_severity: addressed_severity(
+                report,
+                "OPF-072",
+                Some("opf.metadata.empty_element"),
+            ),
+            tier: Tier::ConfirmNeeded,
+            title: format!("Drop {n} empty optional metadata element(s) in {file}"),
+            rationale:
+                "An empty Dublin Core element states nothing — there is no value in it to lose \
+                 — and every element this can reach is optional, so its absence is valid. The \
+                 required three (dc:title, dc:identifier, dc:language) are never touched, and an \
+                 element a <meta refines=\"#id\"> points at is left alone so the refinement is \
+                 not orphaned."
+                    .to_string(),
+            preview: vec![Change {
+                path: file.to_string(),
+                note: format!("drop {n} empty optional <dc:*> element(s)"),
+            }],
+            apply_fn: Box::new(move |ws: &mut Workspace| {
+                if let Some(text) = ws.get_text(&file_for_apply)
+                    && let Some(edits) = compute_empty_metadata_edits(&text)
+                {
+                    ws.set_text(&file_for_apply, apply_edits(&text, edits));
+                }
+            }),
+        });
+    }
+    fixes
+}
+
+/// Superseded Core Media Type names, and the current name for the same format.
+///
+/// **This table is ours and epubveri has no equivalent** — it holds a *set* of
+/// non-preferred types (`epubveri/src/cmt.rs`), so it can say a name is
+/// superseded but not what supersedes it. Every target here was checked against
+/// its `PREFERRED` list: a target missing from that list would give a fix that
+/// does not clear its own finding.
+///
+/// `application/font-sfnt` is **deliberately absent**. SFNT is the container
+/// both TrueType and OpenType use, so the name does not say which the file is,
+/// and deciding would mean reading the font's version tag — inferring a
+/// declaration from binary content rather than renaming one. It is the only
+/// genuinely ambiguous member of the set.
+const PREFERRED_MEDIA_TYPE: [(&str, &str); 5] = [
+    ("application/vnd.ms-opentype", "font/otf"),
+    ("application/x-font-ttf", "font/ttf"),
+    ("application/font-woff", "font/woff"),
+    ("application/ecmascript", "application/javascript"),
+    ("text/javascript", "application/javascript"),
+];
+
+/// `OPF-090` / `opf.manifest_item.non_preferred_media_type`: a manifest item
+/// declares a valid Core Media Type under a name the spec has superseded.
+///
+/// Renames the declaration to the current name for the *same* format. Nothing is
+/// asserted about the bytes on disk — which is what separates this from
+/// `declared_media_type_mismatch`, where the declaration and the file genuinely
+/// disagree and choosing between them is not ours.
+///
+/// `ConfirmNeeded`: the edit is small and provably safe, but it rests on a table
+/// this crate owns rather than on anything the detector told us.
+fn non_preferred_media_type(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    let files: BTreeSet<&str> = report
+        .messages
+        .iter()
+        .filter(|m| m.rule == Some("opf.manifest_item.non_preferred_media_type"))
+        .filter_map(|m| m.location.as_deref())
+        .collect();
+
+    let mut fixes = Vec::new();
+    for file in files {
+        let Some(text) = ws.get_text(file) else {
+            continue;
+        };
+        let Some(edits) = compute_media_type_edits(&text) else {
+            continue;
+        };
+        let n = edits.len();
+
+        let file_for_apply = file.to_string();
+        fixes.push(ProposedFix {
+            fix_id: "fix.non_preferred_media_type",
+            addresses_id: "OPF-090".to_string(),
+            addresses_rule: Some("opf.manifest_item.non_preferred_media_type"),
+            addresses_severity: addressed_severity(
+                report,
+                "OPF-090",
+                Some("opf.manifest_item.non_preferred_media_type"),
+            ),
+            tier: Tier::ConfirmNeeded,
+            title: format!("Rename {n} superseded media-type declaration(s) in {file}"),
+            rationale:
+                "Both names denote the same format, so this renames a declaration and asserts \
+                 nothing new about the file itself. application/font-sfnt is never touched: SFNT \
+                 is the container TrueType and OpenType share, so the name does not say which \
+                 the file is, and deciding would mean reading the font's own bytes."
+                    .to_string(),
+            preview: vec![Change {
+                path: file.to_string(),
+                note: format!("rename {n} superseded media-type declaration(s)"),
+            }],
+            apply_fn: Box::new(move |ws: &mut Workspace| {
+                if let Some(text) = ws.get_text(&file_for_apply)
+                    && let Some(edits) = compute_media_type_edits(&text)
+                {
+                    ws.set_text(&file_for_apply, apply_edits(&text, edits));
+                }
+            }),
+        });
+    }
+    fixes
+}
+
+/// Edits renaming every superseded `media-type` on a `<manifest>` item. `None`
+/// (decline) if the package document won't parse or nothing is renameable.
+fn compute_media_type_edits(opf: &str) -> Option<Vec<MetaEdit>> {
+    let doc = parse_xml(opf)?;
+    let manifest = doc
+        .descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "manifest")?;
+
+    let mut edits = Vec::new();
+    for n in manifest
+        .children()
+        .filter(|n| n.is_element() && n.tag_name().name() == "item")
+    {
+        let Some(mt) = n.attribute("media-type") else {
+            continue;
+        };
+        // Parameters are stripped before matching, as epubveri strips them —
+        // but the replacement takes the whole value, so a `; charset=…` goes
+        // with the old name rather than being carried onto the new one.
+        let base = mt.split(';').next().unwrap_or(mt).trim();
+        let Some((_, current)) = PREFERRED_MEDIA_TYPE.iter().find(|(old, _)| *old == base) else {
+            continue;
+        };
+        let Some(attr) = n.attribute_node("media-type") else {
+            continue;
+        };
+        edits.push(MetaEdit {
+            range: attr.range(),
+            replacement: format!("media-type=\"{current}\""),
+        });
+    }
+    (!edits.is_empty()).then_some(edits)
+}
+
+/// The Dublin Core elements namespace. Matched exactly as epubveri matches it
+/// (`epubveri/src/opf.rs:1217`) so the two never disagree about which element a
+/// finding is about — the same principle [`compute_empty_dc_date_edits`] states.
+const DC_ELEMENTS_NS: &str = "http://purl.org/dc/elements/1.1/";
+
+/// Names this fixer will never delete, mirroring epubveri's own exclusion list.
+///
+/// `title`/`identifier`/`language` are **required** in EPUB 2 — deleting an empty
+/// one would trade "it is empty" for "it is missing". `date` is excluded because
+/// it belongs to [`empty_dc_date`]; two fixers proposing on one element would be
+/// two edits to the same range.
+const NEVER_DROPPED_METADATA: [&str; 4] = ["identifier", "date", "title", "language"];
+
+/// Edits dropping every empty optional DC element, with the whitespace that
+/// preceded it. `None` (decline) if the package document won't parse or nothing
+/// is droppable.
+fn compute_empty_metadata_edits(opf: &str) -> Option<Vec<MetaEdit>> {
+    let doc = parse_xml(opf)?;
+    let metadata = doc
+        .descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "metadata")?;
+    let refined: BTreeSet<&str> = doc
+        .descendants()
+        .filter(|n| n.is_element())
+        .filter_map(|n| n.attribute("refines"))
+        .filter_map(|r| r.strip_prefix('#'))
+        .collect();
+
+    let mut edits = Vec::new();
+    for n in metadata.children().filter(|n| {
+        n.is_element()
+            && n.tag_name().namespace() == Some(DC_ELEMENTS_NS)
+            && !NEVER_DROPPED_METADATA.contains(&n.tag_name().name())
+    }) {
+        let text: String = n
+            .descendants()
+            .filter(|t| t.is_text())
+            .filter_map(|t| t.text())
+            .collect();
+        if !text.trim().is_empty() {
+            continue; // it says something — never ours to delete
+        }
+        if n.attribute("id").is_some_and(|id| refined.contains(id)) {
+            continue;
+        }
+        edits.push(MetaEdit {
+            range: with_leading_whitespace(opf, n.range()),
+            replacement: String::new(),
+        });
+    }
+    (!edits.is_empty()).then_some(edits)
+}
+
 /// `range` extended back over the whitespace that preceded it, so dropping an
 /// element on its own line doesn't leave the blank line behind.
 fn with_leading_whitespace(text: &str, range: Range<usize>) -> Range<usize> {
@@ -5561,6 +5803,134 @@ mod tests {
     <dc:date opf:event="creation"></dc:date>
   </metadata>
 </package>"#;
+
+    #[test]
+    fn media_type_renames_the_unambiguous_ones() {
+        let opf = r#"<package xmlns="http://www.idpf.org/2007/opf"><manifest>
+    <item id="f1" href="a.otf" media-type="application/vnd.ms-opentype"/>
+    <item id="s1" href="s.js" media-type="text/javascript"/>
+    <item id="c1" href="c.xhtml" media-type="application/xhtml+xml"/>
+  </manifest></package>"#;
+        let out = apply_edits(opf, compute_media_type_edits(opf).unwrap());
+        assert!(out.contains(r#"media-type="font/otf""#));
+        assert!(out.contains(r#"media-type="application/javascript""#));
+        assert!(
+            out.contains(r#"media-type="application/xhtml+xml""#),
+            "a type that is already preferred is not touched"
+        );
+        assert!(!out.contains("vnd.ms-opentype"));
+    }
+
+    #[test]
+    fn media_type_declines_the_ambiguous_sfnt() {
+        // SFNT is the container TrueType and OpenType share: the name cannot
+        // say which the file is, and this fixer never reads the file.
+        let opf = r#"<package xmlns="http://www.idpf.org/2007/opf"><manifest>
+    <item id="f" href="a.font" media-type="application/font-sfnt"/>
+  </manifest></package>"#;
+        assert!(compute_media_type_edits(opf).is_none());
+    }
+
+    #[test]
+    fn media_type_matches_past_a_parameter_and_drops_it_with_the_old_name() {
+        let opf = r#"<package xmlns="http://www.idpf.org/2007/opf"><manifest>
+    <item id="s" href="s.js" media-type="text/javascript; charset=utf-8"/>
+  </manifest></package>"#;
+        let out = apply_edits(opf, compute_media_type_edits(opf).unwrap());
+        assert!(out.contains(r#"media-type="application/javascript""#));
+        assert!(
+            !out.contains("charset=utf-8"),
+            "the parameter belonged to the old name"
+        );
+    }
+
+    #[test]
+    fn media_type_leaves_a_matching_string_outside_the_manifest_alone() {
+        // Only <manifest> items declare resource types; a stray occurrence
+        // elsewhere is not this fixer's business.
+        let opf = r#"<package xmlns="http://www.idpf.org/2007/opf"><metadata>
+    <meta name="note" content="text/javascript"/>
+  </metadata><manifest/></package>"#;
+        assert!(compute_media_type_edits(opf).is_none());
+    }
+
+    #[test]
+    fn empty_metadata_drops_both_shapes_and_keeps_what_speaks() {
+        let opf = r#"<package xmlns="http://www.idpf.org/2007/opf"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:source/>
+    <dc:coverage></dc:coverage>
+    <dc:rights>© 2019</dc:rights>
+  </metadata></package>"#;
+        let out = apply_edits(opf, compute_empty_metadata_edits(opf).unwrap());
+        assert!(
+            !out.contains("dc:source"),
+            "self-closing empty element dropped"
+        );
+        assert!(!out.contains("dc:coverage"), "empty pair dropped");
+        assert!(
+            out.contains("<dc:rights>© 2019</dc:rights>"),
+            "a value is never touched"
+        );
+    }
+
+    #[test]
+    fn empty_metadata_never_drops_a_required_element() {
+        // epubveri excludes these, so this can only fire if that list moves —
+        // which is exactly why the guard is here.
+        let opf = r#"<package xmlns="http://www.idpf.org/2007/opf"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title/>
+    <dc:identifier/>
+    <dc:language/>
+  </metadata></package>"#;
+        assert!(
+            compute_empty_metadata_edits(opf).is_none(),
+            "deleting an empty required element trades 'empty' for 'missing'"
+        );
+    }
+
+    #[test]
+    fn empty_metadata_leaves_dc_date_to_its_own_fixer() {
+        let opf = r#"<package xmlns="http://www.idpf.org/2007/opf"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:date/>
+  </metadata></package>"#;
+        assert!(
+            compute_empty_metadata_edits(opf).is_none(),
+            "two fixers proposing on one element would be two edits to one range"
+        );
+    }
+
+    #[test]
+    fn empty_metadata_declines_when_a_meta_refines_the_element() {
+        let opf = r##"<package xmlns="http://www.idpf.org/2007/opf"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:source id="src"/>
+    <meta refines="#src" property="role">aut</meta>
+  </metadata></package>"##;
+        assert!(
+            compute_empty_metadata_edits(opf).is_none(),
+            "dropping the target would orphan the refinement"
+        );
+    }
+
+    #[test]
+    fn empty_metadata_ignores_a_lookalike_in_another_namespace() {
+        let opf = r#"<package xmlns="http://www.idpf.org/2007/opf"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:x="http://example.invalid/">
+    <x:source/>
+  </metadata></package>"#;
+        assert!(
+            compute_empty_metadata_edits(opf).is_none(),
+            "only Dublin Core elements are ours; the namespace is what decides"
+        );
+    }
+
+    #[test]
+    fn empty_metadata_leaves_no_blank_line_behind() {
+        let opf = "<package xmlns=\"http://www.idpf.org/2007/opf\"><metadata xmlns:dc=\"http://purl.org/dc/elements/1.1/\">\n    <dc:source/>\n    <dc:rights>x</dc:rights>\n  </metadata></package>";
+        let out = apply_edits(opf, compute_empty_metadata_edits(opf).unwrap());
+        assert!(
+            !out.contains("\n\n"),
+            "the whitespace before the element goes with it"
+        );
+    }
 
     #[test]
     fn empty_dc_date_drops_only_the_empty_one() {

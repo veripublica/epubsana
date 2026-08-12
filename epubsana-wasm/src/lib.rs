@@ -130,7 +130,15 @@ pub struct Item {
 pub struct Data {
     pub fix_id: String,
     pub tier: String,
-    pub changes: Vec<String>,
+    pub changes: Vec<ChangeItem>,
+}
+
+/// One edit: the container entry it touches, and what it does there. Mirrors the
+/// CLI's JSON exactly, so a browser consumer and a plugin read the same shape.
+#[derive(Serialize, Tsify)]
+pub struct ChangeItem {
+    pub path: String,
+    pub note: String,
 }
 
 /// A repair session over one EPUB, held in WASM memory across calls.
@@ -258,7 +266,14 @@ impl Session {
                         _ => "confirm_needed",
                     }
                     .to_string(),
-                    changes: f.preview.iter().map(|c| c.note.clone()).collect(),
+                    changes: f
+                        .preview
+                        .iter()
+                        .map(|c| ChangeItem {
+                            path: c.path.clone(),
+                            note: c.note.clone(),
+                        })
+                        .collect(),
                 },
             })
             .collect();

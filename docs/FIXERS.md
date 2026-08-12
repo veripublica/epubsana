@@ -1086,6 +1086,129 @@ fixer is claimed.
 
 ---
 
+## OPF-072 — an empty optional Dublin Core element (EPUB 2)
+
+**Finding.** `OPF-072` / `opf.metadata.empty_element`, reported on the package
+document: *dc:X metadata element is empty*, with `params[0]` = the element name
+(`"dc:coverage"`, `"dc:source"`, …). The sibling of the empty-`<dc:date>` fixer
+above, generalised to the rest of the optional Dublin Core set.
+
+**Read the emission site first — it has already done most of this fixer's safety
+work** (`epubveri/src/opf.rs:3179`):
+
+- **It is EPUB 2 only** (`if is_epub2`), the same version-scoped split as
+  `OPF-054`.
+- **It excludes `identifier`, `date`, `title` and `language` by name.** The three
+  required elements can therefore never reach this fixer, so the "would deleting
+  this create a *missing* element?" question cannot arise. `date` is excluded
+  because it has its own rule and its own fixer — **there is no overlap with
+  `fix.empty_dc_date`**, and a book cannot draw two proposals for one element.
+- The exclusion list carries upstream's own comment explaining that an empty
+  `dc:identifier` used to draw a spurious `OPF-072` and an empty `dc:language`
+  drew one where epubcheck gives `OPF-055`. So the list is a deliberate
+  correctness boundary, not an accident of implementation.
+
+**Fix** (`fix.empty_metadata_element`, ConfirmNeeded). Delete every empty
+optional Dublin Core element in `<metadata>`, together with the whitespace that
+preceded it. One proposal per package document.
+
+    <dc:source/>
+    <dc:coverage></dc:coverage>
+    →
+    (both removed)
+
+**Why it is safe.** An empty element states nothing — there is no value in it to
+lose — and every element that can reach this rule is optional in EPUB 2, so its
+absence is valid. This is the identical argument the `<dc:date>` fixer makes, and
+it is the whole of the justification: the repair removes a declaration that
+declares nothing.
+
+**Two guards, both vacuous on the corpus and both kept anyway.**
+
+- **The required-element check.** `dc:title`, `dc:identifier` and `dc:language`
+  are never deleted, even though the detector already excludes them. A fixer that
+  silently depends on an upstream exclusion list breaks quietly the day that list
+  moves, and this one deletes things. The same invariant `fix.empty_dc_date`
+  carries, and vacuous for the same reason.
+- **The refinement check.** An element whose `id` is the target of a
+  `<meta refines="#id">` is declined rather than deleted, since removing it would
+  orphan the refinement — trading this finding for another. Taken verbatim from
+  `fix.empty_dc_date` rather than reinvented: the first draft of this spec said
+  "decline any element carrying an `id`", which is stricter, no safer, and would
+  have left two sibling fixers disagreeing about the same class for no reason.
+  `refines` is an EPUB 3 mechanism and this rule is EPUB 2 only, so it is vacuous
+  here in any case.
+
+**Measured on the 157-book shelf (2026-08-13): 29 findings across 9 books.**
+Every one is `dc:coverage`, `dc:relation`, `dc:rights`, `dc:source`,
+`dc:subject` or `dc:description`. **27 are self-closing (`<dc:source/>`) and 2
+are empty pairs (`<dc:coverage></dc:coverage>`)** — both shapes are handled, and
+the probe found no third shape. **None carries an `id`, and none is a required
+element**, so both guards decline nothing on this corpus.
+
+**It does not move `--goal valid`.** `OPF-072` is *usage* severity: these books
+are not invalid because of it and clearing all 29 changes no verdict. The fixer
+exists because a publisher reading an epubcheck report has 29 lines of noise in
+it that describe nothing, and removing noise that describes nothing is exactly
+the burden this tool is for. Do not quote it as coverage of anything.
+
+## OPF-090 — a manifest item declaring a non-preferred Core Media Type
+
+**Finding.** `OPF-090` / `opf.manifest_item.non_preferred_media_type`, **Usage**,
+EPUB 3 only, reported on the package document: *media-type 'X' is a non-preferred
+(but valid) Core Media Type*, with `params[0]` = the declared type. The resource
+is fine and the book is valid; the declaration uses a superseded name for a
+format that has a current one.
+
+**Fix** (`fix.non_preferred_media_type`, ConfirmNeeded). Rewrite the
+`media-type` attribute to the current name. One proposal per package document.
+
+    <item ... media-type="application/vnd.ms-opentype"/>
+    →
+    <item ... media-type="font/otf"/>
+
+**Why it is safe.** Both names denote the *same* format. The edit renames a
+declaration; it asserts nothing new about the bytes on disk, which is what makes
+it different from `opf.manifest_item.declared_media_type_mismatch` (where the
+declaration and the file genuinely disagree, and choosing between them is not
+ours).
+
+**We own the mapping, and that is the one thing to keep honest.** epubveri holds
+a *set* of non-preferred types (`epubveri/src/cmt.rs:54`), not a mapping — it can
+tell you a name is superseded but not what supersedes it. So the table below
+lives here, and **every target was checked against epubveri's own `PREFERRED`
+list before being written down**; a target missing from that list would produce a
+fix that does not clear its finding.
+
+| non-preferred | current | |
+| --- | --- | --- |
+| `application/vnd.ms-opentype` | `font/otf` | |
+| `application/x-font-ttf` | `font/ttf` | |
+| `application/font-woff` | `font/woff` | |
+| `application/ecmascript` | `application/javascript` | |
+| `text/javascript` | `application/javascript` | |
+| `application/font-sfnt` | — | **declined, see below** |
+
+**`application/font-sfnt` is declined and must stay declined.** SFNT is the
+*container* both TrueType and OpenType use, so the name does not say which the
+file is. Deciding would mean reading the font's own bytes — the sfnt version tag,
+`0x00010000` for TrueType against `OTTO` for CFF-flavoured OpenType — and that is
+inspecting binary content to infer a declaration, which is a different kind of
+act from renaming one. It is also the only member of the set that is genuinely
+ambiguous; the other five are one format under two names.
+
+**Media-type parameters are ignored when matching**, the same way epubveri
+ignores them (`base_media_type` strips `; charset=…`), so a declaration carrying
+one is matched but rewritten whole — the parameter goes with the old name.
+
+**Measured on the 157-book shelf (2026-08-13): 9 findings across 2 books** —
+`application/vnd.ms-opentype` ×8 and `text/javascript` ×1, both unambiguous.
+**`application/font-sfnt` does not appear at all**, so the decline costs nothing
+here; it is written for the book that has not arrived yet.
+
+**It moves no verdict.** `OPF-090` is Usage severity: nothing becomes valid. It
+removes a line from an epubcheck report that describes a name, not a fault.
+
 ## RSC-005 — an `id` that is not a valid NCName (the first cross-file fixer)
 
 **Finding.** `opf.content_document.schema_violation`, message *value of attribute

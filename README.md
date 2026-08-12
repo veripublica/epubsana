@@ -13,7 +13,7 @@ changed**. It never guesses, and it preserves everything it doesn't touch.
 ## Status
 
 Early but working. The core contract (`Workspace` → detect → propose → confirm →
-apply → report) is solid, with twenty-nine fixers so far:
+apply → report) is solid, with thirty-one fixers so far:
 
 - **`RSC-016`** — undeclared HTML entities (`&nbsp;`, `&mdash;`, …) → the exact
   character each denotes.
@@ -119,6 +119,22 @@ apply → report) is solid, with twenty-nine fixers so far:
   date and `dc:date` is optional. A malformed but non-empty date (`March 2019`)
   is left exactly as it is: it carries a date the author wrote, and deciding
   which characters are stray would be a guess.
+- **`OPF-072` / `opf.metadata.empty_element`** — an empty *optional* Dublin Core
+  element (`dc:coverage`, `dc:source`, `dc:rights`, …) → dropped; it states
+  nothing and its absence is valid. The required three (`dc:title`,
+  `dc:identifier`, `dc:language`) are never touched, since deleting an empty one
+  would trade "empty" for "missing".
+- **`OPF-090` / `opf.manifest_item.non_preferred_media_type`** — a manifest item
+  declaring a superseded Core Media Type name → renamed to the current one for
+  the same format (`application/vnd.ms-opentype` → `font/otf`,
+  `text/javascript` → `application/javascript`, …). It renames a declaration and
+  asserts nothing new about the file. `application/font-sfnt` is declined: SFNT
+  is the container TrueType and OpenType share, so the name cannot say which the
+  file is.
+
+The last two clear *usage*-severity findings — report noise rather than a
+validity failure. They make no book valid that wasn't, and are listed here
+because what a repairer declines is as much its behaviour as what it fixes.
 
 More fixers land next, in real-world impact order.
 

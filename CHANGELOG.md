@@ -27,8 +27,61 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 - **`data.index` on every `fix` item in `--format json`** — the selector to feed
   back to `--apply`, so the round trip does not depend on counting items.
 
+- **Every edit now names the file it touches.** `data.changes` entries carry a
+  `path` alongside the description, so the set of files a run modified is
+  readable straight out of the report — no opening the repaired EPUB and
+  comparing it against the original.
+
 - The human report now numbers each fix (`[1]`, `[2]`, …), matching those
   indices.
+
+- **A 30th fixer: `fix.empty_metadata_element`** (`OPF-072` /
+  `opf.metadata.empty_element`, ConfirmNeeded). Drops empty optional Dublin Core
+  elements — `dc:coverage`, `dc:source`, `dc:rights` and the rest — from an
+  EPUB 2 package document. An empty element states nothing, and every element the
+  rule can reach is optional, so its absence is valid.
+
+  `dc:title`, `dc:identifier` and `dc:language` are never dropped (deleting an
+  empty required element would trade "empty" for "missing"), `dc:date` is left to
+  `fix.empty_dc_date`, and an element a `<meta refines="#id">` points at is left
+  alone so the refinement is not orphaned.
+
+  **This changes no verdict.** `OPF-072` is usage severity, so no book becomes
+  valid because of it; what it removes is noise from an epubcheck report.
+
+- **A 31st fixer: `fix.non_preferred_media_type`** (`OPF-090` /
+  `opf.manifest_item.non_preferred_media_type`, ConfirmNeeded). Renames a
+  manifest item's `media-type` from a superseded Core Media Type name to the
+  current one — `application/vnd.ms-opentype` → `font/otf`, `text/javascript` →
+  `application/javascript`, and three others. Both names denote the same format,
+  so this renames a declaration and asserts nothing new about the file.
+
+  **`application/font-sfnt` is declined** and stays declined: SFNT is the
+  container TrueType and OpenType share, so the name cannot say which the file
+  is, and deciding would mean reading the font's own bytes.
+
+  **This changes no verdict either.** `OPF-090` is usage severity.
+
+### Changed
+
+- **`data.changes` in `--format json` is now an array of objects, not of
+  strings.** Each entry was a bare description; it is now
+  `{"path": "...", "note": "..."}`, where `note` is the previous string
+  unchanged.
+
+  This is a breaking change for anything reading those strings, taken
+  deliberately rather than adding a second parallel field: epubsana is pre-1.0,
+  `data` is tool-owned by the shared format spec, and carrying two ways to say
+  the same thing forever is worse than one break now. Reading `.note` restores
+  the old value.
+
+  The path was always there — `Change` has carried it since the beginning and the
+  JSON emitter discarded it. Doitsu identified this on MobileRead while writing a
+  Sigil plugin, having had to open the repaired file and diff every entry to find
+  out what had changed.
+
+  The WASM `Session` API is unaffected: its `preview` already carried `path`. Its
+  `Report` items now match the CLI's JSON, as they were always meant to.
 
 ### Notes
 
@@ -37,6 +90,12 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
   is what makes an index from one run meaningful in the next.
 - A selector matching nothing fails the run and writes no file, rather than
   applying whichever selectors did match.
+- A fix spanning several files produces one `changes` entry per file, so `path`
+  also answers "what would this touch" under `--dry-run`, before anything is
+  applied.
+- `fix.mimetype_packaging` reports `"path": "mimetype"` while that entry's *bytes*
+  stay identical — only its position and compression change. A consumer copying
+  changed files back cannot reproduce that fix from the path alone.
 
 ## [0.9.1] - 2026-08-11
 
@@ -71,6 +130,33 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
   This completes the `opf.guide` family for the second time: it was closed at two
   rules on 2026-07-18, and epubveri 0.9.16 added a third. A family is closed
   against the rules that exist, not for good.
+
+- **A 30th fixer: `fix.empty_metadata_element`** (`OPF-072` /
+  `opf.metadata.empty_element`, ConfirmNeeded). Drops empty optional Dublin Core
+  elements — `dc:coverage`, `dc:source`, `dc:rights` and the rest — from an
+  EPUB 2 package document. An empty element states nothing, and every element the
+  rule can reach is optional, so its absence is valid.
+
+  `dc:title`, `dc:identifier` and `dc:language` are never dropped (deleting an
+  empty required element would trade "empty" for "missing"), `dc:date` is left to
+  `fix.empty_dc_date`, and an element a `<meta refines="#id">` points at is left
+  alone so the refinement is not orphaned.
+
+  **This changes no verdict.** `OPF-072` is usage severity, so no book becomes
+  valid because of it; what it removes is noise from an epubcheck report.
+
+- **A 31st fixer: `fix.non_preferred_media_type`** (`OPF-090` /
+  `opf.manifest_item.non_preferred_media_type`, ConfirmNeeded). Renames a
+  manifest item's `media-type` from a superseded Core Media Type name to the
+  current one — `application/vnd.ms-opentype` → `font/otf`, `text/javascript` →
+  `application/javascript`, and three others. Both names denote the same format,
+  so this renames a declaration and asserts nothing new about the file.
+
+  **`application/font-sfnt` is declined** and stays declined: SFNT is the
+  container TrueType and OpenType share, so the name cannot say which the file
+  is, and deciding would mean reading the font's own bytes.
+
+  **This changes no verdict either.** `OPF-090` is usage severity.
 
 ### Changed
 
@@ -153,6 +239,33 @@ repairs, on a book shape the corpus does not contain.
   either, where which identity is canonical is an editorial decision; two carry no
   `<dc:identifier>` at all, where the repair would have to generate one. With the
   NCX syncs the run clears 8 findings and introduces nothing.
+
+- **A 30th fixer: `fix.empty_metadata_element`** (`OPF-072` /
+  `opf.metadata.empty_element`, ConfirmNeeded). Drops empty optional Dublin Core
+  elements — `dc:coverage`, `dc:source`, `dc:rights` and the rest — from an
+  EPUB 2 package document. An empty element states nothing, and every element the
+  rule can reach is optional, so its absence is valid.
+
+  `dc:title`, `dc:identifier` and `dc:language` are never dropped (deleting an
+  empty required element would trade "empty" for "missing"), `dc:date` is left to
+  `fix.empty_dc_date`, and an element a `<meta refines="#id">` points at is left
+  alone so the refinement is not orphaned.
+
+  **This changes no verdict.** `OPF-072` is usage severity, so no book becomes
+  valid because of it; what it removes is noise from an epubcheck report.
+
+- **A 31st fixer: `fix.non_preferred_media_type`** (`OPF-090` /
+  `opf.manifest_item.non_preferred_media_type`, ConfirmNeeded). Renames a
+  manifest item's `media-type` from a superseded Core Media Type name to the
+  current one — `application/vnd.ms-opentype` → `font/otf`, `text/javascript` →
+  `application/javascript`, and three others. Both names denote the same format,
+  so this renames a declaration and asserts nothing new about the file.
+
+  **`application/font-sfnt` is declined** and stays declined: SFNT is the
+  container TrueType and OpenType share, so the name cannot say which the file
+  is, and deciding would mean reading the font's own bytes.
+
+  **This changes no verdict either.** `OPF-090` is usage severity.
 
 ### Changed
 
@@ -330,6 +443,33 @@ good** — recorded in `docs/COVERAGE.md` with the habit it argues for.
   so the reasoning carries this fixer, not the corpus. All 53 clear; both
   whole-shelf instruments report nothing introduced.
 
+- **A 30th fixer: `fix.empty_metadata_element`** (`OPF-072` /
+  `opf.metadata.empty_element`, ConfirmNeeded). Drops empty optional Dublin Core
+  elements — `dc:coverage`, `dc:source`, `dc:rights` and the rest — from an
+  EPUB 2 package document. An empty element states nothing, and every element the
+  rule can reach is optional, so its absence is valid.
+
+  `dc:title`, `dc:identifier` and `dc:language` are never dropped (deleting an
+  empty required element would trade "empty" for "missing"), `dc:date` is left to
+  `fix.empty_dc_date`, and an element a `<meta refines="#id">` points at is left
+  alone so the refinement is not orphaned.
+
+  **This changes no verdict.** `OPF-072` is usage severity, so no book becomes
+  valid because of it; what it removes is noise from an epubcheck report.
+
+- **A 31st fixer: `fix.non_preferred_media_type`** (`OPF-090` /
+  `opf.manifest_item.non_preferred_media_type`, ConfirmNeeded). Renames a
+  manifest item's `media-type` from a superseded Core Media Type name to the
+  current one — `application/vnd.ms-opentype` → `font/otf`, `text/javascript` →
+  `application/javascript`, and three others. Both names denote the same format,
+  so this renames a declaration and asserts nothing new about the file.
+
+  **`application/font-sfnt` is declined** and stays declined: SFNT is the
+  container TrueType and OpenType share, so the name cannot say which the file
+  is, and deciding would mean reading the font's own bytes.
+
+  **This changes no verdict either.** `OPF-090` is usage severity.
+
 ### Changed
 
 - **Tracks `epubveri` 0.9.9** (from 0.9.7). Two releases, **zero source change**,
@@ -391,6 +531,33 @@ This is also the first release the tag-triggered automation publishes end to end
 and it carries the `LICENSE-COMMERCIAL.md` packaging fix that npm 0.6.0 shipped
 without.
 
+
+- **A 30th fixer: `fix.empty_metadata_element`** (`OPF-072` /
+  `opf.metadata.empty_element`, ConfirmNeeded). Drops empty optional Dublin Core
+  elements — `dc:coverage`, `dc:source`, `dc:rights` and the rest — from an
+  EPUB 2 package document. An empty element states nothing, and every element the
+  rule can reach is optional, so its absence is valid.
+
+  `dc:title`, `dc:identifier` and `dc:language` are never dropped (deleting an
+  empty required element would trade "empty" for "missing"), `dc:date` is left to
+  `fix.empty_dc_date`, and an element a `<meta refines="#id">` points at is left
+  alone so the refinement is not orphaned.
+
+  **This changes no verdict.** `OPF-072` is usage severity, so no book becomes
+  valid because of it; what it removes is noise from an epubcheck report.
+
+- **A 31st fixer: `fix.non_preferred_media_type`** (`OPF-090` /
+  `opf.manifest_item.non_preferred_media_type`, ConfirmNeeded). Renames a
+  manifest item's `media-type` from a superseded Core Media Type name to the
+  current one — `application/vnd.ms-opentype` → `font/otf`, `text/javascript` →
+  `application/javascript`, and three others. Both names denote the same format,
+  so this renames a declaration and asserts nothing new about the file.
+
+  **`application/font-sfnt` is declined** and stays declined: SFNT is the
+  container TrueType and OpenType share, so the name cannot say which the file
+  is, and deciding would mean reading the font's own bytes.
+
+  **This changes no verdict either.** `OPF-090` is usage severity.
 
 ### Changed
 
@@ -510,6 +677,33 @@ Tracks `epubveri` from 0.5.15 to **0.9.7**, which corrects a false positive
 epubsana had been repairing, and closes the only regression epubsana introduced
 on the shared shelf.
 
+- **A 30th fixer: `fix.empty_metadata_element`** (`OPF-072` /
+  `opf.metadata.empty_element`, ConfirmNeeded). Drops empty optional Dublin Core
+  elements — `dc:coverage`, `dc:source`, `dc:rights` and the rest — from an
+  EPUB 2 package document. An empty element states nothing, and every element the
+  rule can reach is optional, so its absence is valid.
+
+  `dc:title`, `dc:identifier` and `dc:language` are never dropped (deleting an
+  empty required element would trade "empty" for "missing"), `dc:date` is left to
+  `fix.empty_dc_date`, and an element a `<meta refines="#id">` points at is left
+  alone so the refinement is not orphaned.
+
+  **This changes no verdict.** `OPF-072` is usage severity, so no book becomes
+  valid because of it; what it removes is noise from an epubcheck report.
+
+- **A 31st fixer: `fix.non_preferred_media_type`** (`OPF-090` /
+  `opf.manifest_item.non_preferred_media_type`, ConfirmNeeded). Renames a
+  manifest item's `media-type` from a superseded Core Media Type name to the
+  current one — `application/vnd.ms-opentype` → `font/otf`, `text/javascript` →
+  `application/javascript`, and three others. Both names denote the same format,
+  so this renames a declaration and asserts nothing new about the file.
+
+  **`application/font-sfnt` is declined** and stays declined: SFNT is the
+  container TrueType and OpenType share, so the name cannot say which the file
+  is, and deciding would mean reading the font's own bytes.
+
+  **This changes no verdict either.** `OPF-090` is usage severity.
+
 ### Changed
 
 - **`epubveri` 0.9.7 is now the minimum, and the reason is correctness.**
@@ -604,6 +798,33 @@ Ten new fixers (nine → nineteen), tracking `epubveri` through 0.5.15, and the
 structural fixers now read the EPUB 2 `&nbsp;` documents they previously couldn't.
 Four whole error families are now handled end to end — entities, doctypes, NCX
 internal consistency, and the EPUB 2 `<guide>`.
+
+- **A 30th fixer: `fix.empty_metadata_element`** (`OPF-072` /
+  `opf.metadata.empty_element`, ConfirmNeeded). Drops empty optional Dublin Core
+  elements — `dc:coverage`, `dc:source`, `dc:rights` and the rest — from an
+  EPUB 2 package document. An empty element states nothing, and every element the
+  rule can reach is optional, so its absence is valid.
+
+  `dc:title`, `dc:identifier` and `dc:language` are never dropped (deleting an
+  empty required element would trade "empty" for "missing"), `dc:date` is left to
+  `fix.empty_dc_date`, and an element a `<meta refines="#id">` points at is left
+  alone so the refinement is not orphaned.
+
+  **This changes no verdict.** `OPF-072` is usage severity, so no book becomes
+  valid because of it; what it removes is noise from an epubcheck report.
+
+- **A 31st fixer: `fix.non_preferred_media_type`** (`OPF-090` /
+  `opf.manifest_item.non_preferred_media_type`, ConfirmNeeded). Renames a
+  manifest item's `media-type` from a superseded Core Media Type name to the
+  current one — `application/vnd.ms-opentype` → `font/otf`, `text/javascript` →
+  `application/javascript`, and three others. Both names denote the same format,
+  so this renames a declaration and asserts nothing new about the file.
+
+  **`application/font-sfnt` is declined** and stays declined: SFNT is the
+  container TrueType and OpenType share, so the name cannot say which the file
+  is, and deciding would mean reading the font's own bytes.
+
+  **This changes no verdict either.** `OPF-090` is usage severity.
 
 ### Changed
 
@@ -734,6 +955,33 @@ internal consistency, and the EPUB 2 `<guide>`.
   targets. Not present in the reference corpus, which contains no Kindle→EPUB
   conversions — it lands on `epublift`'s reproduction of it in the wild.
 
+- **A 30th fixer: `fix.empty_metadata_element`** (`OPF-072` /
+  `opf.metadata.empty_element`, ConfirmNeeded). Drops empty optional Dublin Core
+  elements — `dc:coverage`, `dc:source`, `dc:rights` and the rest — from an
+  EPUB 2 package document. An empty element states nothing, and every element the
+  rule can reach is optional, so its absence is valid.
+
+  `dc:title`, `dc:identifier` and `dc:language` are never dropped (deleting an
+  empty required element would trade "empty" for "missing"), `dc:date` is left to
+  `fix.empty_dc_date`, and an element a `<meta refines="#id">` points at is left
+  alone so the refinement is not orphaned.
+
+  **This changes no verdict.** `OPF-072` is usage severity, so no book becomes
+  valid because of it; what it removes is noise from an epubcheck report.
+
+- **A 31st fixer: `fix.non_preferred_media_type`** (`OPF-090` /
+  `opf.manifest_item.non_preferred_media_type`, ConfirmNeeded). Renames a
+  manifest item's `media-type` from a superseded Core Media Type name to the
+  current one — `application/vnd.ms-opentype` → `font/otf`, `text/javascript` →
+  `application/javascript`, and three others. Both names denote the same format,
+  so this renames a declaration and asserts nothing new about the file.
+
+  **`application/font-sfnt` is declined** and stays declined: SFNT is the
+  container TrueType and OpenType share, so the name cannot say which the file
+  is, and deciding would mean reading the font's own bytes.
+
+  **This changes no verdict either.** `OPF-090` is usage severity.
+
 ### Changed
 
 - **Track `epubveri` 0.5.15** (from 0.5.9). No source change across the whole span
@@ -835,6 +1083,33 @@ must now approve `fix.mimetype_packaging` instead. No API was removed.
   (the other 169 already package `mimetype` correctly), whose real packaging
   defect epubveri now reports instead of epubsana quietly laundering it.
 
+- **A 30th fixer: `fix.empty_metadata_element`** (`OPF-072` /
+  `opf.metadata.empty_element`, ConfirmNeeded). Drops empty optional Dublin Core
+  elements — `dc:coverage`, `dc:source`, `dc:rights` and the rest — from an
+  EPUB 2 package document. An empty element states nothing, and every element the
+  rule can reach is optional, so its absence is valid.
+
+  `dc:title`, `dc:identifier` and `dc:language` are never dropped (deleting an
+  empty required element would trade "empty" for "missing"), `dc:date` is left to
+  `fix.empty_dc_date`, and an element a `<meta refines="#id">` points at is left
+  alone so the refinement is not orphaned.
+
+  **This changes no verdict.** `OPF-072` is usage severity, so no book becomes
+  valid because of it; what it removes is noise from an epubcheck report.
+
+- **A 31st fixer: `fix.non_preferred_media_type`** (`OPF-090` /
+  `opf.manifest_item.non_preferred_media_type`, ConfirmNeeded). Renames a
+  manifest item's `media-type` from a superseded Core Media Type name to the
+  current one — `application/vnd.ms-opentype` → `font/otf`, `text/javascript` →
+  `application/javascript`, and three others. Both names denote the same format,
+  so this renames a declaration and asserts nothing new about the file.
+
+  **`application/font-sfnt` is declined** and stays declined: SFNT is the
+  container TrueType and OpenType share, so the name cannot say which the file
+  is, and deciding would mean reading the font's own bytes.
+
+  **This changes no verdict either.** `OPF-090` is usage severity.
+
 ### Changed
 
 - **`docs/USAGE.md`'s safety guarantees now state what is actually true.** They
@@ -854,6 +1129,33 @@ whole class of proposal epubsana should never have made, so it ships as its own
 release. Re-audited on the 171-book corpus with every fix approved: **no
 regressions** (no finding appears that was not there before), errors 4078 →
 1206, 21 books become fully valid.
+
+- **A 30th fixer: `fix.empty_metadata_element`** (`OPF-072` /
+  `opf.metadata.empty_element`, ConfirmNeeded). Drops empty optional Dublin Core
+  elements — `dc:coverage`, `dc:source`, `dc:rights` and the rest — from an
+  EPUB 2 package document. An empty element states nothing, and every element the
+  rule can reach is optional, so its absence is valid.
+
+  `dc:title`, `dc:identifier` and `dc:language` are never dropped (deleting an
+  empty required element would trade "empty" for "missing"), `dc:date` is left to
+  `fix.empty_dc_date`, and an element a `<meta refines="#id">` points at is left
+  alone so the refinement is not orphaned.
+
+  **This changes no verdict.** `OPF-072` is usage severity, so no book becomes
+  valid because of it; what it removes is noise from an epubcheck report.
+
+- **A 31st fixer: `fix.non_preferred_media_type`** (`OPF-090` /
+  `opf.manifest_item.non_preferred_media_type`, ConfirmNeeded). Renames a
+  manifest item's `media-type` from a superseded Core Media Type name to the
+  current one — `application/vnd.ms-opentype` → `font/otf`, `text/javascript` →
+  `application/javascript`, and three others. Both names denote the same format,
+  so this renames a declaration and asserts nothing new about the file.
+
+  **`application/font-sfnt` is declined** and stays declined: SFNT is the
+  container TrueType and OpenType share, so the name cannot say which the file
+  is, and deciding would mean reading the font's own bytes.
+
+  **This changes no verdict either.** `OPF-090` is usage severity.
 
 ### Changed
 
@@ -880,6 +1182,33 @@ regressions** (no finding appears that was not there before), errors 4078 →
 Tracks `epubveri` 0.5.8. No epubsana source changed — the fixers key on the
 stable `rule`/`params` contract, which held — but one upstream detection fix is
 user-visible, so it ships as its own release.
+
+- **A 30th fixer: `fix.empty_metadata_element`** (`OPF-072` /
+  `opf.metadata.empty_element`, ConfirmNeeded). Drops empty optional Dublin Core
+  elements — `dc:coverage`, `dc:source`, `dc:rights` and the rest — from an
+  EPUB 2 package document. An empty element states nothing, and every element the
+  rule can reach is optional, so its absence is valid.
+
+  `dc:title`, `dc:identifier` and `dc:language` are never dropped (deleting an
+  empty required element would trade "empty" for "missing"), `dc:date` is left to
+  `fix.empty_dc_date`, and an element a `<meta refines="#id">` points at is left
+  alone so the refinement is not orphaned.
+
+  **This changes no verdict.** `OPF-072` is usage severity, so no book becomes
+  valid because of it; what it removes is noise from an epubcheck report.
+
+- **A 31st fixer: `fix.non_preferred_media_type`** (`OPF-090` /
+  `opf.manifest_item.non_preferred_media_type`, ConfirmNeeded). Renames a
+  manifest item's `media-type` from a superseded Core Media Type name to the
+  current one — `application/vnd.ms-opentype` → `font/otf`, `text/javascript` →
+  `application/javascript`, and three others. Both names denote the same format,
+  so this renames a declaration and asserts nothing new about the file.
+
+  **`application/font-sfnt` is declined** and stays declined: SFNT is the
+  container TrueType and OpenType share, so the name cannot say which the file
+  is, and deciding would mean reading the font's own bytes.
+
+  **This changes no verdict either.** `OPF-090` is usage severity.
 
 ### Changed
 
@@ -922,6 +1251,33 @@ family (edition 2024, `zip` 8.x, `roxmltree` 0.21).
   `remote-resources`, `switch`) on its manifest item. epubveri proved the usage,
   so the declaration is not a guess: the manifest is made to tell the truth about
   a document that is not itself modified.
+
+- **A 30th fixer: `fix.empty_metadata_element`** (`OPF-072` /
+  `opf.metadata.empty_element`, ConfirmNeeded). Drops empty optional Dublin Core
+  elements — `dc:coverage`, `dc:source`, `dc:rights` and the rest — from an
+  EPUB 2 package document. An empty element states nothing, and every element the
+  rule can reach is optional, so its absence is valid.
+
+  `dc:title`, `dc:identifier` and `dc:language` are never dropped (deleting an
+  empty required element would trade "empty" for "missing"), `dc:date` is left to
+  `fix.empty_dc_date`, and an element a `<meta refines="#id">` points at is left
+  alone so the refinement is not orphaned.
+
+  **This changes no verdict.** `OPF-072` is usage severity, so no book becomes
+  valid because of it; what it removes is noise from an epubcheck report.
+
+- **A 31st fixer: `fix.non_preferred_media_type`** (`OPF-090` /
+  `opf.manifest_item.non_preferred_media_type`, ConfirmNeeded). Renames a
+  manifest item's `media-type` from a superseded Core Media Type name to the
+  current one — `application/vnd.ms-opentype` → `font/otf`, `text/javascript` →
+  `application/javascript`, and three others. Both names denote the same format,
+  so this renames a declaration and asserts nothing new about the file.
+
+  **`application/font-sfnt` is declined** and stays declined: SFNT is the
+  container TrueType and OpenType share, so the name cannot say which the file
+  is, and deciding would mean reading the font's own bytes.
+
+  **This changes no verdict either.** `OPF-090` is usage severity.
 
 ### Changed — foundation aligned with the epubveri family
 
@@ -967,6 +1323,33 @@ books (though it changes no book's overall verdict).
   Nothing else changed: same behaviour, same API, same output. If your build of
   0.2.0 worked, it resolved epubveri to 0.5.3 already.
 
+- **A 30th fixer: `fix.empty_metadata_element`** (`OPF-072` /
+  `opf.metadata.empty_element`, ConfirmNeeded). Drops empty optional Dublin Core
+  elements — `dc:coverage`, `dc:source`, `dc:rights` and the rest — from an
+  EPUB 2 package document. An empty element states nothing, and every element the
+  rule can reach is optional, so its absence is valid.
+
+  `dc:title`, `dc:identifier` and `dc:language` are never dropped (deleting an
+  empty required element would trade "empty" for "missing"), `dc:date` is left to
+  `fix.empty_dc_date`, and an element a `<meta refines="#id">` points at is left
+  alone so the refinement is not orphaned.
+
+  **This changes no verdict.** `OPF-072` is usage severity, so no book becomes
+  valid because of it; what it removes is noise from an epubcheck report.
+
+- **A 31st fixer: `fix.non_preferred_media_type`** (`OPF-090` /
+  `opf.manifest_item.non_preferred_media_type`, ConfirmNeeded). Renames a
+  manifest item's `media-type` from a superseded Core Media Type name to the
+  current one — `application/vnd.ms-opentype` → `font/otf`, `text/javascript` →
+  `application/javascript`, and three others. Both names denote the same format,
+  so this renames a declaration and asserts nothing new about the file.
+
+  **`application/font-sfnt` is declined** and stays declined: SFNT is the
+  container TrueType and OpenType share, so the name cannot say which the file
+  is, and deciding would mean reading the font's own bytes.
+
+  **This changes no verdict either.** `OPF-090` is usage severity.
+
 ### Changed
 
 - CI now builds against the **declared minimum** epubveri, so the promise a
@@ -987,6 +1370,33 @@ that is not well-formed XML does not open). Every count epubsana printed came
 from `errors()`, which no longer counts fatals. Left alone, a book with 774 fatal
 entity references would have reported `0 error(s)` and been called **valid**.
 Fatals are now counted, stated first, and gate the verdict.
+
+- **A 30th fixer: `fix.empty_metadata_element`** (`OPF-072` /
+  `opf.metadata.empty_element`, ConfirmNeeded). Drops empty optional Dublin Core
+  elements — `dc:coverage`, `dc:source`, `dc:rights` and the rest — from an
+  EPUB 2 package document. An empty element states nothing, and every element the
+  rule can reach is optional, so its absence is valid.
+
+  `dc:title`, `dc:identifier` and `dc:language` are never dropped (deleting an
+  empty required element would trade "empty" for "missing"), `dc:date` is left to
+  `fix.empty_dc_date`, and an element a `<meta refines="#id">` points at is left
+  alone so the refinement is not orphaned.
+
+  **This changes no verdict.** `OPF-072` is usage severity, so no book becomes
+  valid because of it; what it removes is noise from an epubcheck report.
+
+- **A 31st fixer: `fix.non_preferred_media_type`** (`OPF-090` /
+  `opf.manifest_item.non_preferred_media_type`, ConfirmNeeded). Renames a
+  manifest item's `media-type` from a superseded Core Media Type name to the
+  current one — `application/vnd.ms-opentype` → `font/otf`, `text/javascript` →
+  `application/javascript`, and three others. Both names denote the same format,
+  so this renames a declaration and asserts nothing new about the file.
+
+  **`application/font-sfnt` is declined** and stays declined: SFNT is the
+  container TrueType and OpenType share, so the name cannot say which the file
+  is, and deciding would mean reading the font's own bytes.
+
+  **This changes no verdict either.** `OPF-090` is usage severity.
 
 ### Changed — breaking
 

@@ -87,7 +87,14 @@ fn item(index: usize, f: &ReportedFix) -> Item<Data> {
                 Tier::AutoSafe => "auto_safe",
                 Tier::ConfirmNeeded => "confirm_needed",
             },
-            changes: f.changes.iter().map(|c| c.note.clone()).collect(),
+            changes: f
+                .changes
+                .iter()
+                .map(|c| ChangeItem {
+                    path: c.path.clone(),
+                    note: c.note.clone(),
+                })
+                .collect(),
         }),
     )
 }
@@ -140,5 +147,31 @@ pub struct Data {
     pub index: usize,
     pub fix_id: &'static str,
     pub tier: &'static str,
-    pub changes: Vec<String>,
+    pub changes: Vec<ChangeItem>,
+}
+
+/// One edit a fix makes: **which container entry** it touches, and a human
+/// description of what it does there.
+///
+/// The path is the half that took longest to arrive. Until 0.10.0 this was a
+/// bare string — the description only — which meant a plugin wanting to know
+/// *which files changed* had to open the repaired EPUB and compare every entry
+/// against the original. Doitsu said so on MobileRead, and he was right: the
+/// path was already in `Change` and the emitter was throwing it away.
+///
+/// A fix that spans files produces one entry per file, so `changes` is also the
+/// answer to "what would this fix touch" without applying anything.
+///
+/// **`path` is not always a file whose *content* changed.** The packaging fix
+/// (`PKG-006`) reports `mimetype` because that is the entry it acts on, while
+/// the entry's bytes stay identical — only its position in the archive and its
+/// compression change. A consumer that writes changed files back cannot
+/// reproduce that fix by copying `mimetype`; it has to re-save the container, or
+/// use epubsana's own output.
+#[derive(Serialize)]
+pub struct ChangeItem {
+    /// Container-relative path of the entry this edit touches.
+    pub path: String,
+    /// Human description of the edit, e.g. "replace `&mdash;` → `—` (88×)".
+    pub note: String,
 }

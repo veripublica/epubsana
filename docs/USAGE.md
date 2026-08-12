@@ -240,7 +240,12 @@ fix is an item, and each item carries the number you feed back to `--apply`:
     "index": 1,
     "fix_id": "fix.ncx_ncnames",
     "tier": "confirm_needed",
-    "changes": ["rename NCX id \"59a835d2-f837…\" → \"id_59a835d2-f837…\""]
+    "changes": [
+      {
+        "path": "toc.ncx",
+        "note": "rename NCX id \"59a835d2-f837…\" → \"id_59a835d2-f837…\""
+      }
+    ]
   }
 }
 ```
@@ -249,14 +254,50 @@ The fields you will actually use:
 
 - **`data.index`** — the selector. Pass it to `--apply`.
 - **`message`** — a one-line description to show the user.
-- **`data.changes`** — the individual edits, as human-readable lines.
+- **`data.changes`** — the individual edits. Each one is an object with a
+  **`path`** (which file inside the EPUB it touches) and a **`note`** (what it
+  does there, in words).
 - **`data.tier`** — `auto_safe` (provably safe) or `confirm_needed` (a judgement
   call). Useful if you want to pre-tick some boxes and not others.
 - **`severity`** — the severity of the *defect being repaired*, straight from
   epubveri. It is never a judgement about the fix.
 - **`location`** — the file inside the EPUB, when the fix touches only one.
 
-A complete Python round trip, which is roughly what a Sigil or calibre plugin
+#### Knowing which files changed
+
+This is the question a plugin actually needs answered: *after epubsana runs, which
+files do I copy back?*
+
+You do not have to work it out. Every edit names its file, so the set of files a
+run touches is just the paths in `data.changes`:
+
+```python
+touched = {c["path"] for it in items for c in it["data"]["changes"]}
+# {'content.opf', 'toc.ncx', 'werther_split_004.html', …}
+```
+
+Two things follow that are worth knowing:
+
+- **A fix that spans files produces one entry per file.** Renaming an invalid id,
+  for example, rewrites the document holding it, every document linking to it,
+  and the NCX — that is one fix with several `changes` entries, one per file.
+- **You can ask before applying.** Those paths are in the `--dry-run` output too,
+  so you can tell a user exactly which files a fix would touch without touching
+  anything.
+
+**One exception, and it is the only one.** The packaging fix (`PKG-006`,
+`fix.mimetype_packaging`) reports `"path": "mimetype"` — but that file's *content*
+does not change. What changes is where it sits in the ZIP and whether it is
+compressed. A plugin that copies changed files back cannot reproduce that fix,
+because in an editor's terms it is not a file edit at all. If you see it, either
+re-save the container yourself or use epubsana's own output file for that book.
+
+**You do not need to diff the repaired EPUB against the original.** epubsana
+copies every entry it did not touch through byte-for-byte — same bytes, same
+compression method, same timestamps — so an untouched file is identical, and
+`data.changes` already tells you which ones those aren't.
+
+A complete Python round tripA complete Python round trip, which is roughly what a Sigil or calibre plugin
 does:
 
 ```python
@@ -495,7 +536,10 @@ reads both:
           "severity": "fatal",
           "location": "OEBPS/Text/bolum2.xhtml",
           "message": "Map 1 undeclared HTML entity (657×) to characters …",
-          "data": { "fix_id": "fix.html_entities", "tier": "auto_safe", "changes": ["…"] }
+          "data": {
+            "index": 1, "fix_id": "fix.html_entities", "tier": "auto_safe",
+            "changes": [ { "path": "OEBPS/ch01.xhtml", "note": "…" } ]
+          }
         }
       ]
     }
@@ -558,6 +602,8 @@ safe, and when epubsana declines, see the **[fix catalogue](./FIXERS.md)**.
 | `RSC-007` | `opf.content_document.reference_missing_resource` | ConfirmNeeded | A link whose path no longer resolves but whose target is still in the book under the same name — a book restructured after it was written (`../Text/notes.xhtml#a8` where the file now sits beside the referring document). The path is repointed at the one container entry carrying that name, relative to the referring document, and the fragment is carried across. Declines when the name matches nothing or several entries, when the fragment is not in the chosen target (that would trade one error for a broken link), and for external URLs, scheme-less hostnames and placeholder junk. |
 | `OPF-030` / `RSC-005` | `opf.package.unique_identifier_unresolved`, `opf.package.opf_identifier_not_empty` | ConfirmNeeded | The package says which identifier is canonical and that declaration lands on nothing usable — either no `<dc:identifier>` carries the named id, or the one that does is empty. The declared id is attached to the book's **single** real identifier and any leftover empty element is dropped; the NCX `dtb:uid` is synced in the same edit, since this repair is what first makes that comparison possible. Nothing is invented: the value was already in the book and the id already in the package. Declines when the book carries two candidate identifiers — choosing between a UUID and an ISBN is an editorial decision — or none at all. |
 | `OPF-054` | *(none)* | ConfirmNeeded | Drops a `<dc:date>` with no content: it states no date, and `dc:date` is optional. A malformed but non-empty date (`March 2019`) carries a date the author wrote and is left exactly as it is — deciding which characters are stray would be a guess. Note `OPF-054` is EPUB 2 only; on EPUB 3 the same condition is a warning that never moves the validity line. |
+| `OPF-072` | `opf.metadata.empty_element` | ConfirmNeeded | Drops an empty **optional** Dublin Core element (`dc:coverage`, `dc:source`, `dc:rights`, `dc:relation`, `dc:subject`, `dc:description`) from an EPUB 2 package: it states nothing, and its absence is valid. Never drops `dc:title`, `dc:identifier` or `dc:language` — deleting an empty *required* element would trade "empty" for "missing" — leaves `dc:date` to the fixer above, and declines an element a `<meta refines="#id">` points at, so no refinement is orphaned. **Usage severity: this clears report noise, not a validity failure.** |
+| `OPF-090` | `opf.manifest_item.non_preferred_media_type` | ConfirmNeeded | Renames a manifest item's `media-type` from a superseded Core Media Type name to the current one for the same format: `application/vnd.ms-opentype` → `font/otf`, `application/x-font-ttf` → `font/ttf`, `application/font-woff` → `font/woff`, `application/ecmascript` and `text/javascript` → `application/javascript`. Renames the declaration only; it asserts nothing new about the file. **`application/font-sfnt` is declined** — SFNT is the container TrueType and OpenType share, so the name cannot say which the file is. **Usage severity.** |
 
 Findings not in this table — arbitrary schema violations, and anything requiring
 content epubsana would have to invent — are reported by epubveri but **left
