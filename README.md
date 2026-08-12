@@ -176,3 +176,10 @@ mutates without an approved fix.
 
 Dual-licensed: **AGPL-3.0-only** OR a **commercial license** — see
 [`LICENSE`](./LICENSE) and [`LICENSE-COMMERCIAL.md`](./LICENSE-COMMERCIAL.md).
+
+**Using this tool, or building something that calls it? Read
+[`LICENSING-FAQ.md`](./LICENSING-FAQ.md).** Short version: the books you repair
+are yours unconditionally, commercial use of the tool needs no commercial
+license, and a plugin that invokes the CLI picks whatever license its author
+wants. The commercial license is for embedding this code in a closed-source
+product or serving a modified version over a network — nothing else.
