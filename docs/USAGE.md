@@ -119,12 +119,13 @@ epubsana -i <PATH> [OPTIONS]
 | `--dry-run` | Report what would happen; change nothing on disk. |
 | `-y`, `--yes` | Assume "yes" for every prompt; run non-interactively. Not permission to overwrite files — that is `-f`. |
 | `--auto-safe` | Apply the provably-safe fixes without asking; still prompt for the rest. |
+| `--apply <LIST>` | Apply exactly the listed fixes, skip the rest, ask nothing. Selectors are 1-based plan indices and/or fix ids, comma-separated. |
 | `--goal <valid\|openable>` | How far to repair. Default: `valid`. See [Exit codes](#exit-codes). |
 | `-v`, `--verbose` | Show each fix's rationale (why it's safe). |
 | `-V`, `--version` | Print `epubsana <version>` and exit `0`. |
 | `-h`, `--help` | Print help and exit `0`. |
 
-**Behaviour of the three modes**
+**Behaviour of the four modes**
 
 - **Default (no flag):** prompt for *every* proposed fix (`[y/N]`).
 - **`--auto-safe`:** apply fixes tiered *AutoSafe* automatically; prompt for
@@ -132,6 +133,245 @@ epubsana -i <PATH> [OPTIONS]
 - **`-y`/`--yes`:** approve everything, no prompts. Good for batch/CI use — but
   read [Safety guarantees](#safety-guarantees) first, and prefer `--dry-run` to
   preview.
+- **`--apply <LIST>`:** approve exactly what you name and nothing else. This is
+  the mode for a plugin or a script that has already asked a human — see
+  [Applying only some of the fixes](#applying-only-some-of-the-fixes---apply).
+
+### Applying only some of the fixes (`--apply`)
+
+Sometimes you want three of the eight fixes epubsana proposes, not all eight and
+not one at a time in a terminal. `--apply` does exactly that: **you tell it which
+fixes to make, it makes those and skips the rest, and it asks you nothing.**
+
+This is also how a plugin or a script drives epubsana: it shows the user a list
+in its own window, the user ticks some boxes, and the plugin passes the ticked
+ones to `--apply`.
+
+#### The whole thing in three steps
+
+**Step 1 — ask what it would do.** `--dry-run` changes nothing at all. It just
+prints the plan, numbered:
+
+```console
+$ epubsana -i book.epub --dry-run
+book.epub: 0 fatal(s), 90 error(s) before repair
+
+— proposed fixes (dry run: nothing was changed) —
+[1] WOULD APPLY Make 1 invalid NCX id a valid XML NCName in toc.ncx
+    - rename NCX id "59a835d2-f837…" → "id_59a835d2-f837…"
+[2] WOULD APPLY Drop 25 legacy <a name> attributes in chapter-04.html
+    - drop 25 obsolete name= attributes
+[3] WOULD APPLY Drop 19 legacy <a name> attributes in chapter-05.html
+    - drop 19 obsolete name= attributes
+
+0 fatal(s), 90 error(s) → 0 fatal(s), 90 error(s)
+would write book_fixed.epub
+goal 'valid': NOT MET
+```
+
+The first line is the state of the book before anything happens; the numbers in
+brackets are what `--apply` wants. Add `-v` if you also want each fix to explain
+*why* it is safe.
+
+(That first line is not printed with `--format json`, so the JSON output stays a
+single object you can parse directly.)
+
+**Step 2 — decide.** Say you want the NCX rename and the second file's cleanup,
+but not the first file's. That is fixes **1** and **3**.
+
+**Step 3 — apply just those.**
+
+```console
+$ epubsana -i book.epub --apply 1,3
+book.epub: 0 fatal(s), 90 error(s) before repair
+
+— repair report —
+[1] APPLIED Make 1 invalid NCX id a valid XML NCName in toc.ncx
+[2] SKIPPED Drop 25 legacy <a name> attributes in chapter-04.html
+[3] APPLIED Drop 19 legacy <a name> attributes in chapter-05.html
+
+0 fatal(s), 90 error(s) → 0 fatal(s), 70 error(s)
+wrote book_fixed.epub
+goal 'valid': NOT MET
+```
+
+Every fix is still listed, so you can see what you turned down. `book.epub` is
+untouched; the repaired copy is `book_fixed.epub`.
+
+#### What the words mean
+
+| Word | Meaning |
+|---|---|
+| `WOULD APPLY` | Only appears under `--dry-run`. Nothing happened. |
+| `APPLIED` | This fix was made in the output file. |
+| `SKIPPED` | This fix was proposed and *not* made — you didn't select it, or you answered `n`. |
+
+#### Ways to name a fix
+
+| You write | It means |
+|---|---|
+| `--apply 2` | Just fix number 2 from the plan. |
+| `--apply 1,3,7` | Fixes 1, 3 and 7. Commas, no spaces needed. |
+| `--apply "1, 3, 7"` | The same — spaces around commas are fine if you quote it. |
+| `--apply fix.html_entities` | *Every* fix produced by that fixer, however many files it touches. |
+| `--apply 2,fix.html_entities` | Mix freely: fix 2, plus all of that fixer's fixes. |
+
+**A number is always a position in the plan, never the name of a fixer.** Fixer
+names always start with `fix.` — you can see each one in the JSON output
+(`data.fix_id`) or in [the fixer catalogue](./FIXERS.md).
+
+There is no `--apply all`. To apply everything, use `-y`.
+
+#### Doing it from a program
+
+Run the dry run with `--format json` and you get one JSON object. Each proposed
+fix is an item, and each item carries the number you feed back to `--apply`:
+
+```json
+{
+  "type": "fix",
+  "outcome": "proposed",
+  "code": "RSC-005",
+  "rule": "ncx.ids.invalid_ncname",
+  "severity": "error",
+  "location": "toc.ncx",
+  "message": "Make 1 invalid NCX id a valid XML NCName in toc.ncx",
+  "data": {
+    "index": 1,
+    "fix_id": "fix.ncx_ncnames",
+    "tier": "confirm_needed",
+    "changes": ["rename NCX id \"59a835d2-f837…\" → \"id_59a835d2-f837…\""]
+  }
+}
+```
+
+The fields you will actually use:
+
+- **`data.index`** — the selector. Pass it to `--apply`.
+- **`message`** — a one-line description to show the user.
+- **`data.changes`** — the individual edits, as human-readable lines.
+- **`data.tier`** — `auto_safe` (provably safe) or `confirm_needed` (a judgement
+  call). Useful if you want to pre-tick some boxes and not others.
+- **`severity`** — the severity of the *defect being repaired*, straight from
+  epubveri. It is never a judgement about the fix.
+- **`location`** — the file inside the EPUB, when the fix touches only one.
+
+A complete Python round trip, which is roughly what a Sigil or calibre plugin
+does:
+
+```python
+import json, subprocess
+
+# 1. Ask for the plan. Nothing is modified by this call.
+plan = json.loads(subprocess.run(
+    ["epubsana", "-i", "book.epub", "--dry-run", "--format", "json"],
+    capture_output=True, text=True, check=True).stdout)
+
+items = plan["inputs"][0]["items"]
+for it in items:
+    print(it["data"]["index"], it["message"])
+
+# 2. Let the user choose. Here: everything that is provably safe.
+chosen = [str(it["data"]["index"])
+          for it in items if it["data"]["tier"] == "auto_safe"]
+
+# 3. Apply exactly those. Skip the call entirely if the user picked nothing.
+if chosen:
+    subprocess.run(
+        ["epubsana", "-i", "book.epub", "-o", "fixed.epub",
+         "--apply", ",".join(chosen), "--format", "json"],
+        check=True)
+```
+
+The same thing in a shell, if you have `jq`:
+
+```console
+$ SEL=$(epubsana -i book.epub --dry-run --format json \
+        | jq -r '[.inputs[0].items[] | select(.data.tier=="auto_safe")
+                  | .data.index] | join(",")')
+$ epubsana -i book.epub -o fixed.epub --apply "$SEL"
+```
+
+#### Why two runs is safe
+
+You are selecting from one run and applying in another, so the numbers only mean
+something if both runs plan the same way. **They do.** Planning is
+deterministic: the same input file plus the same epubveri version always produces
+the same fixes in the same order.
+
+What breaks that, and what to do:
+
+- **You edited the book between the two calls** → run `--dry-run` again and
+  re-pick. The numbers may have moved.
+- **epubsana or epubveri was updated between the two calls** → same answer.
+- **You are applying to a different file than you planned on** → the numbers are
+  meaningless. Plan and apply against the same input.
+
+If a number no longer exists, epubsana tells you instead of guessing — see below.
+
+#### When something goes wrong
+
+Each of these stops the run **before writing anything**. Your input file is never
+modified in any case, and no output file is left half-done.
+
+**A number that isn't in the plan** (usually a stale list, or a typo):
+
+```console
+$ epubsana -i book.epub --apply 1,99
+book.epub: 0 fatal(s), 90 error(s) before repair
+error: --apply selector(s) matched no proposed fix: 99. This run planned 48
+fix(es); re-run with --dry-run to see the current plan. Nothing was written.
+```
+
+Note that fix 1 was **not** applied either. Applying the half of your list that
+happened to match would leave you believing something about the book that isn't
+true, so the whole run is refused.
+
+**A fixer name that proposed nothing this time** — same error. A fixer only
+appears in the plan when the book has the defect it repairs, so
+`--apply fix.html_entities` on a book with no entity problems is an error, not a
+no-op. Check the plan first.
+
+**Combining `--apply` with a flag that decides differently:**
+
+```console
+$ epubsana -i book.epub --apply 1 --dry-run
+error: --apply and --dry-run contradict each other: --apply already answers
+every prompt, and only for the fixes you listed
+```
+
+The same for `-y`/`--yes` and `--auto-safe`. `--apply` is itself a complete set
+of answers, so epubsana refuses rather than quietly picking a winner and editing
+a book on a guess.
+
+**An empty list:**
+
+```console
+$ epubsana -i book.epub --apply ""
+error: --apply was given no selectors; to apply nothing, simply do not run the
+repair, and to apply everything use --yes
+```
+
+**The output file already exists:**
+
+```console
+$ epubsana -i book.epub --apply 1
+error: 'book_fixed.epub' exists; use -f to replace it
+```
+
+Add `-f`, or choose another path with `-o`. This is not specific to `--apply`.
+
+**Nothing was proposed at all.** Then there is nothing to select, and any
+selector is an error. A book epubsana cannot help with prints `No fixes to
+propose.` under `--dry-run` — that is the signal to stop, not to try `--apply`.
+
+#### Three things you can rely on
+
+1. **Your original is never modified.** Repairs go to a separate file, always.
+2. **Only what you named is applied.** Everything else is reported as `SKIPPED`,
+   so the report is a full account of what was offered and what you took.
+3. **A partial match is never applied.** Either every selector matches and the
+   run proceeds, or nothing is written at all.
 
 A prompt epubsana cannot ask is a decision it cannot obtain: when stdin is not a
 terminal and fixes would need approval, it **stops** (exit `2`) and names the

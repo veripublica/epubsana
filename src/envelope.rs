@@ -43,7 +43,12 @@ pub fn input(path: String, output: Option<String>, report: &ChangeReport) -> Inp
         error: None,
         output,
         summary: Some(Summary::of(report)),
-        items: report.fixes.iter().map(item).collect(),
+        items: report
+            .fixes
+            .iter()
+            .enumerate()
+            .map(|(i, f)| item(i + 1, f))
+            .collect(),
     }
 }
 
@@ -66,7 +71,7 @@ pub fn input_error(path: String, error: String) -> Input {
 /// One planned fix as a `fix` item. `severity` is **inherited** from the finding
 /// the fix addresses, verbatim from epubveri — it describes the *defect*, never
 /// epubsana's opinion of its own fix.
-fn item(f: &ReportedFix) -> Item<Data> {
+fn item(index: usize, f: &ReportedFix) -> Item<Data> {
     Item::fix(
         f.outcome.as_str(),
         f.addresses_id.clone(),
@@ -76,6 +81,7 @@ fn item(f: &ReportedFix) -> Item<Data> {
         None, // a fix spans a file, not a point in it
         f.title.clone(),
         Some(Data {
+            index,
             fix_id: f.fix_id,
             tier: match f.tier {
                 Tier::AutoSafe => "auto_safe",
@@ -121,9 +127,17 @@ impl Summary {
 
 /// epubsana's `data` vocabulary. `tier` is its own axis — how much judgement a
 /// fix needs, orthogonal to the severity it inherits — and `changes` are the
-/// exact edits, the same list the human report prints.
+/// exact edits, the same list the human report prints. `index` is the handle
+/// `--apply` accepts, so a consumer can act on a subset of what it was shown.
 #[derive(Serialize)]
 pub struct Data {
+    /// This fix's 1-based position in the plan — the selector `--apply` takes.
+    ///
+    /// Planning is deterministic (same input, same detector version, same plan,
+    /// same order), which is what makes an index a usable handle across the two
+    /// invocations a plugin needs: one `--dry-run` to show the proposals, one
+    /// `--apply` to act on the subset the user picked.
+    pub index: usize,
     pub fix_id: &'static str,
     pub tier: &'static str,
     pub changes: Vec<String>,

@@ -13,6 +13,7 @@
 //! Exit codes: `0` = the run's goal was met, `1` = it was not, `2` = the tool
 //! could not run.
 
+use std::collections::BTreeSet;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -42,6 +43,12 @@ OPTIONS:
                             Not permission to overwrite files — that is -f.
         --auto-safe         Apply the provably-safe fixes without asking; still
                             prompt for the ones that need a decision.
+        --apply <LIST>      Apply exactly the listed fixes and skip the rest;
+                            asks nothing. A selector is a 1-based index from a
+                            preceding --dry-run, or a fix id to take every
+                            proposal from that fixer. Comma-separated, e.g.
+                            --apply 1,4,fix.html_entities. A selector that
+                            matches nothing is an error and writes no file.
         --goal <GOAL>       How far to repair: valid (the default) or openable.
                             See EXIT CODES.
     -v, --verbose           Emit more detail: each fix's rationale (why it is safe).
@@ -54,6 +61,8 @@ EXAMPLES:
     epubsana -i book.epub --auto-safe      # apply the safe ones; ask about the rest
     epubsana -i book.epub -y -o fixed.epub # no prompts, explicit output path
     epubsana -i book.epub --format json -y # the machine envelope on stdout
+    epubsana -i book.epub --dry-run --format json   # plan, with an index per fix
+    epubsana -i book.epub --apply 1,3               # apply just those two
 
 The original is never modified in place: repairs go to a separate file, and an
 existing output file is never silently replaced (use -f).
@@ -95,6 +104,7 @@ struct Run {
     dry_run: bool,
     yes: bool,
     auto_safe: bool,
+    apply: Option<Vec<String>>,
     goal: Goal,
     verbose: bool,
 }
@@ -116,6 +126,7 @@ fn parse(args: &[String]) -> Cli {
     let mut dry_run = false;
     let mut yes = false;
     let mut auto_safe = false;
+    let mut apply: Option<String> = None;
     let mut verbose = false;
     let mut help = false;
     let mut version = false;
@@ -155,7 +166,7 @@ fn parse(args: &[String]) -> Cli {
                 "yes" => yes = true,
                 "auto-safe" => auto_safe = true,
                 "verbose" => verbose = true,
-                "input" | "output" | "format" | "goal" => {
+                "input" | "output" | "format" | "goal" | "apply" => {
                     let value = match attached {
                         Some(v) => v,
                         None => {
@@ -174,6 +185,7 @@ fn parse(args: &[String]) -> Cli {
                         "output" => set_single!(output, "--output", value),
                         "format" => set_single!(format, "--format", value),
                         "goal" => set_single!(goal, "--goal", value),
+                        "apply" => set_single!(apply, "--apply", value),
                         _ => unreachable!(),
                     }
                 }
@@ -262,6 +274,13 @@ fn parse(args: &[String]) -> Cli {
             dry_run,
             yes,
             auto_safe,
+            apply: apply.as_deref().map(|s| {
+                s.split(',')
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            }),
             goal: match goal.as_deref() {
                 Some("openable") => Goal::Openable,
                 _ => Goal::Valid,
@@ -332,6 +351,32 @@ fn execute(run: &Run) -> Result<ExitCode, String> {
         return Err(format!("'{}' exists; use -f to replace it", out.display()));
     }
 
+    // --apply states every decision up front, so it contradicts anything that
+    // would decide differently. Refuse rather than pick a winner: a plugin that
+    // passes both has a bug, and silently honouring one of them applies a set of
+    // edits nobody asked for — irreversible, on someone's book.
+    if let Some(sel) = &run.apply {
+        for (flag, on) in [
+            ("--dry-run", run.dry_run),
+            ("--yes", run.yes),
+            ("--auto-safe", run.auto_safe),
+        ] {
+            if on {
+                return Err(format!(
+                    "--apply and {flag} contradict each other: --apply already \
+                     answers every prompt, and only for the fixes you listed"
+                ));
+            }
+        }
+        if sel.is_empty() {
+            return Err(
+                "--apply was given no selectors; to apply nothing, simply do not run \
+                 the repair, and to apply everything use --yes"
+                    .to_string(),
+            );
+        }
+    }
+
     let policy = if run.dry_run {
         Policy::DryRun
     } else if run.auto_safe {
@@ -344,7 +389,7 @@ fn execute(run: &Run) -> Result<ExitCode, String> {
     // than silently answering "no" and returning an exit code that looks like an
     // ordinary result (§5). --yes and --dry-run ask nothing; --auto-safe still
     // asks about the fixes that need a decision.
-    let interactive = !run.yes && policy != Policy::DryRun;
+    let interactive = !run.yes && run.apply.is_none() && policy != Policy::DryRun;
     if interactive && !io::stdin().is_terminal() {
         return Err(
             "stdin is not a terminal, so epubsana cannot ask about each fix; \
@@ -353,7 +398,9 @@ fn execute(run: &Run) -> Result<ExitCode, String> {
         );
     }
 
-    let mut confirmer: Box<dyn Confirmer> = if run.yes {
+    let mut confirmer: Box<dyn Confirmer> = if let Some(sel) = &run.apply {
+        Box::new(SelectionConfirmer::new(sel))
+    } else if run.yes {
         Box::new(YesConfirmer)
     } else {
         Box::new(TtyConfirmer {
@@ -375,6 +422,35 @@ fn execute(run: &Run) -> Result<ExitCode, String> {
 
     let report =
         repair(&mut ws, run.goal, policy, confirmer.as_mut()).map_err(|e| e.to_string())?;
+
+    // A selector that matched nothing means the caller was describing a plan we
+    // did not produce — a stale index from an older dry run, a typo, a fixer that
+    // proposed nothing this time. Refuse the whole run rather than apply the
+    // subset that did match: a plugin asking for fixes 1, 3 and 7 and silently
+    // getting two of them has been told the wrong thing about someone's book.
+    //
+    // This runs *after* repair and *before* the write, which is the only reason
+    // it is safe: the workspace is mutated in memory, and nothing has touched the
+    // disk yet, so returning here leaves the input exactly as it was.
+    if let Some(sel) = &run.apply {
+        let unmatched: Vec<&str> = sel
+            .iter()
+            .filter(|s| !match s.parse::<usize>() {
+                Ok(n) => n >= 1 && n <= report.fixes.len(),
+                Err(_) => report.fixes.iter().any(|f| f.fix_id == s.as_str()),
+            })
+            .map(String::as_str)
+            .collect();
+        if !unmatched.is_empty() {
+            return Err(format!(
+                "--apply selector(s) matched no proposed fix: {}. This run planned {} \
+                 fix(es); re-run with --dry-run to see the current plan. Nothing was \
+                 written.",
+                unmatched.join(", "),
+                report.fixes.len()
+            ));
+        }
+    }
 
     // Write only when something was actually applied — a run whose every fix was
     // declined has nothing to write, and leaves no file behind to explain. Under
@@ -418,9 +494,10 @@ fn print_report(report: &ChangeReport, written: Option<&str>, run: &Run) {
     if report.fixes.is_empty() {
         println!("No fixes to propose.");
     }
-    for f in &report.fixes {
+    for (i, f) in report.fixes.iter().enumerate() {
         println!(
-            "{} {}",
+            "[{}] {} {}",
+            i + 1,
             match f.outcome {
                 Outcome::Applied => "APPLIED",
                 Outcome::Skipped => "SKIPPED",
@@ -508,6 +585,67 @@ fn format_fix(fix: &ProposedFix, verbose: bool) -> String {
         lines.push(format!("    - {}", c.note));
     }
     lines.join("\n")
+}
+
+/// Approves exactly the fixes `--apply` named, and rejects the rest.
+///
+/// The [`Confirmer`] trait is the whole extension point here — "confirm each
+/// step" lives in the core as a question, so answering it from a list instead of
+/// a terminal needs no change to the repair pipeline at all.
+///
+/// A selector that parses as a number is **always** an index and never a fixer
+/// name, which is the same split the post-run validation uses — if the two ever
+/// disagreed, a selector could validate as one kind and select as the other.
+///
+/// Two kinds of selector, deliberately: a **1-based index** into the plan
+/// (what a plugin round-trips from a `--dry-run` envelope, and what the human
+/// report now prints in brackets), and a **fix id** like `fix.html_entities`,
+/// which takes every proposal from that fixer. The first is for "the user picked
+/// these three"; the second is for "I trust this repair and not that one".
+///
+/// Indices are only meaningful because planning is deterministic — same input
+/// and same detector version give the same plan in the same order. That is a
+/// promise this flag now depends on, not an implementation detail.
+struct SelectionConfirmer {
+    selectors: BTreeSet<String>,
+    seen: usize,
+}
+
+impl SelectionConfirmer {
+    fn new(selectors: &[String]) -> Self {
+        SelectionConfirmer {
+            selectors: selectors.iter().cloned().collect(),
+            seen: 0,
+        }
+    }
+}
+
+impl SelectionConfirmer {
+    /// Does the plan's `index`-th fix, produced by `fix_id`, match the list?
+    ///
+    /// Split out from [`Confirmer::decide`] so the selection rule can be tested
+    /// on its own: `ProposedFix` carries a boxed closure and cannot be built
+    /// outside the crate, and the rule is the part worth pinning anyway.
+    fn selects(&self, index: usize, fix_id: &str) -> bool {
+        self.selectors.iter().any(|s| match s.parse::<usize>() {
+            Ok(n) => n == index,
+            Err(_) => s == fix_id,
+        })
+    }
+}
+
+impl Confirmer for SelectionConfirmer {
+    fn decide(&mut self, fix: &ProposedFix) -> Decision {
+        // Counts every proposal, not every approval: the index has to keep
+        // meaning "position in the plan" no matter what was rejected before it,
+        // because that is what the dry run showed the caller.
+        self.seen += 1;
+        if self.selects(self.seen, fix.fix_id) {
+            Decision::Approve
+        } else {
+            Decision::Reject
+        }
+    }
 }
 
 /// Approves every fix (for `--yes`).
@@ -598,6 +736,61 @@ mod tests {
     fn bundled_value_flag_takes_the_remainder_posix() {
         // -iv means -i v, not -i -v.
         assert_eq!(run_of(&["-iv"]).input, "v");
+    }
+
+    #[test]
+    fn apply_splits_and_trims_its_selector_list() {
+        let run = run_of(&["-i", "a.epub", "--apply", "1, 4 ,fix.html_entities"]);
+        assert_eq!(
+            run.apply.unwrap(),
+            vec!["1", "4", "fix.html_entities"],
+            "whitespace around a comma is a human typing a list, not a selector"
+        );
+    }
+
+    #[test]
+    fn apply_drops_empty_selectors_rather_than_matching_nothing() {
+        // A trailing comma is the shape a generated list arrives in.
+        let run = run_of(&["-i", "a.epub", "--apply", "2,,"]);
+        assert_eq!(run.apply.unwrap(), vec!["2"]);
+    }
+
+    #[test]
+    fn apply_is_absent_unless_asked_for() {
+        assert!(run_of(&["-i", "a.epub"]).apply.is_none());
+    }
+
+    #[test]
+    fn selection_takes_an_index_and_leaves_its_neighbours() {
+        let c = SelectionConfirmer::new(&["2".to_string()]);
+        assert!(!c.selects(1, "fix.alpha"));
+        assert!(c.selects(2, "fix.beta"));
+        assert!(!c.selects(3, "fix.alpha"));
+    }
+
+    #[test]
+    fn selection_takes_every_proposal_of_a_named_fixer() {
+        // One fixer can propose several times in a plan (one per file); naming
+        // it must take all of them, whatever position they sit at.
+        let c = SelectionConfirmer::new(&["fix.alpha".to_string()]);
+        assert!(c.selects(1, "fix.alpha"));
+        assert!(!c.selects(2, "fix.beta"));
+        assert!(c.selects(9, "fix.alpha"));
+    }
+
+    #[test]
+    fn selection_mixes_indices_and_fixer_ids() {
+        let c = SelectionConfirmer::new(&["3".to_string(), "fix.alpha".to_string()]);
+        assert!(c.selects(1, "fix.alpha"));
+        assert!(c.selects(3, "fix.beta"));
+        assert!(!c.selects(2, "fix.beta"));
+    }
+
+    #[test]
+    fn selection_does_not_confuse_an_index_with_a_fixer_id() {
+        // A fixer is never named by a bare number, so "1" can only be a position.
+        let c = SelectionConfirmer::new(&["1".to_string()]);
+        assert!(!c.selects(2, "1"));
     }
 
     #[test]

@@ -8,6 +8,36 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [Unreleased]
+
+### Added
+
+- **`--apply <LIST>`: apply exactly the fixes you name, and nothing else.**
+  Selectors are 1-based plan indices, fix ids such as `fix.html_entities`, or a
+  mix; anything numeric is always an index. The mode asks nothing and is refused
+  alongside `--dry-run`, `--yes` and `--auto-safe`, which would each decide
+  differently.
+
+  This is what an editor plugin needs. Until now the only non-interactive mode
+  was `--yes`, which approves *everything* — so a host application could show a
+  user the plan and then had no way to act on the subset they picked. Pair
+  `--dry-run` with `--apply` and the asking happens in the host's own interface,
+  with epubsana still applying only what was approved.
+
+- **`data.index` on every `fix` item in `--format json`** — the selector to feed
+  back to `--apply`, so the round trip does not depend on counting items.
+
+- The human report now numbers each fix (`[1]`, `[2]`, …), matching those
+  indices.
+
+### Notes
+
+- **Planning is deterministic, and `--apply` now depends on it**: the same input
+  and the same epubveri version produce the same fixes in the same order, which
+  is what makes an index from one run meaningful in the next.
+- A selector matching nothing fails the run and writes no file, rather than
+  applying whichever selectors did match.
+
 ## [0.9.1] - 2026-08-11
 
 ### Added
