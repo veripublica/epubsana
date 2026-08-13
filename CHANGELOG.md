@@ -8,7 +8,31 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
-## [Unreleased]
+## [0.11.0] - 2026-08-13
+
+### Added
+
+- **A 32nd fixer: `fix.font_face_missing_target`** (`RSC-007` /
+  `css.font_face.missing_target`, ConfirmNeeded). Deletes a `@font-face` rule
+  whose font file is not in the book. The font cannot load and never could, so
+  text using that family already falls back to a substitute — removing a rule
+  that never applied changes nothing a reader sees.
+
+  **The first fixer to touch CSS, and no CSS parser was added.** It finds an
+  at-rule's braces and nothing more; the crate still runs on five dependencies.
+  This does not open the rest of the `css.*` family, which is open-ended in a way
+  this member is not.
+
+  **Declines a rule holding more than one `url(`** — a second source may be
+  present and working, and choosing between them would be editing a stylesheet
+  rather than deleting a dead rule. That objection is what kept this unbuilt;
+  measuring answered it, since every affected rule on the shelf holds exactly one
+  source. Also declines a rule whose braces do not delimit it.
+
+  Error severity, so unlike the last two fixers this one moves the validity line:
+  **one book on the shelf goes fully valid.** Deleting the rule also clears the
+  `css.font_face.leaks_container_root` errors and `css.font_face.declared`
+  notices attached to the same declarations.
 
 ### Changed
 

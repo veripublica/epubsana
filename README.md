@@ -13,7 +13,7 @@ changed**. It never guesses, and it preserves everything it doesn't touch.
 ## Status
 
 Early but working. The core contract (`Workspace` → detect → propose → confirm →
-apply → report) is solid, with thirty-one fixers so far:
+apply → report) is solid, with thirty-two fixers so far:
 
 - **`RSC-016`** — undeclared HTML entities (`&nbsp;`, `&mdash;`, …) → the exact
   character each denotes.
@@ -132,7 +132,15 @@ apply → report) is solid, with thirty-one fixers so far:
   is the container TrueType and OpenType share, so the name cannot say which the
   file is.
 
-The last two clear *usage*-severity findings — report noise rather than a
+- **`RSC-007` / `css.font_face.missing_target`** — a `@font-face` rule sourcing a
+  font file the book doesn't contain → the whole rule dropped. The font cannot
+  load and never could, so text using that family already falls back to a
+  substitute. A rule with a second `url(` is declined: one of them may work, and
+  choosing between them would be editing a stylesheet rather than removing a dead
+  declaration. No CSS parser was added for this, and the rest of the `css.*`
+  family stays out of scope.
+
+The two before it clear *usage*-severity findings — report noise rather than a
 validity failure. They make no book valid that wasn't, and are listed here
 because what a repairer declines is as much its behaviour as what it fixes.
 

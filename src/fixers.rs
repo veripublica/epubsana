@@ -46,6 +46,7 @@ pub fn plan(report: &Report, ws: &Workspace, _goal: Goal) -> Vec<ProposedFix> {
     fixes.extend(empty_dc_date(report, ws));
     fixes.extend(empty_metadata_element(report, ws));
     fixes.extend(non_preferred_media_type(report, ws));
+    fixes.extend(font_face_missing_target(report, ws));
     fixes.extend(mimetype_packaging(report, ws));
     // Future fixers append here, in a sensible confirm order — and in
     // `handled_rules()` below.
@@ -76,6 +77,7 @@ pub fn plan(report: &Report, ws: &Workspace, _goal: Goal) -> Vec<ProposedFix> {
 /// is missing here, so drift announces itself on the next shelf run.
 pub fn handled_rules() -> &'static [&'static str] {
     &[
+        "css.font_face.missing_target",
         "htm.doctype.epub2_unrecognized_public_id",
         "htm.doctype.epub3_obsolete_public_id",
         "htm.entity.missing_semicolon",
@@ -4415,6 +4417,131 @@ fn empty_metadata_element(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
     fixes
 }
 
+/// `RSC-007` / `css.font_face.missing_target`: a `@font-face` rule sources a font
+/// file the publication does not contain.
+///
+/// Deletes the whole rule. The font does not load today and cannot — the file is
+/// absent — so anything using that family already falls back to a substitute,
+/// and removing a rule that never applied changes nothing a reader sees.
+///
+/// **Declines a rule holding more than one `url(`**: a second source may be
+/// present and working, and choosing which line to cut would be editing CSS
+/// rather than deleting a dead rule. Every affected rule on the shelf holds
+/// exactly one, which is what makes the whole-rule deletion determinate.
+///
+/// No CSS parser is involved and none is wanted: this finds an at-rule's braces
+/// and nothing more. It does not open the rest of the `css.*` family, which is
+/// open-ended in a way this member is not.
+fn font_face_missing_target(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    // file -> the urls reported missing in it
+    let mut by_file: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for m in &report.messages {
+        if m.rule != Some("css.font_face.missing_target") {
+            continue;
+        }
+        let (Some(file), Some(url)) = (m.location.as_deref(), m.params.first()) else {
+            continue;
+        };
+        by_file
+            .entry(file.to_string())
+            .or_default()
+            .insert(url.clone());
+    }
+
+    let mut fixes = Vec::new();
+    for (file, urls) in by_file {
+        let Some(text) = ws.get_text(&file) else {
+            continue;
+        };
+        let Some(edits) = plan_font_face_drops(&text, &urls) else {
+            continue;
+        };
+        let n = edits.len();
+
+        let file_for_apply = file.clone();
+        let urls_for_apply = urls.clone();
+        fixes.push(ProposedFix {
+            fix_id: "fix.font_face_missing_target",
+            addresses_id: "RSC-007".to_string(),
+            addresses_rule: Some("css.font_face.missing_target"),
+            addresses_severity: addressed_severity(
+                report,
+                "RSC-007",
+                Some("css.font_face.missing_target"),
+            ),
+            tier: Tier::ConfirmNeeded,
+            title: format!(
+                "Drop {n} @font-face rule{} sourcing a missing font in {file}",
+                if n == 1 { "" } else { "s" }
+            ),
+            rationale:
+                "The font file is not in the book, so the rule cannot load anything and never \
+                 has: text using that family already falls back to whatever the reading system \
+                 substitutes, and deleting a rule that never applied changes nothing a reader \
+                 sees. A rule holding more than one url() is left alone — a second source may be \
+                 present and working, and choosing between them would be editing the stylesheet \
+                 rather than removing a dead declaration."
+                    .to_string(),
+            preview: vec![Change {
+                path: file.clone(),
+                note: format!(
+                    "drop {n} @font-face rule(s): {}",
+                    urls.iter().cloned().collect::<Vec<_>>().join(", ")
+                ),
+            }],
+            apply_fn: Box::new(move |ws: &mut Workspace| {
+                if let Some(text) = ws.get_text(&file_for_apply)
+                    && let Some(edits) = plan_font_face_drops(&text, &urls_for_apply)
+                {
+                    ws.set_text(&file_for_apply, apply_edits(&text, edits));
+                }
+            }),
+        });
+    }
+    fixes
+}
+
+/// The `@font-face` rules to delete: those whose single `url(` names one of
+/// `urls`. `None` (decline) when nothing is deletable.
+///
+/// Brace matching rather than parsing. A rule with a nested `{`, or no closing
+/// `}`, is left alone: a stylesheet shaped that way is not one to rewrite by
+/// looking for delimiters.
+fn plan_font_face_drops(css: &str, urls: &BTreeSet<String>) -> Option<Vec<MetaEdit>> {
+    let mut edits: Vec<MetaEdit> = Vec::new();
+    let mut from = 0usize;
+    while let Some(at) = css[from..].find("@font-face") {
+        let start = from + at;
+        let Some(open_rel) = css[start..].find('{') else {
+            break;
+        };
+        let open = start + open_rel;
+        let Some(close_rel) = css[open + 1..].find('}') else {
+            break;
+        };
+        let close = open + 1 + close_rel;
+        let body = &css[open + 1..close];
+        from = close + 1;
+
+        // A nested `{` means the closing brace we found is not this rule's.
+        if body.contains('{') {
+            continue;
+        }
+        // Exactly one source, and it is one epubveri reported missing.
+        if body.matches("url(").count() != 1 {
+            continue;
+        }
+        if !urls.iter().any(|u| body.contains(u.as_str())) {
+            continue;
+        }
+        edits.push(MetaEdit {
+            range: with_leading_whitespace(css, start..close + 1),
+            replacement: String::new(),
+        });
+    }
+    (!edits.is_empty()).then_some(edits)
+}
+
 /// Superseded Core Media Type names, and the current name for the same format.
 ///
 /// **This table is ours and epubveri has no equivalent** — it holds a *set* of
@@ -5894,6 +6021,51 @@ mod tests {
     <dc:date opf:event="creation"></dc:date>
   </metadata>
 </package>"#;
+
+    #[test]
+    fn font_face_drops_the_rule_whose_only_source_is_missing() {
+        let css = "body { color: black }\n\n@font-face {\n  font-family: \"Arial\";\n  src: url(../Fonts/arial.ttf);\n}\n\np { margin: 0 }";
+        let urls = BTreeSet::from(["../Fonts/arial.ttf".to_string()]);
+        let out = apply_edits(css, plan_font_face_drops(css, &urls).unwrap());
+        assert!(!out.contains("@font-face"));
+        assert!(out.contains("body { color: black }"));
+        assert!(out.contains("p { margin: 0 }"));
+    }
+
+    #[test]
+    fn font_face_leaves_a_rule_whose_font_is_present() {
+        // Only the url epubveri reported is ours; a sibling rule stays.
+        let css = "@font-face { src: url(a.ttf); }\n@font-face { src: url(b.ttf); }";
+        let urls = BTreeSet::from(["b.ttf".to_string()]);
+        let out = apply_edits(css, plan_font_face_drops(css, &urls).unwrap());
+        assert!(out.contains("url(a.ttf)"));
+        assert!(!out.contains("url(b.ttf)"));
+    }
+
+    #[test]
+    fn font_face_declines_a_rule_with_a_second_source() {
+        // The missing woff may sit beside a ttf that works; cutting one line is
+        // editing CSS, not deleting a dead rule.
+        let css = "@font-face { src: url(x.woff), url(x.ttf); }";
+        let urls = BTreeSet::from(["x.woff".to_string()]);
+        assert!(plan_font_face_drops(css, &urls).is_none());
+    }
+
+    #[test]
+    fn font_face_declines_when_the_braces_do_not_delimit_a_rule() {
+        let unclosed = "@font-face { src: url(x.ttf);";
+        let nested = "@font-face { src: url(x.ttf); a { b: c } }";
+        let urls = BTreeSet::from(["x.ttf".to_string()]);
+        assert!(plan_font_face_drops(unclosed, &urls).is_none());
+        assert!(plan_font_face_drops(nested, &urls).is_none());
+    }
+
+    #[test]
+    fn font_face_ignores_a_matching_url_outside_a_font_face_rule() {
+        let css = "body { background: url(../Fonts/arial.ttf) }";
+        let urls = BTreeSet::from(["../Fonts/arial.ttf".to_string()]);
+        assert!(plan_font_face_drops(css, &urls).is_none());
+    }
 
     #[test]
     fn media_type_renames_the_unambiguous_ones() {

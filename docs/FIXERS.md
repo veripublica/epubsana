@@ -49,6 +49,7 @@ grows one carefully-argued entry at a time.
 | `RSC-005` | `opf.package.schema_violation` | AutoSafe | An EPUB 3 attribute on an EPUB 2 package document | [Delete it, once verified it says nothing the book does not](#rsc-005--an-epub-3-attribute-on-an-epub-2-package-document) |
 | `RSC-005` | `opf.content_document.duplicate_id` | ConfirmNeeded | Two or more elements in one document share an `id` | [Keep the first, rename the later ones](#rsc-005--a-duplicate-id-in-a-content-document) |
 | `RSC-007` | `opf.content_document.reference_missing_resource` | ConfirmNeeded | A link's path is stale, but the file it names is still in the book | [Repoint the path, carry the fragment across](#rsc-007--a-reference-whose-path-is-wrong-but-whose-target-is-in-the-book) |
+| `RSC-007` | `css.font_face.missing_target` | ConfirmNeeded | A `@font-face` sources a font file the book does not contain | [Drop the whole rule; decline one with a second source](#rsc-007--a-font-face-whose-font-file-is-not-in-the-book) |
 | `OPF-030` / `RSC-005` | `opf.package.unique_identifier_unresolved`, `opf.package.opf_identifier_not_empty` | ConfirmNeeded | The package's declared unique identifier resolves to nothing usable | [Attach the declared id to the book's one real identifier](#opf-030--rsc-005--the-packages-declared-identifier-points-at-nothing-usable) |
 | `RSC-005` | `htm.epub2_dom.nested_anchor` | ConfirmNeeded | An `<a>` with only an `id` wraps a real link | [Unwrap it, moving the `id` to the child](#rsc-005--an-anchor-target-wrapped-around-a-link) |
 | `OPF-054` | *(none)* | ConfirmNeeded | A `<dc:date>` holds no date at all (EPUB 2) | [Drop the empty element; never touch a non-empty one](#opf-054--an-empty-dcdate-epub-2) |
@@ -1236,6 +1237,82 @@ here; it is written for the book that has not arrived yet.
 
 **It moves no verdict.** `OPF-090` is Usage severity: nothing becomes valid. It
 removes a line from an epubcheck report that describes a name, not a fault.
+
+## RSC-007 — a `@font-face` whose font file is not in the book
+
+**Finding.** `RSC-007` / `css.font_face.missing_target`, **Error**, reported on
+the stylesheet: *reference to a resource missing from the publication: 'X'*, with
+`params[0]` = the url exactly as written in the CSS (`../Fonts/arial.ttf`).
+epubveri resolves the url against the stylesheet's own directory and checks it
+against both the manifest and the container's name index, so a finding here means
+the file is genuinely absent, not merely undeclared.
+
+**Fix** (`fix.font_face_missing_target`, ConfirmNeeded). Delete the whole
+`@font-face` rule, with the whitespace that preceded it. One proposal per
+stylesheet.
+
+    @font-face {
+      font-family: "Arial";
+      src: url(../Fonts/arial.ttf);
+    }
+    →
+    (removed)
+
+**Why it is safe.** The font does not load today and cannot: the file is not in
+the book. Any `font-family: Arial` elsewhere already falls back to whatever the
+reading system substitutes, and deleting the rule that never applied changes
+nothing about what a reader sees. The repair removes a declaration that declares
+a resource the publication does not contain — the same shape as the dangling
+`<guide>` reference, in a different file format.
+
+**The guard that makes it determinate, and the objection it answers.** This
+family was ranked "buildable in principle, blocked on a decision" for days, on
+this reasoning:
+
+> a `@font-face` block can carry several `src` entries, and dropping the whole
+> block when only one is missing would throw away a font that works — so the
+> fixer needs to edit *within* a block
+
+Correct, and worth measuring rather than assuming: **every affected block on the
+157-book shelf holds exactly one `url()`.** All 21 findings across 5 books. So
+within-block editing is not needed for any real case, and the fixer **declines
+any block holding more than one `url(`** rather than pretending to handle it.
+That decline is the whole of the difficulty, and it costs nothing here.
+
+**It does not open the `css.*` family, and must not be read as doing so.** The
+rest of that family — a malformed selector, a malformed declaration value, an
+unterminated stylesheet — is open-ended in exactly the way this member is not.
+This is a *deletion of a whole rule identified by a resource that is absent*; it
+requires no understanding of CSS beyond finding an at-rule's braces, and **no CSS
+parser is added.** The crate still runs on five dependencies.
+
+**When it declines.**
+
+- **More than one `url(` in the rule** — a second source may be present and
+  working, and choosing which line to cut is editing CSS rather than deleting a
+  dead rule. 0 cases on the shelf.
+- **A rule whose braces cannot be delimited** — no `{` after `@font-face`, no
+  closing `}`, or a nested `{` inside it. Nothing on the shelf is shaped that
+  way, and a stylesheet that is, is one epubsana should not be rewriting.
+- A stylesheet that cannot be read, or in which the reported url does not appear
+  inside a `@font-face` rule at all.
+
+**Measured (2026-08-13): 21 findings across 5 books**, error severity — the only
+error-severity candidate left on this shelf, and so the only remaining fixer that
+can move the `--goal valid` line. It does: **one book goes fully valid** that did
+not before.
+
+**It clears more than its own rule, and the arithmetic is worth writing down so
+nobody reads it as a regression.** Deleting a `@font-face` removes the whole
+declaration, so on those five books:
+
+| rule | severity | before → after |
+| --- | --- | --- |
+| `css.font_face.missing_target` | Error | **21 → 0** (its own) |
+| `css.font_face.leaks_container_root` | Error | **8 → 0** (same rules; the url both escaped the container root *and* was absent) |
+| `css.font_face.declared` | Usage | **21 → 0** (a deleted declaration is no longer declared) |
+
+Nothing else moves, and the shelf audit reports zero introduced findings.
 
 ## RSC-005 — an `id` that is not a valid NCName (the first cross-file fixer)
 
