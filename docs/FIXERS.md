@@ -984,20 +984,48 @@ As with the stray-text fixer, `schema_violation` is one rule over a whole gramma
 so the match takes the message prefix (*value of attribute*) **and** `params`:
 `params[0]` ∈ {`lang`, `xml:lang`} and `params[1]` empty.
 
-**Fix** (`fix.empty_lang`, ConfirmNeeded). Delete the attribute, with the
-whitespace that separated it. One proposal per document; `lang` and `xml:lang` on
-the same element go together in it, since a document that has one almost always
-has the other (140 and 140 on the shelf).
+**Fix** (`fix.empty_lang`, ConfirmNeeded). **Two behaviours, decided by which
+element carries the attribute.**
 
-**Why it is `ConfirmNeeded` and not `AutoSafe`.** The deletion looks inert — an
-empty language tag names no language — but it is not. `<p lang="">` inside
-`<html lang="tr">` currently declares *undetermined*; with the attribute gone the
-paragraph inherits `tr`, and a reading system acts on that: hyphenation, the
-text-to-speech voice, font selection for CJK. XHTML 1.1 offers no valid way to
-spell "undetermined", so the real choice is between an invalid document and one
-that inherits its parent's language. That is a decision about the book, and the
-caller should make it — the alternative repair (guessing the intended language)
-is exactly the invention epubsana refuses.
+- **On the root `<html>`:** fill it with the book's own `<dc:language>` —
+  `lang=""` → `lang="tr"` — when the package declares exactly one, non-empty and
+  well-formed. The original spelling is kept, so an `xml:lang` stays `xml:lang`.
+- **Anywhere else:** delete the attribute, with the whitespace that separated it.
+
+One proposal per document; `lang` and `xml:lang` on the same element go together
+in it, since a document that has one almost always has the other.
+
+**The split was Doitsu's suggestion (MobileRead, 2026-08-13) and the corpus
+settled it.** He proposed filling from `dc:language` instead of deleting. Probed
+before answering: **all 447 empty `lang`/`xml:lang` attributes on the 157-book
+shelf sit on `<html>`** — not one on an inline element — and all three affected
+books declare a valid `dc:language` (`tr`, `en`, `tr`).
+
+**That measurement is what makes filling correct, and it is worth stating why the
+old reasoning failed.** This section used to argue: *`<p lang="">` inside
+`<html lang="tr">` declares "undetermined"; delete it and the paragraph inherits
+`tr`, which a reading system acts on.* Sound — **about a shape that does not
+occur.** On the *root* element the situation inverts: there is no ancestor to
+inherit from, so deleting leaves the document declaring no language at all, while
+filling gives it the language the book itself states. Nothing is invented; the
+value is read out of the book, exactly as `fix.empty_title` reads a title out of
+the book's own table of contents. The two fixers now apply one principle instead
+of two.
+
+**Why it stays `ConfirmNeeded`.** Filling a root language tag tells a reading
+system which hyphenation rules, text-to-speech voice and CJK font to use for the
+whole document. That is right when `dc:language` is right, and `dc:language` is
+metadata the same producer wrote — which is a reason to ask rather than assume.
+Deletion, where it still applies, is not inert either, for the original reason:
+an element that declared "undetermined" starts inheriting its parent's language.
+
+**Declines, in the filling branch.** Any of these falls back to deleting:
+
+- the package declares **more than one** `<dc:language>` — which is the document's
+  root language is then editorial;
+- it declares none, or an empty one;
+- the value is not a well-formed language tag (`en_US`, `turkish`), since writing
+  it would trade an invalid empty tag for an invalid non-empty one.
 
 **When it declines.**
 

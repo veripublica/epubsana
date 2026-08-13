@@ -2015,28 +2015,37 @@ fn empty_lang_attrs(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
         }
     }
 
+    // Read once for the whole run: the language every filled attribute takes.
+    let book_lang = sole_book_language(ws);
+
     let mut fixes = Vec::new();
     for doc in docs {
         let Some(text) = ws.get_text(&doc) else {
             continue;
         };
-        let Some(spans) = plan_empty_lang_drops(&text) else {
+        let Some(edits) = plan_empty_lang_edits(&text, book_lang.as_deref()) else {
             continue;
         };
-        if spans.is_empty() {
+        if edits.is_empty() {
             continue;
         }
 
-        let n = spans.len();
-        let preview: Vec<Change> = spans
+        let n = edits.len();
+        let filled = edits.iter().filter(|e| !e.replacement.is_empty()).count();
+        let preview: Vec<Change> = edits
             .iter()
             .take(8)
-            .map(|r| Change {
+            .map(|e| Change {
                 path: doc.clone(),
-                note: format!("delete empty attribute:{}", &text[r.clone()]),
+                note: if e.replacement.is_empty() {
+                    format!("delete empty attribute:{}", text[e.range.clone()].trim())
+                } else {
+                    format!("set {}", e.replacement)
+                },
             })
             .collect();
         let doc_for_apply = doc.clone();
+        let lang_for_apply = book_lang.clone();
 
         fixes.push(ProposedFix {
             fix_id: "fix.empty_lang",
@@ -2048,31 +2057,33 @@ fn empty_lang_attrs(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
                 Some("opf.content_document.schema_violation"),
             ),
             tier: Tier::ConfirmNeeded,
-            title: format!(
-                "Delete {n} empty lang/xml:lang attribute{} in {doc}",
-                if n == 1 { "" } else { "s" }
-            ),
+            title: match (filled, n - filled) {
+                (f, 0) => format!(
+                    "Set {f} empty lang/xml:lang attribute{} to the book's language in {doc}",
+                    if f == 1 { "" } else { "s" }
+                ),
+                (0, d) => format!(
+                    "Delete {d} empty lang/xml:lang attribute{} in {doc}",
+                    if d == 1 { "" } else { "s" }
+                ),
+                (f, d) => format!("Set {f} and delete {d} empty lang/xml:lang attributes in {doc}"),
+            },
             rationale:
                 "An empty language tag names no language, and EPUB 2's grammar does not allow it \
-                 — XHTML 1.1 has no valid way to spell HTML5's \"undetermined\". Deleting the \
-                 attribute is the only repair that does not invent a language the book never \
-                 stated. It is not, however, a no-op: an element that declared \"undetermined\" \
-                 will now inherit the language of its parent, which a reading system uses for \
-                 hyphenation, text-to-speech and font selection. Nothing else in the document is \
-                 touched."
+                 — XHTML 1.1 has no valid way to spell HTML5's \"undetermined\". On the root \
+                 <html> the attribute is filled with the book's own <dc:language> rather than \
+                 deleted: there is no ancestor to inherit from, so deleting would leave the \
+                 document stating no language at all. The value is read out of the book, never \
+                 invented, and is used only when the package declares exactly one well-formed \
+                 language. Anywhere else the attribute is deleted and the element inherits its \
+                 parent's language, which a reading system uses for hyphenation, text-to-speech \
+                 and font selection. Nothing else in the document is touched."
                     .to_string(),
             preview,
             apply_fn: Box::new(move |ws: &mut Workspace| {
                 if let Some(text) = ws.get_text(&doc_for_apply)
-                    && let Some(spans) = plan_empty_lang_drops(&text)
+                    && let Some(edits) = plan_empty_lang_edits(&text, lang_for_apply.as_deref())
                 {
-                    let edits = spans
-                        .into_iter()
-                        .map(|range| MetaEdit {
-                            range,
-                            replacement: String::new(),
-                        })
-                        .collect();
                     ws.set_text(&doc_for_apply, apply_edits(&text, edits));
                 }
             }),
@@ -2081,29 +2092,109 @@ fn empty_lang_attrs(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
     fixes
 }
 
-/// The spans to delete: every empty-valued `lang`, plain or `xml:`-prefixed.
+/// Is `tag` shaped like a language tag? A **deliberately narrow** BCP-47 check:
+/// a 2- or 3-letter primary subtag (ISO 639), then any number of alphanumeric
+/// subtags. `tr`, `en-US`, `zh-Hant-TW` pass; `en_US` and `turkish` do not.
+///
+/// BCP-47 does allow 4-8 letter primary subtags, but they are reserved or
+/// registered and do not occur in real EPUB metadata — whereas someone writing
+/// the language's *name* into `<dc:language>` does. Being narrow costs nothing
+/// and catches that, which matters because this decides whether a value is
+/// written into a document: an ill-formed tag would trade an invalid empty
+/// attribute for an invalid non-empty one, which is not a repair.
+fn is_language_tag(tag: &str) -> bool {
+    let mut parts = tag.split('-');
+    let Some(primary) = parts.next() else {
+        return false;
+    };
+    if !(2..=3).contains(&primary.len()) || !primary.chars().all(|c| c.is_ascii_alphabetic()) {
+        return false;
+    }
+    parts.all(|p| (1..=8).contains(&p.len()) && p.chars().all(|c| c.is_ascii_alphanumeric()))
+}
+
+/// The one language the package declares, if it declares exactly one usable one.
+///
+/// `None` — and so a fall back to deleting — when the book declares none, more
+/// than one (which is the *document's* root language is then editorial), an
+/// empty one, or something that is not a language tag.
+fn sole_book_language(ws: &Workspace) -> Option<String> {
+    let opf = ws
+        .names()
+        .find(|n| n.ends_with(".opf"))
+        .and_then(|n| ws.get_text(n))?;
+    let doc = parse_xml(&opf)?;
+    let metadata = doc
+        .descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "metadata")?;
+    let mut found: Option<String> = None;
+    for n in metadata
+        .children()
+        .filter(|n| n.is_element() && n.tag_name().name() == "language")
+    {
+        let text: String = n
+            .descendants()
+            .filter(|t| t.is_text())
+            .filter_map(|t| t.text())
+            .collect();
+        let text = text.trim().to_string();
+        if text.is_empty() {
+            continue;
+        }
+        if found.is_some() {
+            return None; // more than one: not ours to choose between
+        }
+        found = Some(text);
+    }
+    found.filter(|t| is_language_tag(t))
+}
+
+/// The edits for every empty-valued `lang`, plain or `xml:`-prefixed.
+///
+/// **On the root `<html>` the attribute is filled rather than deleted**, when the
+/// book declares a single usable `<dc:language>`: there is no ancestor to inherit
+/// from, so deleting would leave the document stating no language at all, while
+/// filling states the one the book itself declares — read out of the book, the
+/// way `empty_title` reads a title out of its table of contents. Everywhere else
+/// the attribute is deleted and the element inherits from its parent.
+///
 /// `None` (decline) if the document doesn't parse.
 ///
 /// One predicate covers both spellings: `roxmltree` reports the local name, so
 /// `lang` and `xml:lang` are both `"lang"` and differ only in namespace — and
 /// both are equally invalid when empty, so neither is special-cased.
-fn plan_empty_lang_drops(text: &str) -> Option<Vec<Range<usize>>> {
+fn plan_empty_lang_edits(text: &str, book_lang: Option<&str>) -> Option<Vec<MetaEdit>> {
     let prepared = prepare_content_doc(text);
     let doc = prepared.parse()?;
-    let mut spans = Vec::new();
+    let mut edits = Vec::new();
     for node in doc.descendants().filter(|n| n.is_element()) {
+        let on_root = node.tag_name().name() == "html" && node.parent_element().is_none();
         for attr in node
             .attributes()
             .filter(|a| a.name() == "lang" && a.value().is_empty())
         {
-            spans.push(attr_span_with_leading_space(
-                text,
-                prepared.unshift(attr.range()),
-            ));
+            let range = prepared.unshift(attr.range());
+            match book_lang.filter(|_| on_root) {
+                // Keep the attribute, its spelling (`lang` vs `xml:lang`) and its
+                // quote character; only the empty value changes.
+                Some(lang) => {
+                    let raw = &text[range.clone()];
+                    let Some(eq) = raw.find('=') else { continue };
+                    let quote = raw[eq + 1..].chars().next().unwrap_or('"');
+                    edits.push(MetaEdit {
+                        range,
+                        replacement: format!("{}{quote}{lang}{quote}", &raw[..=eq]),
+                    });
+                }
+                None => edits.push(MetaEdit {
+                    range: attr_span_with_leading_space(text, range),
+                    replacement: String::new(),
+                }),
+            }
         }
     }
-    spans.sort_by_key(|r| r.start);
-    Some(spans)
+    edits.sort_by_key(|e| e.range.start);
+    Some(edits)
 }
 
 /// The `<itemref>` children of the package's `<spine>`, in document order.
@@ -7225,16 +7316,76 @@ mod tests {
 
     // --- fix.empty_lang --------------------------------------------------
 
+    /// Apply the fixer with no book language available — the delete branch,
+    /// which is what every pre-existing test below exercises.
     fn drop_empty_langs(doc: &str) -> Option<String> {
-        let spans = plan_empty_lang_drops(doc)?;
-        let edits = spans
-            .into_iter()
-            .map(|range| MetaEdit {
-                range,
-                replacement: String::new(),
-            })
-            .collect();
-        Some(apply_edits(doc, edits))
+        Some(apply_edits(doc, plan_empty_lang_edits(doc, None)?))
+    }
+
+    /// Apply it with a book language, i.e. the filling branch on the root.
+    fn fill_empty_langs(doc: &str, lang: &str) -> Option<String> {
+        Some(apply_edits(doc, plan_empty_lang_edits(doc, Some(lang))?))
+    }
+
+    /// The shelf's whole population: an empty pair on the root element, with a
+    /// book that declares one language. Both are filled, both keep their
+    /// spelling, and the document ends up stating the language the book states.
+    #[test]
+    fn a_root_lang_is_filled_from_the_book_not_deleted() {
+        let doc = r#"<html lang="" xml:lang=""><body>x</body></html>"#;
+        assert_eq!(
+            fill_empty_langs(doc, "tr").unwrap(),
+            r#"<html lang="tr" xml:lang="tr"><body>x</body></html>"#
+        );
+    }
+
+    /// Single quotes survive: only the value between them changes.
+    #[test]
+    fn filling_keeps_the_original_quote_character() {
+        let doc = "<html lang=''><body>x</body></html>";
+        assert_eq!(
+            fill_empty_langs(doc, "en").unwrap(),
+            "<html lang='en'><body>x</body></html>"
+        );
+    }
+
+    /// Off the root there is an ancestor to inherit from, and an empty tag may
+    /// have meant "not the book's language" — so it is deleted, never filled.
+    #[test]
+    fn a_non_root_empty_lang_is_still_deleted_even_with_a_book_language() {
+        let doc = r#"<html lang="tr"><body><span lang="">x</span></body></html>"#;
+        assert_eq!(
+            fill_empty_langs(doc, "tr").unwrap(),
+            r#"<html lang="tr"><body><span>x</span></body></html>"#
+        );
+    }
+
+    /// With no usable book language the root falls back to the old behaviour.
+    #[test]
+    fn without_a_book_language_the_root_is_deleted_as_before() {
+        let doc = r#"<html lang=""><body>x</body></html>"#;
+        assert_eq!(
+            drop_empty_langs(doc).unwrap(),
+            r#"<html><body>x</body></html>"#
+        );
+    }
+
+    #[test]
+    fn a_language_tag_is_recognised_but_a_language_name_is_not() {
+        assert!(is_language_tag("tr"));
+        assert!(is_language_tag("en-US"));
+        assert!(is_language_tag("zh-Hant-TW"));
+        // The two shapes the corpus actually produces, both rejected.
+        assert!(
+            !is_language_tag("en_US"),
+            "an underscore is not a separator"
+        );
+        assert!(!is_language_tag("turkish"), "a language name is not a tag");
+        assert!(!is_language_tag(""), "and neither is nothing");
+        assert!(
+            !is_language_tag("e"),
+            "a one-letter primary subtag is not one"
+        );
     }
 
     /// The shelf's shape: both spellings on the same element, both empty.
@@ -7255,7 +7406,10 @@ mod tests {
             r#"<html><body><p lang="en_US">x</p></body></html>"#,
             r#"<html><body><p lang="tr" xml:lang="tr">x</p></body></html>"#,
         ] {
-            assert!(plan_empty_lang_drops(doc).unwrap().is_empty(), "{doc}");
+            assert!(
+                plan_empty_lang_edits(doc, None).unwrap().is_empty(),
+                "{doc}"
+            );
         }
     }
 

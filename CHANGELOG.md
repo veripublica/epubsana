@@ -8,6 +8,26 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [Unreleased]
+
+### Changed
+
+- **`fix.empty_lang` now fills the root `<html>` language instead of deleting
+  it.** An empty `lang=""` / `xml:lang=""` on the root element is set to the
+  book's own `<dc:language>` — the original spelling and quote character are
+  kept. Off the root, the attribute is still deleted so the element inherits from
+  its parent.
+
+  Suggested by Doitsu on MobileRead, and the corpus decided it: **all 447 empty
+  language attributes on the 157-book shelf sit on `<html>`**, where there is no
+  ancestor to inherit from — so deleting left a document declaring no language at
+  all. The value is read out of the book, never invented, the same way
+  `fix.empty_title` reads a title out of the book's own table of contents.
+
+  Falls back to deleting when the package declares no `<dc:language>`, more than
+  one, an empty one, or a value that is not a well-formed language tag
+  (`en_US`, `turkish`).
+
 ## [0.10.0] - 2026-08-13
 
 ### Added
