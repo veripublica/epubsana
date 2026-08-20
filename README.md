@@ -13,7 +13,7 @@ changed**. It never guesses, and it preserves everything it doesn't touch.
 ## Status
 
 Early but working. The core contract (`Workspace` → detect → propose → confirm →
-apply → report) is solid, with thirty-two fixers so far:
+apply → report) is solid, with thirty-three fixers so far:
 
 - **`RSC-016`** — undeclared HTML entities (`&nbsp;`, `&mdash;`, …) → the exact
   character each denotes.
@@ -27,6 +27,8 @@ apply → report) is solid, with thirty-two fixers so far:
 - **`RSC-005` / `empty_title`** — an empty `<title>` filled from the book's own
   TOC label (or its first heading); never invented.
 - **`RSC-020`** — an unencoded space in a manifest `href` → `%20`.
+- **`RSC-020` / `ncx.content_src`** — the same space in an NCX `<content src>`.
+  A book carrying both needs both: encoding only the manifest leaves it invalid.
 - **`OPF-014`** — a content property a document demonstrably uses → declared on
   its manifest item.
 - **`PKG-006`** — a `mimetype` entry that isn't first in the ZIP → moved to the

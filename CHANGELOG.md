@@ -8,6 +8,64 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [Unreleased]
+
+### Added
+
+- **A 33rd fixer: `fix.ncx_content_src_spaces`** (`RSC-020` /
+  `opf.ncx.content_src_unencoded_space`, AutoSafe). Percent-encodes a raw space
+  in a `<navPoint>`'s `<content src>`, the NCX sibling of the manifest-href fixer
+  that has shipped since 0.5.0. Same argument, same edit: a `src` is a URL, a raw
+  space is not a legal URL character, and `%20` resolves back to exactly the same
+  container entry. The file is not renamed.
+
+  **Encoding only the manifest left such a book invalid**, and until epubveri
+  0.9.26 nobody could see it — the NCX references were not reported, so the older
+  fix looked complete. It was never complete; it was unobserved. epubveri
+  measured all three states against epubcheck 5.3.0: both references raw is
+  invalid in both tools, manifest-only encoded is *still* invalid, both encoded is
+  valid in both.
+
+  One document is usually named by many navigation points — 28 of them in the
+  worst book on the shelf — so the fix is planned once per NCX and encodes every
+  element carrying a flagged value. On the 375-book shelf: 3 books, 65 findings,
+  all cleared, one book newly valid, no regressions.
+
+  `PKG-006` survives the fix and should: it is a *warning* about the space in the
+  ZIP entry name itself, and the book's verdict is valid with it present.
+
+### Changed
+
+- **The `epubveri` floor moves to 0.9.26**, which is where
+  `opf.ncx.content_src_unencoded_space` is born. Below it the new fixer is not
+  wrong but silent, and a silent half-repair returns a book that is still invalid
+  — an outcome a user cannot tell apart from "epubsana could not help".
+  `Cargo.toml` carries the full reasoning, including why this floor is a
+  completeness one rather than the usual correctness one.
+
+### Fixed
+
+- **`fix.content_properties` no longer writes an EPUB 3 attribute into an EPUB 2
+  package.** `properties` does not exist in OPS 2.0.1, so on a `version="2.0"`
+  book the fix cleared the reported `OPF-014` and produced
+  `attribute "properties" is not allowed here` in its place — an error the book
+  did not have before. The fixer now declines on such a package outright: there
+  is no edit that repairs the book, so declining is the repair.
+
+  Found by the whole-shelf regression audit after moving to epubveri 0.9.26, not
+  by any test. The chain begins upstream: epubveri 0.9.20 widened its remote-URL
+  predicate to match epubcheck (any scheme but `data:` and `file:`), which made
+  Calibre's `url(res:///system/fonts/…)` a remote reference and raised `OPF-014`
+  on the stylesheet. On the 375-book shelf the rule fires in 6 books, 5 of them
+  EPUB 3 and correct; the one EPUB 2 book was the shelf's only regression. Its
+  error count was unchanged by the repair — a real finding was being traded for
+  an authored one.
+
+  Two fixers here were undoing each other: `fix.epub3_attr_in_epub2_package`
+  exists to *remove* exactly the attribute this one was adding, and neither read
+  the package version. A package whose `version` cannot be read is not treated as
+  EPUB 2, so an unparseable package loses no repair.
+
 ## [0.11.0] - 2026-08-13
 
 ### Added

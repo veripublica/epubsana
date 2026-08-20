@@ -52,9 +52,9 @@ dependencies = [
 
 [[package]]
 name = "epubveri"
-version = "0.9.17"
+version = "0.9.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e9aae3e666bc055d403c933d3c2923e6933a87949f31d088ec0d0dd7f835597a"
+checksum = "6d289b3db4fa3e5b45d48b3c554373e155463076a8306da5094acd140c20661e"
 dependencies = [
  "roxmltree",
  "serde",
@@ -296,9 +296,9 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
 name = "styloria"
-version = "0.9.0"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d196311cb5f57744194eaf3e8a46858dac1b95ae3e9c59aa39761d1e23113f36"
+checksum = "5f5d27daeb5851a035db0a101c062dfb8720455f69da27ab50ad2be1db5ac69b"
 
 [[package]]
 name = "syn"

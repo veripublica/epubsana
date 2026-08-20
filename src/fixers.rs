@@ -24,6 +24,7 @@ pub fn plan(report: &Report, ws: &Workspace, _goal: Goal) -> Vec<ProposedFix> {
     fixes.extend(content_type_meta(report, ws));
     fixes.extend(ncx_dtb_uid(report, ws));
     fixes.extend(manifest_href_spaces(report, ws));
+    fixes.extend(ncx_content_src_spaces(report, ws));
     fixes.extend(content_properties(report, ws));
     fixes.extend(empty_titles(report, ws));
     fixes.extend(bare_text_in_body(report, ws));
@@ -105,6 +106,7 @@ pub fn handled_rules() -> &'static [&'static str] {
         "opf.manifest_item.non_preferred_media_type",
         "opf.manifest_item.unencoded_space_in_href",
         "opf.metadata.empty_element",
+        "opf.ncx.content_src_unencoded_space",
         "opf.package.opf_identifier_not_empty",
         "opf.package.schema_violation",
         "opf.package.unique_identifier_unresolved",
@@ -1529,6 +1531,127 @@ fn manifest_href_spaces(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
                 if let Some(text) = ws.get_text(&opf_for_apply) {
                     let edits = plan_href_encoding(&text, &hrefs_for_apply);
                     ws.set_text(&opf_for_apply, apply_edits(&text, edits));
+                }
+            }),
+        });
+    }
+    fixes
+}
+
+/// One edit per NCX `<content>` whose `src` is exactly one of `srcs`: the same
+/// element with its `src`'s spaces percent-encoded. Elements we can't locate are
+/// skipped (no edit), never guessed at.
+///
+/// Every element carrying the value is edited, not the first: a single document
+/// is typically named by many `<navPoint>`s, epubveri reports one finding per
+/// navPoint, and they are all the same edit.
+fn plan_src_encoding(ncx: &str, srcs: &BTreeSet<String>) -> Vec<MetaEdit> {
+    let Some(doc) = parse_xml(ncx) else {
+        return Vec::new();
+    };
+    let mut edits = Vec::new();
+    for n in doc
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "content")
+    {
+        let Some(src) = n.attr_no_ns("src") else {
+            continue;
+        };
+        if !srcs.contains(src) || !src.contains(' ') {
+            continue;
+        }
+        let range = n.range();
+        if let Some(replacement) =
+            set_attr_value(&ncx[range.clone()], "src", &src.replace(' ', "%20"))
+        {
+            edits.push(MetaEdit { range, replacement });
+        }
+    }
+    edits
+}
+
+/// `RSC-020` / `opf.ncx.content_src_unencoded_space`: a `<navPoint>`'s
+/// `<content src>` contains a raw space. The NCX sibling of
+/// [`manifest_href_spaces`], with the same argument and the same edit — a `src`
+/// is a URL, a raw space is not a legal URL character, and `%20` resolves back
+/// to exactly the same container entry. The **file keeps its name**. `AutoSafe`.
+///
+/// **Repairing only the manifest leaves the book invalid**, which is why this
+/// exists as its own fixer rather than as an extension of the other. epubveri
+/// measured the three states against epubcheck 5.3.0 on a book whose one content
+/// document is named `a b.xhtml`: both references raw is invalid in both tools,
+/// **manifest-only encoded is still invalid**, both encoded is valid in both. Until
+/// epubveri 0.9.26 the second finding did not exist, so the manifest fix looked
+/// complete; it was never complete, it was unobserved.
+///
+/// The finding is located in the **NCX**, not the package document — the one
+/// structural difference from the manifest sibling.
+///
+/// `PKG-006` survives this fix and should: it is a *warning* about the space in
+/// the ZIP entry name itself, and the verdict is valid with it present.
+fn ncx_content_src_spaces(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    // ncx path -> the srcs epubveri flagged in it (params[0]), deduplicated.
+    let mut by_ncx: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for m in &report.messages {
+        if m.rule != Some("opf.ncx.content_src_unencoded_space") {
+            continue;
+        }
+        let (Some(ncx), Some(src)) = (m.location.as_deref(), m.params.first()) else {
+            continue;
+        };
+        by_ncx
+            .entry(ncx.to_string())
+            .or_default()
+            .insert(src.clone());
+    }
+
+    let mut fixes = Vec::new();
+    for (ncx, srcs) in by_ncx {
+        let Some(text) = ws.get_text(&ncx) else {
+            continue;
+        };
+        let edits = plan_src_encoding(&text, &srcs);
+        if edits.is_empty() {
+            continue; // nothing we could locate — decline rather than guess
+        }
+
+        let preview: Vec<Change> = srcs
+            .iter()
+            .filter(|s| s.contains(' '))
+            .map(|s| Change {
+                path: ncx.clone(),
+                note: format!("encode src \"{s}\" → \"{}\"", s.replace(' ', "%20")),
+            })
+            .collect();
+        let n = edits.len();
+        let ncx_for_apply = ncx.clone();
+        let srcs_for_apply = srcs.clone();
+
+        fixes.push(ProposedFix {
+            fix_id: "fix.ncx_content_src_spaces",
+            addresses_id: "RSC-020".to_string(),
+            addresses_rule: Some("opf.ncx.content_src_unencoded_space"),
+            addresses_severity: addressed_severity(
+                report,
+                "RSC-020",
+                Some("opf.ncx.content_src_unencoded_space"),
+            ),
+            tier: Tier::AutoSafe,
+            title: format!(
+                "Percent-encode {n} navigation target{} containing spaces in {ncx}",
+                if n == 1 { "" } else { "s" }
+            ),
+            rationale: "A `<content src>` is a URL, and a raw space is not a legal URL character. \
+                 Each flagged space becomes `%20`, which resolves to the very same file — the \
+                 entry's name in the container is not changed. The same document is usually \
+                 named by several navigation points; every one carrying a flagged value is \
+                 encoded, and nothing else in the src is touched."
+                .to_string(),
+            preview,
+            apply_fn: Box::new(move |ws: &mut Workspace| {
+                if let Some(text) = ws.get_text(&ncx_for_apply) {
+                    let edits = plan_src_encoding(&text, &srcs_for_apply);
+                    ws.set_text(&ncx_for_apply, apply_edits(&text, edits));
                 }
             }),
         });
@@ -3435,6 +3558,12 @@ fn epub3_attrs_in_epub2_package(report: &Report, ws: &Workspace) -> Vec<Proposed
         let (Some(file), Some(attr)) = (m.location.as_deref(), m.params.first()) else {
             continue;
         };
+        // NB the two spellings differ: since epubveri 0.9.19 an OPF-namespaced
+        // name arrives here prefixed (`opf:file-as`), while the lookup below is
+        // roxmltree's `attr.name()`, which is the local name. Harmless today —
+        // the only shapes this fixer accepts are unprefixed — but a prefixed
+        // attribute would never match, so resolve the name properly before
+        // adding one.
         by_file
             .entry(file.to_string())
             .or_default()
@@ -4801,6 +4930,21 @@ fn plan_href_encoding(opf: &str, hrefs: &BTreeSet<String>) -> Vec<MetaEdit> {
 /// the manifest say what the document demonstrably does: add the token to that
 /// item's `properties`. It adds a declaration; it never touches the content.
 /// Declines when the manifest item can't be located. `AutoSafe`.
+///
+/// **Declines outright on an EPUB 2 package, and that is the whole point of the
+/// version read.** `properties` is an EPUB 3 attribute; OPS 2.0.1's manifest has
+/// no such concept, so writing one repairs the reported defect and creates an
+/// RSC-005 in its place — the exact attribute [`epub3_attrs_in_epub2_package`]
+/// exists to *remove*. Measured on the 375-book shelf (2026-08-20, epubveri
+/// 0.9.26): one book carried the shape, `version="2.0"` with
+/// `url(res:///system/fonts/…)` in a stylesheet, and this fixer was the shelf's
+/// only regression.
+///
+/// Whether the finding should reach us at all on an EPUB 2 book is epubveri's
+/// question, not ours — every neighbouring OPF-014 site there is guarded by
+/// `is_epub3` and the stylesheet one is not. The guard here stands either way:
+/// a repairer that only declines the false positives its detector currently has
+/// is one release away from the next one.
 fn content_properties(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
     // content-document path -> the property tokens it uses but doesn't declare.
     let mut by_doc: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
@@ -4823,6 +4967,10 @@ fn content_properties(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
     let Some(opf_path) = opf_path(ws) else {
         return Vec::new();
     };
+    // EPUB 2 has no `properties` attribute to add the token to. See the note above.
+    if ws.get_text(&opf_path).is_some_and(|t| is_epub2_package(&t)) {
+        return Vec::new();
+    }
 
     let mut fixes = Vec::new();
     for (doc, props) in by_doc {
@@ -5137,6 +5285,20 @@ fn collapse_ws(s: &str) -> String {
 /// The container path of the OPF (via `container.xml`).
 fn opf_path(ws: &Workspace) -> Option<String> {
     opf_path_from_container(&ws.get_text("META-INF/container.xml")?)
+}
+
+/// Whether the package document declares EPUB 2 (`version="2.0"`, or the `1.x`
+/// OEBPS spellings that predate it).
+///
+/// This exists so a fixer can refuse to write an attribute the target version
+/// has no concept of. An absent or unparseable `version` reads as **not** EPUB 2:
+/// the callers use it to decline, and declining on a package we cannot read
+/// would be guessing in the direction that removes a repair.
+fn is_epub2_package(opf: &str) -> bool {
+    parse_xml(opf)
+        .as_ref()
+        .and_then(|d| d.root_element().attr_no_ns("version"))
+        .is_some_and(|v| v.trim().starts_with('2') || v.trim().starts_with('1'))
 }
 
 /// The directory part of a container path, `""` for a top-level entry.
@@ -6756,6 +6918,150 @@ mod tests {
 
     /// A report carrying one `RSC-001` per named manifest id — the only part of
     /// a real report the dangling fixers read.
+    /// A container whose package declares `version`, holding one stylesheet the
+    /// finding names — the shape `fix.content_properties` acts on.
+    fn properties_ws(version: &str) -> Workspace {
+        let opf = format!(
+            r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="{version}" unique-identifier="id">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="id">x</dc:identifier></metadata>
+  <manifest><item href="s.css" id="css" media-type="text/css"/></manifest>
+  <spine toc="ncx"/>
+</package>"#
+        );
+        container(&[
+            (
+                "META-INF/container.xml",
+                r#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#,
+            ),
+            ("content.opf", &opf),
+            ("s.css", "@font-face{src:url(res:///system/fonts/a.ttf)}"),
+        ])
+    }
+
+    fn undeclared_property(doc: &str, prop: &str) -> Report {
+        let mut report = Report::default();
+        report.messages = vec![epubveri::report::Message {
+            id: "OPF-014",
+            severity: Severity::Error,
+            text: String::new(),
+            location: Some(doc.to_string()),
+            position: None,
+            rule: Some("opf.content_document.property_used_undeclared"),
+            params: vec![prop.to_string()],
+            element_path: None,
+        }];
+        report
+    }
+
+    #[test]
+    fn properties_are_declared_on_an_epub3_package() {
+        let ws = properties_ws("3.0");
+        let fixes = content_properties(&undeclared_property("s.css", "remote-resources"), &ws);
+        assert_eq!(fixes.len(), 1, "EPUB 3 is where the attribute belongs");
+    }
+
+    /// The shelf's only regression on 2026-08-20: adding an EPUB 3 attribute to
+    /// an EPUB 2 package cleared the OPF-014 and produced an RSC-005 in its
+    /// place. `properties` does not exist in OPS 2.0.1, so there is no edit that
+    /// repairs this book — declining is the whole repair.
+    #[test]
+    fn an_epub2_package_has_nowhere_to_declare_a_property() {
+        let ws = properties_ws("2.0");
+        let fixes = content_properties(&undeclared_property("s.css", "remote-resources"), &ws);
+        assert!(fixes.is_empty(), "EPUB 2 has no properties attribute");
+    }
+
+    #[test]
+    fn version_is_read_from_the_package_not_the_xml_declaration() {
+        // The XML declaration's own `version="1.0"` sits above the package
+        // element and must not be what the guard reads.
+        let opf = r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0"/>"#;
+        assert!(!is_epub2_package(opf));
+        assert!(is_epub2_package(
+            r#"<package xmlns="http://www.idpf.org/2007/opf" version="2.0"/>"#
+        ));
+        // A package we cannot read is not treated as EPUB 2 — declining there
+        // would remove a repair on a guess.
+        assert!(!is_epub2_package("<package/>"));
+        assert!(!is_epub2_package("not xml at all"));
+    }
+
+    // Two navPoints naming the SAME document, which is the shape that matters:
+    // the worst book on the shelf names one document from 28 of them.
+    const SPACED_NCX: &str = r#"<?xml version="1.0"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
+  <navMap>
+    <navPoint id="n1" playOrder="1"><navLabel><text>One</text></navLabel><content src="a b.xhtml"/></navPoint>
+    <navPoint id="n2" playOrder="1"><navLabel><text>Two</text></navLabel><content src="a b.xhtml"/></navPoint>
+    <navPoint id="n3" playOrder="2"><navLabel><text>Three</text></navLabel><content src="a b.xhtml#s2"/></navPoint>
+    <navPoint id="n4" playOrder="3"><navLabel><text>Four</text></navLabel><content src="clean.xhtml"/></navPoint>
+  </navMap>
+</ncx>"#;
+
+    fn encoded_ncx(srcs: &[&str]) -> String {
+        let values: BTreeSet<String> = srcs.iter().map(|s| s.to_string()).collect();
+        let edits = plan_src_encoding(SPACED_NCX, &values);
+        apply_edits(SPACED_NCX, edits)
+    }
+
+    /// The worst book on the shelf names one document from 28 navPoints, so
+    /// editing the first match only would leave 27 findings behind.
+    #[test]
+    fn every_content_element_carrying_the_value_is_encoded() {
+        let out = encoded_ncx(&["a b.xhtml"]);
+        // Both navPoints naming the document are edited. Editing only the first
+        // match would leave 27 findings behind on the shelf's worst book, and the
+        // count is what catches that — a `contains` check passes either way.
+        assert_eq!(
+            out.matches(r#"src="a%20b.xhtml""#).count(),
+            2,
+            "every element carrying the value, not the first"
+        );
+        assert!(
+            !out.contains(r#"src="a b.xhtml""#),
+            "no raw spelling survives"
+        );
+        // A src that merely shares a prefix is a different value and a different
+        // finding, so it is left for its own report.
+        assert!(
+            out.contains(r#"src="a b.xhtml#s2""#),
+            "the fragment-bearing src was not reported, so it is left alone"
+        );
+    }
+
+    #[test]
+    fn a_src_with_a_fragment_is_encoded_when_it_is_the_reported_value() {
+        let out = encoded_ncx(&["a b.xhtml#s2"]);
+        assert!(
+            out.contains(r#"src="a%20b.xhtml#s2""#),
+            "the fragment is preserved"
+        );
+        assert!(
+            out.contains(r#"src="a b.xhtml""#),
+            "the other src is untouched"
+        );
+    }
+
+    #[test]
+    fn a_src_without_spaces_is_never_touched() {
+        assert!(plan_src_encoding(SPACED_NCX, &["clean.xhtml".to_string()].into()).is_empty());
+    }
+
+    #[test]
+    fn an_unreported_src_is_left_alone() {
+        // Only what epubveri flagged is encoded — the fixer never goes looking
+        // for other spaces it could fix.
+        let out = encoded_ncx(&["nothing here.xhtml"]);
+        assert_eq!(out, SPACED_NCX, "no finding named it, so nothing changes");
+    }
+
+    #[test]
+    fn an_unparseable_ncx_declines() {
+        assert!(plan_src_encoding("<ncx><navMap>", &["a b.xhtml".to_string()].into()).is_empty());
+    }
+
     fn report_with_dangling(ids: &[&str]) -> Report {
         let mut report = Report::default();
         report.messages = ids

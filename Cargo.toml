@@ -42,6 +42,18 @@ members = ["epubsana-wasm"]
 #   Unlike `empty_title` this one is **argued, not measured**: the shared shelf
 #   holds no OEBPS 1.2 book, so there is nothing here to reproduce it on. It is
 #   the same class, and the floor is where that class gets handled.
+# - **0.9.26, and this one is a different class — completeness, not correctness.**
+#   `fix.ncx_content_src_spaces` dispatches on `opf.ncx.content_src_unencoded_space`,
+#   a rule that does not exist below 0.9.26. Under an older detector the fixer is
+#   not wrong, it is *silent*: `fix.manifest_href_spaces` encodes the manifest
+#   half, the NCX half is never reported, and the book comes back from a repair
+#   still invalid — measured by epubveri against epubcheck 5.3.0 on all three
+#   states. A user cannot tell that outcome from "epubsana could not help", which
+#   is the reason to make it a floor rather than a preference.
+#
+#   The precedent for a non-correctness floor is 0.9.7's second clause above: the
+#   stray-text fixer needs per-run positions, and a floor is how a fixer's
+#   prerequisite gets stated once instead of being rediscovered per book.
 #
 # The bump itself cost no source change: epubsana's whole surface is
 # `validate_bytes`, `report::{Report, Severity}` and the three `envelope` types
@@ -58,7 +70,7 @@ members = ["epubsana-wasm"]
 #
 # For local co-development of epubveri, add an uncommitted override:
 #   [patch.crates-io] epubveri = { path = "../epubveri" }
-epubveri = "0.9.16"
+epubveri = "0.9.26"
 # Pure-Rust only (no C deps), same philosophy as epubveri: zip's "deflate"
 # feature uses zlib-rs (Rust) on the 8.x line; bzip2/zstd (C) stay disabled.
 # Aligned to epubveri's zip major — the family shares one zip version because

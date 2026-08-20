@@ -30,6 +30,7 @@ grows one carefully-argued entry at a time.
 | `NCX-001` | *(none)* | ConfirmNeeded | The NCX `dtb:uid` disagrees with the package identifier | [Set `dtb:uid` to the package's unique identifier](#ncx-001--ncx-dtbuid-mismatch) |
 | `RSC-005` | `opf.content_document.empty_title` | ConfirmNeeded | An XHTML `<title>` element is empty | [Fill it from the book's own TOC label, else its first heading](#rsc-005--empty-title) |
 | `RSC-020` | `opf.manifest_item.unencoded_space_in_href` | AutoSafe | A manifest `href` contains a raw space | [Percent-encode the space as `%20`](#rsc-020--unencoded-space-in-a-manifest-href) |
+| `RSC-020` | `opf.ncx.content_src_unencoded_space` | AutoSafe | An NCX `<content src>` contains a raw space | [Percent-encode the space as `%20`](#rsc-020--unencoded-space-in-an-ncx-content-src) |
 | `OPF-014` | `opf.content_document.property_used_undeclared` | AutoSafe | A content document uses a feature its manifest item doesn't declare | [Add the token to that item's `properties`](#opf-014--undeclared-content-property) |
 | `PKG-006` | *(none)* | AutoSafe | The `mimetype` entry is not first in the ZIP, as OCF requires | [Re-emit it first and stored, touching no content](#pkg-006--mimetype-is-not-the-first-entry) |
 | `RSC-005` | `opf.content_document.schema_violation` (stray text / inline element / incomplete content, in `<body>` or `<blockquote>`) | ConfirmNeeded | EPUB 2 text or inline elements sit where the grammar requires block content | [Wrap each run in one `<div>`, leaving whitespace alone](#rsc-005--non-block-content-in-body-or-blockquote-epub-2) |
@@ -287,6 +288,42 @@ are encoded; nothing else in the href is touched.
 **When it declines.** If the OPF won't parse, or no manifest item carries the
 reported href verbatim, no edit is made.
 
+**It repairs only the manifest.** The same file may be named again from the NCX,
+and that reference is a separate finding with its own fixer — see below. A book
+carrying both needs both, and clearing only one leaves it invalid.
+
+---
+
+## RSC-020 — unencoded space in an NCX `<content src>`
+
+**Finding.** `opf.ncx.content_src_unencoded_space`. A `<navPoint>`'s
+`<content src>` contains a raw space; epubveri reports the offending `src` in
+`params[0]`, and the finding is located in the **NCX**, not the package document.
+
+**Fix** (`fix.ncx_content_src_spaces`, AutoSafe). In that NCX, percent-encode
+each space in every `<content>` whose `src` is the reported value. The quote
+style and every other attribute are preserved.
+
+**Why it's safe.** It is the same argument as its manifest sibling, and the same
+edit: a `src` is a URL, a raw space is not a legal URL character, and `%20`
+resolves back to exactly the same container entry. The file is not renamed.
+epubveri measured this directly against epubcheck 5.3.0 on a book with one
+content document named `a b.xhtml`: with both references raw the book is invalid
+in both tools, with **only the manifest encoded it is still invalid**, and with
+both encoded both tools call it valid.
+
+**One `src` value, every element carrying it.** A single document is typically
+named by many `<navPoint>`s — 28 of them in the worst book on the shelf — and
+epubveri reports one finding per navPoint. All of them are the same edit, so the
+fix is planned once per NCX and encodes every matching element.
+
+**When it declines.** If the NCX won't parse, or no `<content>` carries the
+reported `src` verbatim, no edit is made.
+
+**`PKG-006` remains afterwards, and that is correct.** It is a *warning* about
+the space in the ZIP entry name itself, and the book's verdict is valid with it
+present. Renaming container entries is not something any fixer here does.
+
 ---
 
 ## OPF-014 — undeclared content property
@@ -308,6 +345,14 @@ exactly this declaration.
 
 **When it declines.** If the OPF won't parse, no manifest item resolves to the
 document, or the property is already declared, nothing is changed.
+
+**It also declines on the whole book when the package declares EPUB 2**
+(`version="2.0"`, or the `1.x` OEBPS spellings). `properties` is an EPUB 3
+attribute and OPS 2.0.1's manifest has no equivalent, so adding one clears the
+reported defect and produces `attribute "properties" is not allowed here` in its
+place — an error the book did not have. There is no edit that repairs such a
+book; declining is the repair. A package whose `version` cannot be read is not
+treated as EPUB 2, since declining there would withdraw a repair on a guess.
 
 ---
 
