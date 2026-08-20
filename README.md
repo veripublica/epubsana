@@ -13,7 +13,7 @@ changed**. It never guesses, and it preserves everything it doesn't touch.
 ## Status
 
 Early but working. The core contract (`Workspace` → detect → propose → confirm →
-apply → report) is solid, with thirty-four fixers so far:
+apply → report) is solid, with thirty-five fixers so far:
 
 - **`RSC-016`** — undeclared HTML entities (`&nbsp;`, `&mdash;`, …) → the exact
   character each denotes.
@@ -32,6 +32,9 @@ apply → report) is solid, with thirty-four fixers so far:
 - **`RSC-005` / `lang_xmllang_mismatch`** — `lang` and `xml:lang` disagreeing on
   one element, where one of them is empty → filled from the other. Declines when
   both carry a real value; choosing a language is not ours to do.
+- **`RSC-007` / `ncx.content_src`** — a navigation entry whose path no longer
+  resolves, repointed when exactly one container entry carries that name.
+  Ambiguity declines.
 - **`OPF-014`** — a content property a document demonstrably uses → declared on
   its manifest item.
 - **`PKG-006`** — a `mimetype` entry that isn't first in the ZIP → moved to the

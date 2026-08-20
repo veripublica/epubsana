@@ -42,6 +42,7 @@ grows one carefully-argued entry at a time.
 | `RSC-005` | `ncx.ids.duplicate_id` | ConfirmNeeded | Two or more NCX elements share an `id` | [Keep the first, rename later duplicates uniquely](#rsc-005--ncx-internal-consistency) |
 | `RSC-005` | `ncx.play_order.duplicate`, `…target_mismatch`, `…gap`, `…no_origin` | ConfirmNeeded | The NCX's `playOrder` values are inconsistent | [Reassign densely by document order, same target → same number](#rsc-005--ncx-internal-consistency) |
 | `RSC-005` | `opf.content_document.lang_xmllang_mismatch` | AutoSafe | `lang` and `xml:lang` disagree on one element | [Fill the empty one from the populated one; decline if both are set](#rsc-005--lang-and-xmllang-disagree) |
+| `RSC-007` | `opf.ncx.content_src_missing_resource` | ConfirmNeeded | An NCX `<content src>` path no longer resolves | [Repoint it when exactly one entry carries the basename](#rsc-007--an-ncx-content-src-whose-path-no-longer-resolves) |
 | `RSC-007` | `opf.guide.reference_missing_resource` | ConfirmNeeded | A `<guide>` reference points at a resource that doesn't exist | [Drop the reference; drop the guide if it empties](#rsc-007--rsc-017--rsc-012--guide-references) |
 | `RSC-017` | `opf.guide.duplicate_reference` | ConfirmNeeded | Two `<guide>` references share a `type` and `href` | [Keep the first, drop the duplicates](#rsc-007--rsc-017--rsc-012--guide-references) |
 | `RSC-012` | `opf.guide.reference_fragment_not_defined` | ConfirmNeeded | A `<guide>` reference's `#fragment` resolves to no `id` in a target that does exist | [Drop the fragment, keep the document](#rsc-007--rsc-017--rsc-012--guide-references) |
@@ -1711,6 +1712,51 @@ consistent with every other structural fixer here, and stricter than before.
 
 **Measured.** 14 `duplicate` + 8 `target_mismatch` + 1 `gap` cleared across the
 shelf, nothing introduced, and one more book reaches fully valid (5 → **6**).
+
+---
+
+## RSC-007 — an NCX `<content src>` whose path no longer resolves
+
+**Finding.** `opf.ncx.content_src_missing_resource`. A `<navPoint>`'s `<content
+src>` names a file that is not at that path; `params[0]` carries the raw `src`.
+
+**Fix** (`fix.ncx_src_wrong_path`, ConfirmNeeded). If **exactly one** container
+entry has that basename, rewrite the path to point at it, relative to the NCX.
+The fragment, if any, is carried across unchanged.
+
+**It is the NCX member of a family already closed elsewhere**, and shares its
+argument and its code with `fix.reference_wrong_path`: the same
+`repointed_reference` decides the target, so the guards cannot drift between the
+two sites. "Missing resource" is now repaired at the content document, the
+`<guide>`, the manifest item, `@font-face` and the NCX; `css.url.missing_resource`
+is the one member still open.
+
+**Why it's safe.** The reference names a file by basename, exactly one entry in
+the container carries that basename, so that entry is the file it meant — not a
+guess. Where the `src` carries a fragment, that fragment must already exist in
+the chosen target, so the repair cannot trade this finding for a dangling
+`RSC-012`; the check is also evidential, since a same-named file that merely
+happened to be elsewhere would not carry the right anchor.
+
+**When it declines.** A basename matching nothing (the file is genuinely absent)
+or several entries (which one it meant is a guess); an external URL, a bare
+hostname, placeholder junk, or a percent-encoded path; a fragment the target does
+not define; and a `src` that cannot be found as a quoted attribute value in the
+NCX.
+
+**Measured (385 books, 2026-08-21).** 46 findings across 5 books, of which
+**exactly one is repairable** — a Calibre book whose NCX points at
+`OEBPS/Text/titlepage.xhtml` while the file sits at the container root. Every
+other finding names a file that is simply not in the book, which is the shape
+this rule mostly has.
+
+**This rule was closed and re-opened by the corpus, for the second time in this
+catalogue.** `ncx_src_probe` measured it on 2026-08-12 across 157 books and found
+**zero** repairable cases — all seven findings pointed at absent files, so there
+was nothing to repair toward and the rule was left alone. The shelf then grew to
+385 and produced one case with the determinate shape. The same thing happened to
+`opf.content_document.reference_missing_resource` on 2026-08-07. **Re-probe a
+closure when the corpus moves; a closure is a statement about the books you had.**
 
 ---
 

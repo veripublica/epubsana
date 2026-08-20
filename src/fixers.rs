@@ -42,6 +42,7 @@ pub fn plan(report: &Report, ws: &Workspace, _goal: Goal) -> Vec<ProposedFix> {
     fixes.extend(content_document_invalid_ids(report, ws));
     fixes.extend(content_document_duplicate_ids(report, ws));
     fixes.extend(reference_wrong_path(report, ws));
+    fixes.extend(ncx_src_wrong_path(report, ws));
     fixes.extend(package_identifier(report, ws));
     fixes.extend(nested_anchors(report, ws));
     fixes.extend(epub3_attrs_in_epub2_package(report, ws));
@@ -109,6 +110,7 @@ pub fn handled_rules() -> &'static [&'static str] {
         "opf.manifest_item.non_preferred_media_type",
         "opf.manifest_item.unencoded_space_in_href",
         "opf.metadata.empty_element",
+        "opf.ncx.content_src_missing_resource",
         "opf.ncx.content_src_unencoded_space",
         "opf.package.opf_identifier_not_empty",
         "opf.package.schema_violation",
@@ -4059,6 +4061,117 @@ fn reference_wrong_path(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
 }
 
 /// The corrected reference for `raw` as written in `doc`, or `None` to decline.
+/// `RSC-007` / `opf.ncx.content_src_missing_resource`: a `<navPoint>`'s
+/// `<content src>` names a file that is not at that path, but the container
+/// still holds it under the same name.
+///
+/// **The NCX member of a family already closed at four other sites**, and it
+/// shares [`repointed_reference`] with [`reference_wrong_path`] rather than
+/// re-deriving the rule — one basename match, the fragment must already exist in
+/// the chosen target, everything else declines. Sharing the decision is the
+/// point: two copies of "which entry did it mean" would drift, and the guards are
+/// the whole safety argument.
+///
+/// **Closed on 2026-08-12 and re-opened by the corpus on 2026-08-21, which is the
+/// second time this has happened in this file.** `ncx_src_probe` measured all
+/// seven findings on the 157-book shelf and every one pointed at a file simply
+/// absent from the book — nothing to repair toward, so the rule was left alone.
+/// At 385 books there are 46 findings across 5 books and **exactly one** has the
+/// determinate shape: a Calibre book whose NCX says `OEBPS/Text/titlepage.xhtml`
+/// while the file sits at the container root. The same reopening happened to
+/// `opf.content_document.reference_missing_resource` on 2026-08-07.
+///
+/// `ConfirmNeeded`, matching its sibling: rewriting a navigation path is a
+/// visible change to the book's table of contents.
+fn ncx_src_wrong_path(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    let mut by_ncx: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for m in &report.messages {
+        if m.rule != Some("opf.ncx.content_src_missing_resource") {
+            continue;
+        }
+        let (Some(ncx), Some(raw)) = (m.location.as_deref(), m.params.first()) else {
+            continue;
+        };
+        by_ncx
+            .entry(ncx.to_string())
+            .or_default()
+            .insert(raw.clone());
+    }
+
+    let mut fixes = Vec::new();
+    for (ncx, raws) in by_ncx {
+        let Some(text) = ws.get_text(&ncx) else {
+            continue;
+        };
+        let names: Vec<String> = ws.names().cloned().collect();
+        let mut repoints: Vec<(String, String)> = Vec::new();
+        for raw in &raws {
+            let Some(fixed) = repointed_reference(ws, &names, &ncx, raw) else {
+                continue;
+            };
+            if quoted_attr_span(&text, raw).is_none() {
+                continue; // not visible as an attribute value — go quiet
+            }
+            repoints.push((raw.clone(), fixed));
+        }
+        if repoints.is_empty() {
+            continue;
+        }
+
+        let n = repoints.len();
+        let preview: Vec<Change> = repoints
+            .iter()
+            .take(6)
+            .map(|(from, to)| Change {
+                path: ncx.clone(),
+                note: format!("repoint {from} → {to}"),
+            })
+            .collect();
+        let ncx_for_apply = ncx.clone();
+        let repoints_for_apply = repoints.clone();
+
+        fixes.push(ProposedFix {
+            fix_id: "fix.ncx_src_wrong_path",
+            addresses_id: "RSC-007".to_string(),
+            addresses_rule: Some("opf.ncx.content_src_missing_resource"),
+            addresses_severity: addressed_severity(
+                report,
+                "RSC-007",
+                Some("opf.ncx.content_src_missing_resource"),
+            ),
+            tier: Tier::ConfirmNeeded,
+            title: format!(
+                "Repoint {n} navigation target{} in {ncx}",
+                if n == 1 { "" } else { "s" }
+            ),
+            rationale:
+                "These navigation entries name a file the container still holds, by a path that \
+                 no longer resolves — the book was restructured after its table of contents was \
+                 written. Exactly one entry carries each name, so the target is not a guess, and \
+                 where a fragment is present it already exists in that entry, so the entry \
+                 resolves after the repair rather than dangling. Only the path is rewritten. A \
+                 name matching nothing, or more than one entry, is left alone."
+                    .to_string(),
+            preview,
+            apply_fn: Box::new(move |ws: &mut Workspace| {
+                if let Some(text) = ws.get_text(&ncx_for_apply) {
+                    let mut edits = Vec::new();
+                    for (from, to) in &repoints_for_apply {
+                        if let Some(span) = quoted_attr_span(&text, from) {
+                            edits.push(MetaEdit {
+                                range: span,
+                                replacement: to.clone(),
+                            });
+                        }
+                    }
+                    ws.set_text(&ncx_for_apply, apply_edits(&text, edits));
+                }
+            }),
+        });
+    }
+    fixes
+}
+
 fn repointed_reference(ws: &Workspace, names: &[String], doc: &str, raw: &str) -> Option<String> {
     let (path, fragment) = match raw.split_once('#') {
         Some((p, f)) => (p, Some(f)),
@@ -5096,11 +5209,20 @@ fn plan_href_encoding(opf: &str, hrefs: &BTreeSet<String>) -> Vec<MetaEdit> {
 /// `url(res:///system/fonts/…)` in a stylesheet, and this fixer was the shelf's
 /// only regression.
 ///
-/// Whether the finding should reach us at all on an EPUB 2 book is epubveri's
-/// question, not ours — every neighbouring OPF-014 site there is guarded by
-/// `is_epub3` and the stylesheet one is not. The guard here stands either way:
-/// a repairer that only declines the false positives its detector currently has
-/// is one release away from the next one.
+/// **The finding itself is correct, and that was checked rather than assumed.**
+/// It looked like an EPUB-3-rule-leaking-into-EPUB-2 false positive — the
+/// neighbouring OPF-014 sites in epubveri are guarded by `is_epub3` and the
+/// stylesheet one is not — so it was raised upstream. epubveri measured both
+/// versions against epubcheck 5.3.0 on one book differing only in `version`:
+/// **epubcheck reports OPF-014 at 2.0 as well**, so the site is correctly
+/// ungated and will not change. The neighbour differs because RSC-031 is
+/// *advice* ("use https"), which aims at the wrong half of an EPUB 2 book's
+/// problem; a missing declaration is not advice.
+///
+/// That makes this decline a statement about the **edit**, not about the
+/// finding: the defect is real, and EPUB 2 simply has nowhere to record the
+/// answer. Declining is the only repair available, and it would be right even if
+/// the rule were reported differently tomorrow.
 fn content_properties(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
     // content-document path -> the property tokens it uses but doesn't declare.
     let mut by_doc: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
@@ -6789,6 +6911,138 @@ mod tests {
         let ncx = r#"<navMap><navPoint playOrder="1"><content src="a.xhtml"/></navPoint><navPoint playOrder="17"><content src="b.xhtml"/></navPoint></navMap>"#;
         let (out, _) = renumber_play_order(ncx);
         assert!(out.contains(r#"playOrder="2""#), "{out}");
+    }
+
+    /// The real shape from the shelf: an NCX at the container root pointing into
+    /// a directory the file does not live in, while exactly one entry carries the
+    /// basename.
+    fn ncx_repoint_ws() -> Workspace {
+        container(&[
+            (
+                "toc.ncx",
+                r#"<ncx><navMap><navPoint id="n1" playOrder="1"><navLabel><text>T</text></navLabel><content src="OEBPS/Text/titlepage.xhtml"/></navPoint></navMap></ncx>"#,
+            ),
+            ("titlepage.xhtml", "<html><body><p>t</p></body></html>"),
+            (
+                "OEBPS/Text/Section0001.xhtml",
+                "<html><body><p>s</p></body></html>",
+            ),
+        ])
+    }
+
+    fn ncx_missing_resource(ncx: &str, raw: &str) -> Report {
+        let mut report = Report::default();
+        report.messages = vec![epubveri::report::Message {
+            id: "RSC-007",
+            severity: Severity::Error,
+            text: String::new(),
+            location: Some(ncx.to_string()),
+            position: None,
+            rule: Some("opf.ncx.content_src_missing_resource"),
+            params: vec![raw.to_string()],
+            element_path: None,
+        }];
+        report
+    }
+
+    #[test]
+    fn an_ncx_src_is_repointed_when_one_entry_carries_the_name() {
+        let ws = ncx_repoint_ws();
+        let fixes = ncx_src_wrong_path(
+            &ncx_missing_resource("toc.ncx", "OEBPS/Text/titlepage.xhtml"),
+            &ws,
+        );
+        assert_eq!(fixes.len(), 1, "one proposal for the NCX");
+        assert!(
+            fixes[0].preview[0].note.contains("→ titlepage.xhtml"),
+            "repointed relative to the NCX: {}",
+            fixes[0].preview[0].note
+        );
+    }
+
+    /// The guard that carries the whole family: two entries with the same
+    /// basename make the target a guess.
+    #[test]
+    fn an_ambiguous_basename_is_never_repointed() {
+        let ws = container(&[
+            (
+                "toc.ncx",
+                r#"<ncx><navMap><navPoint><content src="gone/page.xhtml"/></navPoint></navMap></ncx>"#,
+            ),
+            ("a/page.xhtml", "<html/>"),
+            ("b/page.xhtml", "<html/>"),
+        ]);
+        assert!(
+            ncx_src_wrong_path(&ncx_missing_resource("toc.ncx", "gone/page.xhtml"), &ws).is_empty(),
+            "two candidates: which one it meant is a guess"
+        );
+    }
+
+    /// The overwhelming majority of this rule's findings on the shelf: the file
+    /// is simply not in the book, so there is nothing to repair toward.
+    #[test]
+    fn an_absent_file_leaves_the_navigation_alone() {
+        let ws = ncx_repoint_ws();
+        assert!(
+            ncx_src_wrong_path(&ncx_missing_resource("toc.ncx", "Text/main-1.xhtml"), &ws)
+                .is_empty()
+        );
+    }
+
+    /// Clearing RSC-007 by creating a dangling RSC-012 is not a repair.
+    ///
+    /// **The NCX must carry the fragment too, or this test passes for the wrong
+    /// reason** — verified by deleting the fragment guard and watching it stay
+    /// green. With a fragment-less `src` in the file, `quoted_attr_span` fails to
+    /// match the reported value and the fixer declines before the guard is ever
+    /// consulted.
+    #[test]
+    fn a_fragment_the_target_lacks_declines_the_repoint() {
+        let ws = container(&[
+            (
+                "toc.ncx",
+                r#"<ncx><navMap><navPoint><content src="OEBPS/Text/titlepage.xhtml#nope"/></navPoint></navMap></ncx>"#,
+            ),
+            (
+                "titlepage.xhtml",
+                "<html><body><p id=\"real\">t</p></body></html>",
+            ),
+        ]);
+        assert!(
+            ncx_src_wrong_path(
+                &ncx_missing_resource("toc.ncx", "OEBPS/Text/titlepage.xhtml#nope"),
+                &ws
+            )
+            .is_empty(),
+            "the chosen target does not define that anchor"
+        );
+    }
+
+    /// The control for the test above: the same shape with an anchor the target
+    /// *does* define is repaired, so the decline above is the fragment check
+    /// rather than the fixer being unable to see a fragment at all.
+    #[test]
+    fn a_fragment_the_target_defines_is_carried_across() {
+        let ws = container(&[
+            (
+                "toc.ncx",
+                r#"<ncx><navMap><navPoint><content src="OEBPS/Text/titlepage.xhtml#real"/></navPoint></navMap></ncx>"#,
+            ),
+            (
+                "titlepage.xhtml",
+                "<html><body><p id=\"real\">t</p></body></html>",
+            ),
+        ]);
+        let fixes = ncx_src_wrong_path(
+            &ncx_missing_resource("toc.ncx", "OEBPS/Text/titlepage.xhtml#real"),
+            &ws,
+        );
+        assert_eq!(fixes.len(), 1);
+        assert!(
+            fixes[0].preview[0].note.contains("→ titlepage.xhtml#real"),
+            "the fragment survives the repoint: {}",
+            fixes[0].preview[0].note
+        );
     }
 
     fn lang_pairs(pairs: &[(&str, &str)]) -> BTreeSet<(String, String)> {

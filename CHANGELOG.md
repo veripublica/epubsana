@@ -12,6 +12,27 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
 ### Added
 
+- **A 35th fixer: `fix.ncx_src_wrong_path`** (`RSC-007` /
+  `opf.ncx.content_src_missing_resource`, ConfirmNeeded). A `<navPoint>`'s
+  `<content src>` names a file that is not at that path, but the container still
+  holds it under the same name. When **exactly one** entry carries that basename,
+  the path is rewritten to point at it, relative to the NCX; a fragment, if
+  present, is carried across and must already exist in the target.
+
+  It is the NCX member of a family repaired at four other sites — the content
+  document, the `<guide>`, the manifest item and `@font-face` — and it **shares
+  the target decision with `fix.reference_wrong_path`** rather than re-deriving
+  it, so the guards cannot drift between the two. `css.url.missing_resource` is
+  the one member still open.
+
+  **This rule was closed as unrepairable and re-opened by the corpus.** Probed on
+  2026-08-12 across 157 books, all seven findings pointed at files simply absent
+  from the book: nothing to repair toward. At 385 books there are 46 findings in
+  5 books and exactly one has the determinate shape — a Calibre book whose NCX
+  says `OEBPS/Text/titlepage.xhtml` while the file sits at the container root.
+  The same reopening happened to `opf.content_document.reference_missing_resource`
+  on 2026-08-07. A closure is a statement about the books you had.
+
 - **A 34th fixer: `fix.lang_xmllang_mismatch`** (`RSC-005` /
   `opf.content_document.lang_xmllang_mismatch`, AutoSafe). One element carries
   both `lang` and `xml:lang` and they disagree; when exactly one of them is
