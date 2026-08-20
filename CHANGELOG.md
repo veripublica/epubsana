@@ -12,6 +12,42 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
 ### Added
 
+- **A 34th fixer: `fix.lang_xmllang_mismatch`** (`RSC-005` /
+  `opf.content_document.lang_xmllang_mismatch`, AutoSafe). One element carries
+  both `lang` and `xml:lang` and they disagree; when exactly one of them is
+  **empty**, the other's value is written into it.
+
+  An empty attribute states no language — HTML reads `lang=""` as *unknown*,
+  which is the absence of a claim rather than a competing one — so filling it
+  from its populated sibling destroys nothing and makes the element say once what
+  it already said. The book's declared language does not change.
+
+  **It declines when both values are populated, and that is the whole judgement
+  in it.** `lang="en"` against `xml:lang="fr"` is two real claims about what
+  language the text is in, and picking one is editorial. The shelf has no such
+  book, so that branch is carried by argument and a unit test rather than by
+  evidence — worth knowing if one ever turns up.
+
+  EPUB 3 only, upstream: epubcheck asserts the agreement in `epub-xhtml-30.sch`
+  and XHTML 1.1 declares the two attributes independently, so the rule never
+  fires on EPUB 2 and no version read is needed here. On the 375-book shelf: 4
+  findings in 1 book, all `lang="tr"` against an empty `xml:lang`.
+
+- **`fix.ncx_play_order` now also answers `ncx.play_order.no_origin`**, closing
+  the fourth and last of epubveri's `playOrder` rules. The repair did not change:
+  a 1-based dense renumbering starts at 1 by construction, so the fault had always
+  been covered — the fixer simply never *ran* on a book whose only fault was the
+  missing origin, because that rule was absent from its dispatch list. Two shelf
+  books were in exactly that state, each a single `<navPoint>` carrying
+  `playOrder="0"`, and each got no proposal at all.
+
+  Nothing in the code or its tests could show this: the repair logic was right and
+  every test supplied one of the other three rules. **When a family's repair is one
+  function, audit the dispatch list against the detector's rule list rather than
+  against the repair.** Note also that epubveri compares the origin as a string
+  (per the Schematron) while gaps compare numerically, so a padded
+  `playOrder="01"` draws `no_origin` alone and would have gone unrepaired too.
+
 - **A 33rd fixer: `fix.ncx_content_src_spaces`** (`RSC-020` /
   `opf.ncx.content_src_unencoded_space`, AutoSafe). Percent-encodes a raw space
   in a `<navPoint>`'s `<content src>`, the NCX sibling of the manifest-href fixer

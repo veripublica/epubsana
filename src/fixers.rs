@@ -30,6 +30,7 @@ pub fn plan(report: &Report, ws: &Workspace, _goal: Goal) -> Vec<ProposedFix> {
     fixes.extend(bare_text_in_body(report, ws));
     fixes.extend(anchor_name_attrs(report, ws));
     fixes.extend(empty_lang_attrs(report, ws));
+    fixes.extend(lang_xmllang_mismatch(report, ws));
     fixes.extend(doctype_html5(report, ws));
     fixes.extend(doctype_xhtml11(report, ws));
     fixes.extend(manifest_dangling_items(report, ws));
@@ -89,12 +90,14 @@ pub fn handled_rules() -> &'static [&'static str] {
         "ncx.ids.invalid_ncname",
         "ncx.play_order.duplicate",
         "ncx.play_order.gap",
+        "ncx.play_order.no_origin",
         "ncx.play_order.target_mismatch",
         "ncx.uid.package_identifier_mismatch",
         "ocf.mimetype.not_first_entry",
         "opf.content_document.duplicate_id",
         "opf.content_document.empty_title",
         "opf.content_document.invalid_content_type_meta",
+        "opf.content_document.lang_xmllang_mismatch",
         "opf.content_document.property_used_undeclared",
         "opf.content_document.reference_missing_resource",
         // Two shapes inside it: stray text in <body>, and an empty lang.
@@ -760,15 +763,167 @@ fn rename_later_id_occurrences(text: &str, dup: &str, news: &[String]) -> String
     out
 }
 
-/// `RSC-005` — the three `playOrder` faults, repaired by one correct assignment.
+/// One edit per element carrying both `lang` and `xml:lang` where the pair is one
+/// epubveri reported and **exactly one side is empty**: the same element with the
+/// empty side filled from the populated one.
+///
+/// A pair with both sides populated is skipped here rather than filtered by the
+/// caller, so the decline lives next to the comparison that justifies it.
+fn plan_lang_agreement_edits(text: &str, pairs: &BTreeSet<(String, String)>) -> Vec<MetaEdit> {
+    const XML_NS: &str = "http://www.w3.org/XML/1998/namespace";
+    let Some(doc) = parse_xml(text) else {
+        return Vec::new();
+    };
+    let mut edits = Vec::new();
+    for n in doc.descendants().filter(|n| n.is_element()) {
+        let (Some(lang), Some(xml_lang)) = (n.attr_no_ns("lang"), n.attribute((XML_NS, "lang")))
+        else {
+            continue;
+        };
+        // epubveri trims both sides before comparing and before reporting, so
+        // match on the trimmed values or a padded attribute never lines up.
+        let (lang, xml_lang) = (lang.trim(), xml_lang.trim());
+        if !pairs.contains(&(lang.to_string(), xml_lang.to_string())) {
+            continue;
+        }
+        // Which attribute to write, and what to write into it. Both populated is
+        // two real claims about the text's language and is left to a human.
+        let (attr, value) = match (lang.is_empty(), xml_lang.is_empty()) {
+            (true, false) => ("lang", xml_lang),
+            (false, true) => ("xml:lang", lang),
+            _ => continue,
+        };
+        let range = n.range();
+        if let Some(replacement) = set_attr_value(&text[range.clone()], attr, value) {
+            edits.push(MetaEdit { range, replacement });
+        }
+    }
+    edits
+}
+
+/// `RSC-005` / `opf.content_document.lang_xmllang_mismatch`: one element carries
+/// both `lang` and `xml:lang` and they disagree. When **exactly one is empty**,
+/// the other's value is written into it. `AutoSafe`.
+///
+/// **Why the empty case is not a choice.** An empty attribute states no language
+/// — HTML reads `lang=""` as *unknown*, which is the absence of a claim rather
+/// than a competing one — so filling it from its populated sibling destroys
+/// nothing and makes the element say once what it already said. The book's
+/// declared language does not change. Same reasoning that made [`empty_lang_attrs`]
+/// fill an empty root language instead of deleting it.
+///
+/// **It declines when both values are populated, and that is the whole judgement
+/// here.** `lang="en"` against `xml:lang="fr"` is two real claims, and picking one
+/// is an editorial statement about what language the text is in. We cannot know
+/// that and will not guess it.
+///
+/// **EPUB 3 only, upstream.** epubcheck asserts the agreement in
+/// `epub-xhtml-30.sch` and XHTML 1.1 declares the two attributes independently,
+/// so epubveri never reports this on an EPUB 2 book and no version read is needed
+/// here. (Contrast `fix.content_properties`, which does need one — there the rule
+/// fires at both versions and only the *repair* is version-specific.)
+///
+/// **Measured (375 books, 2026-08-20):** 4 findings in 1 book, all of them
+/// `lang="tr"` against an empty `xml:lang`. The both-populated shape does not
+/// occur on this shelf, so the decline is carried by argument and a unit test.
+fn lang_xmllang_mismatch(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    // content-document path -> the (lang, xml:lang) pairs epubveri flagged in it.
+    let mut by_doc: BTreeMap<String, BTreeSet<(String, String)>> = BTreeMap::new();
+    for m in &report.messages {
+        if m.rule != Some("opf.content_document.lang_xmllang_mismatch") {
+            continue;
+        }
+        let (Some(doc), Some(lang), Some(xml_lang)) =
+            (m.location.as_deref(), m.params.first(), m.params.get(1))
+        else {
+            continue;
+        };
+        by_doc
+            .entry(doc.to_string())
+            .or_default()
+            .insert((lang.clone(), xml_lang.clone()));
+    }
+
+    let mut fixes = Vec::new();
+    for (doc, pairs) in by_doc {
+        let Some(text) = ws.get_text(&doc) else {
+            continue;
+        };
+        let edits = plan_lang_agreement_edits(&text, &pairs);
+        if edits.is_empty() {
+            continue; // both sides populated, or nothing we could locate
+        }
+
+        let preview: Vec<Change> = pairs
+            .iter()
+            .filter_map(|(lang, xml_lang)| {
+                let note = match (lang.is_empty(), xml_lang.is_empty()) {
+                    (true, false) => format!("fill empty lang from xml:lang=\"{xml_lang}\""),
+                    (false, true) => format!("fill empty xml:lang from lang=\"{lang}\""),
+                    _ => return None,
+                };
+                Some(Change {
+                    path: doc.clone(),
+                    note,
+                })
+            })
+            .collect();
+        let n = edits.len();
+        let doc_for_apply = doc.clone();
+        let pairs_for_apply = pairs.clone();
+
+        fixes.push(ProposedFix {
+            fix_id: "fix.lang_xmllang_mismatch",
+            addresses_id: "RSC-005".to_string(),
+            addresses_rule: Some("opf.content_document.lang_xmllang_mismatch"),
+            addresses_severity: addressed_severity(
+                report,
+                "RSC-005",
+                Some("opf.content_document.lang_xmllang_mismatch"),
+            ),
+            tier: Tier::AutoSafe,
+            title: format!(
+                "Make lang and xml:lang agree on {n} element{} in {doc}",
+                if n == 1 { "" } else { "s" }
+            ),
+            rationale: "One of the two attributes is empty, which states no language at all \
+                 rather than a competing one, so it is filled from its populated sibling. The \
+                 language the book declares does not change — the element stops contradicting \
+                 itself. An element where both values are populated is two real claims about \
+                 the text, and is left untouched."
+                .to_string(),
+            preview,
+            apply_fn: Box::new(move |ws: &mut Workspace| {
+                if let Some(text) = ws.get_text(&doc_for_apply) {
+                    let edits = plan_lang_agreement_edits(&text, &pairs_for_apply);
+                    ws.set_text(&doc_for_apply, apply_edits(&text, edits));
+                }
+            }),
+        });
+    }
+    fixes
+}
+
+/// `RSC-005` — the four `playOrder` faults, repaired by one correct assignment.
 ///
 /// epubveri reports them separately and they interlock: `ncx.play_order.duplicate`
 /// (different targets sharing a number), `ncx.play_order.target_mismatch` (one
-/// target reached by elements carrying different numbers) and
-/// `ncx.play_order.gap` (a number with no predecessor). Satisfying any one of
+/// target reached by elements carrying different numbers),
+/// `ncx.play_order.gap` (a number with no predecessor) and
+/// `ncx.play_order.no_origin` (nothing carries `playOrder="1"`, so the sequence
+/// never starts). Satisfying any one of
 /// them naively breaks another, so this renumbers the whole NCX the way the
 /// format defines: **1-based, dense, in document order, and elements naming the
 /// same target share the first number that target was given.**
+///
+/// **`no_origin` was absent from the dispatch list until 2026-08-20 and the
+/// repair never changed.** A 1-based dense renumbering starts at 1 by
+/// construction, so the fix had always covered the fault; it simply never ran on
+/// a book whose *only* fault was the missing origin — two on the shelf, each a
+/// single `<navPoint>` carrying `playOrder="0"`. Right logic, incomplete trigger,
+/// and no test could see it because every test supplied one of the other three.
+/// **When a family's repair is one function, audit the dispatch list against the
+/// detector's rule list, not against the repair.**
 ///
 /// **That last clause is why this fixer was rewritten.** It used to number every
 /// `playOrder` by its position in the file, which is unique but target-blind — on
@@ -790,6 +945,7 @@ fn ncx_play_order(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
                 Some("ncx.play_order.duplicate")
                     | Some("ncx.play_order.target_mismatch")
                     | Some("ncx.play_order.gap")
+                    | Some("ncx.play_order.no_origin")
             )
         })
         .filter_map(|m| m.location.as_deref())
@@ -6633,6 +6789,134 @@ mod tests {
         let ncx = r#"<navMap><navPoint playOrder="1"><content src="a.xhtml"/></navPoint><navPoint playOrder="17"><content src="b.xhtml"/></navPoint></navMap>"#;
         let (out, _) = renumber_play_order(ncx);
         assert!(out.contains(r#"playOrder="2""#), "{out}");
+    }
+
+    fn lang_pairs(pairs: &[(&str, &str)]) -> BTreeSet<(String, String)> {
+        pairs
+            .iter()
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+            .collect()
+    }
+
+    const LANG_DOC: &str = r#"<html xmlns="http://www.w3.org/1999/xhtml" lang="tr" xml:lang=""><body><p>x</p></body></html>"#;
+
+    #[test]
+    fn an_empty_xml_lang_is_filled_from_lang() {
+        let edits = plan_lang_agreement_edits(LANG_DOC, &lang_pairs(&[("tr", "")]));
+        let out = apply_edits(LANG_DOC, edits);
+        assert!(out.contains(r#"xml:lang="tr""#), "{out}");
+        assert!(
+            out.contains(r#"lang="tr""#),
+            "the populated side is untouched"
+        );
+    }
+
+    #[test]
+    fn an_empty_lang_is_filled_from_xml_lang() {
+        let doc = r#"<html lang="" xml:lang="de"><body/></html>"#;
+        let out = apply_edits(
+            doc,
+            plan_lang_agreement_edits(doc, &lang_pairs(&[("", "de")])),
+        );
+        assert!(out.contains(r#"lang="de""#), "{out}");
+        assert!(
+            out.contains(r#"xml:lang="de""#),
+            "the populated side is untouched"
+        );
+    }
+
+    /// The decline that carries this fixer: two populated values are two claims
+    /// about what language the text is in, and choosing is editorial. No shelf
+    /// book has the shape, so this test is the only thing holding the branch.
+    #[test]
+    fn two_populated_values_are_left_to_a_human() {
+        let doc = r#"<html lang="en" xml:lang="fr"><body/></html>"#;
+        assert!(
+            plan_lang_agreement_edits(doc, &lang_pairs(&[("en", "fr")])).is_empty(),
+            "neither value may be overwritten by the other"
+        );
+    }
+
+    /// `set_attr_value` searches for `lang=`, and `xml:lang=` contains it. The
+    /// boundary check is what keeps the two apart; without it, filling `lang`
+    /// would rewrite the wrong attribute.
+    ///
+    /// **`xml:lang` is written first here on purpose.** With `lang=""` first, the
+    /// naive search happens to land on the right attribute and the test passes
+    /// against a broken boundary check — verified by mutating `is_attr_boundary`
+    /// to always return true. Only this order discriminates.
+    #[test]
+    fn filling_lang_does_not_hit_xml_lang() {
+        let doc = r#"<html xml:lang="de" lang=""><body/></html>"#;
+        let out = apply_edits(
+            doc,
+            plan_lang_agreement_edits(doc, &lang_pairs(&[("", "de")])),
+        );
+        assert!(
+            out.contains(r#"xml:lang="de""#),
+            "xml:lang keeps its own value and its prefix: {out}"
+        );
+        assert!(
+            out.contains(r#" lang="de""#),
+            "the bare lang is the one filled: {out}"
+        );
+        assert_eq!(
+            out.matches("de").count(),
+            2,
+            "no third value appeared: {out}"
+        );
+    }
+
+    #[test]
+    fn a_pair_no_finding_named_is_left_alone() {
+        // Only what epubveri reported is repaired — the fixer never sweeps the
+        // document for other disagreeing elements.
+        assert!(plan_lang_agreement_edits(LANG_DOC, &lang_pairs(&[("en", "")])).is_empty());
+    }
+
+    #[test]
+    fn a_document_that_will_not_parse_declines_the_lang_fix() {
+        assert!(
+            plan_lang_agreement_edits("<html lang=\"tr\"", &lang_pairs(&[("tr", "")])).is_empty()
+        );
+    }
+
+    /// The repair level: a sequence that never reaches 1 gets an origin.
+    #[test]
+    fn play_order_gives_the_sequence_an_origin() {
+        let ncx = r#"<navMap><navPoint playOrder="0"><content src="a.xhtml"/></navPoint></navMap>"#;
+        let (out, n) = renumber_play_order(ncx);
+        assert_eq!(n, 1);
+        assert!(out.contains(r#"playOrder="1""#), "{out}");
+    }
+
+    /// The dispatch level, which is where the fault actually was. `no_origin`
+    /// can be a book's *only* playOrder fault — epubveri compares the origin as a
+    /// string and the gaps numerically — so a book reporting nothing else got no
+    /// proposal at all, while the repair below it had always been correct. Two
+    /// shelf books were in that state.
+    #[test]
+    fn no_origin_alone_is_enough_to_propose_a_renumbering() {
+        let ws = container(&[(
+            "toc.ncx",
+            r#"<navMap><navPoint playOrder="0"><content src="a.xhtml"/></navPoint></navMap>"#,
+        )]);
+        let mut report = Report::default();
+        report.messages = vec![epubveri::report::Message {
+            id: "RSC-005",
+            severity: Severity::Error,
+            text: String::new(),
+            location: Some("toc.ncx".to_string()),
+            position: None,
+            rule: Some("ncx.play_order.no_origin"),
+            params: vec!["0".to_string()],
+            element_path: None,
+        }];
+        assert_eq!(
+            ncx_play_order(&report, &ws).len(),
+            1,
+            "the missing origin is a fault on its own"
+        );
     }
 
     #[test]

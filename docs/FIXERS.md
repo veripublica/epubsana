@@ -40,7 +40,8 @@ grows one carefully-argued entry at a time.
 | `HTM-004` | `htm.doctype.epub3_obsolete_public_id` | AutoSafe | An EPUB 3 document's DOCTYPE carries an obsolete PUBLIC identifier | [Reduce it to `<!DOCTYPE html>`](#htm-004--obsolete-or-unrecognized-doctype) |
 | `HTM-004` | `htm.doctype.epub2_unrecognized_public_id` | ConfirmNeeded | An EPUB 2 document's DOCTYPE isn't a recognized XHTML 1.1 / OEB identifier | [Canonicalize a malformed XHTML 1.1 id; decline a genuinely different DTD](#htm-004--obsolete-or-unrecognized-doctype) |
 | `RSC-005` | `ncx.ids.duplicate_id` | ConfirmNeeded | Two or more NCX elements share an `id` | [Keep the first, rename later duplicates uniquely](#rsc-005--ncx-internal-consistency) |
-| `RSC-005` | `ncx.play_order.duplicate`, `…target_mismatch`, `…gap` | ConfirmNeeded | The NCX's `playOrder` values are inconsistent | [Reassign densely by document order, same target → same number](#rsc-005--ncx-internal-consistency) |
+| `RSC-005` | `ncx.play_order.duplicate`, `…target_mismatch`, `…gap`, `…no_origin` | ConfirmNeeded | The NCX's `playOrder` values are inconsistent | [Reassign densely by document order, same target → same number](#rsc-005--ncx-internal-consistency) |
+| `RSC-005` | `opf.content_document.lang_xmllang_mismatch` | AutoSafe | `lang` and `xml:lang` disagree on one element | [Fill the empty one from the populated one; decline if both are set](#rsc-005--lang-and-xmllang-disagree) |
 | `RSC-007` | `opf.guide.reference_missing_resource` | ConfirmNeeded | A `<guide>` reference points at a resource that doesn't exist | [Drop the reference; drop the guide if it empties](#rsc-007--rsc-017--rsc-012--guide-references) |
 | `RSC-017` | `opf.guide.duplicate_reference` | ConfirmNeeded | Two `<guide>` references share a `type` and `href` | [Keep the first, drop the duplicates](#rsc-007--rsc-017--rsc-012--guide-references) |
 | `RSC-012` | `opf.guide.reference_fragment_not_defined` | ConfirmNeeded | A `<guide>` reference's `#fragment` resolves to no `id` in a target that does exist | [Drop the fragment, keep the document](#rsc-007--rsc-017--rsc-012--guide-references) |
@@ -1665,20 +1666,34 @@ at all.
 
 ---
 
-## RSC-005 — the three `playOrder` faults (an addendum to NCX internal consistency)
+## RSC-005 — the four `playOrder` faults (an addendum to NCX internal consistency)
 
-epubveri reports three separate `playOrder` rules and they interlock, so
+epubveri reports four separate `playOrder` rules and they interlock, so
 satisfying one naively breaks another:
 
 - `ncx.play_order.duplicate` — **different** targets sharing a number.
 - `ncx.play_order.target_mismatch` — **one** target reached by elements carrying
   different numbers.
 - `ncx.play_order.gap` — a number with no predecessor.
+- `ncx.play_order.no_origin` — **no element carries `playOrder="1"`**, so the
+  sequence never starts.
 
-`fix.ncx_play_order` now reassigns the whole NCX the way the format defines:
+`fix.ncx_play_order` reassigns the whole NCX the way the format defines:
 **1-based, dense, in document order, and elements naming the same target share
-the first number that target was given.** That satisfies all three at once, and
-no assignment satisfying all three differs from it.
+the first number that target was given.** That satisfies all four at once, and
+no assignment satisfying all four differs from it.
+
+**`no_origin` was missing from the dispatch list until 2026-08-20, and the way it
+hid is worth knowing.** The repair had always covered it — a 1-based dense
+renumbering starts at 1 by construction — but the fixer only ran when one of the
+*other three* rules appeared. A book whose only fault was the missing origin got
+no proposal at all, and nothing in the code or its tests could show that: the
+repair logic was right, the trigger was incomplete. Two shelf books were in
+exactly that state, both with a single `<navPoint>` carrying `playOrder="0"`.
+
+Note that epubveri compares the origin as a **string** (`@playOrder='1'`, per the
+Schematron) while the gap check compares numerically — so a padded `playOrder="01"`
+draws `no_origin` and no `gap`, and would likewise have gone unrepaired.
 
 **Why it was rewritten, and the defect it removes.** The first version numbered
 every `playOrder` by its position in the file — unique, dense, and *target-blind*.
@@ -1696,6 +1711,46 @@ consistent with every other structural fixer here, and stricter than before.
 
 **Measured.** 14 `duplicate` + 8 `target_mismatch` + 1 `gap` cleared across the
 shelf, nothing introduced, and one more book reaches fully valid (5 → **6**).
+
+---
+
+## RSC-005 — `lang` and `xml:lang` disagree
+
+**Finding.** `opf.content_document.lang_xmllang_mismatch`, message *lang and
+xml:lang attributes must have the same value*. `params[0]` is the `lang` value and
+`params[1]` the `xml:lang` value, both already trimmed by epubveri. **EPUB 3
+only** — epubcheck asserts it in `epub-xhtml-30.sch` and XHTML 1.1 declares the
+two attributes independently, so a disagreeing EPUB 2 book is valid and is never
+reported.
+
+**Fix** (`fix.lang_xmllang_mismatch`, AutoSafe). When exactly one of the two is
+**empty**, write the other one's value into it. Every other attribute, the quote
+style and the element are untouched.
+
+**Why it's safe, and why it is narrower than the rule.** An empty attribute
+carries no language claim — HTML treats `lang=""` as *unknown*, which is
+precisely the absence of information — so copying the populated sibling into it
+destroys nothing and states what the document already says once. The book's
+declared language does not change; one of the two spellings simply stops
+contradicting the other.
+
+**It declines when both values are non-empty**, and that is the whole judgement
+in this fixer. `lang="en"` against `xml:lang="fr"` is two real claims, and
+choosing between them is an editorial act about what language the text is in —
+which we cannot know and must not guess. Such a book is left alone.
+
+**Which side to fill is not a choice.** With one side empty there is exactly one
+value in play, so the repair has no degrees of freedom — the same reasoning that
+made `fix.empty_lang` fill an empty root language rather than delete it.
+
+**When it declines.** Both values non-empty (above); the document won't parse; or
+no element carries both attributes with the reported pair, in which case nothing
+is edited rather than guessed at.
+
+**Measured (375 books, 2026-08-20).** 4 findings in 1 book, every one of them the
+same shape: `lang="tr"` against an empty `xml:lang`. The both-populated shape does
+not occur on this shelf — so the decline branch is carried by argument and a unit
+test, not by a book.
 
 ---
 
