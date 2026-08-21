@@ -14,6 +14,29 @@ use epubveri::report::{Report, Severity};
 use crate::{Change, Goal, ProposedFix, Tier, Workspace, entities};
 
 /// Build the ordered list of proposals for a detection [`Report`].
+///
+/// # The order is part of the contract, and it is currently an accident
+///
+/// `--dry-run` prints a 1-based index per proposal and `--apply 1,4` selects on
+/// it, so a plugin's two-invocation workflow (show the plan, then apply part of
+/// it) is only correct if the second run plans exactly as the first did.
+///
+/// **That holds today for a reason nothing enforces.** epubveri's `Report` was
+/// non-deterministic until 0.9.27 — `items.values()` over a `HashMap`, whose
+/// seed is per-process, decided the order findings arrived in, and 94 of 385
+/// shelf books came out shuffled between runs. It never reached our output
+/// because **every fixer here groups its findings through a `BTreeMap` or
+/// `BTreeSet` before emitting**, which re-sorts arrival order away; the one
+/// exception, [`mimetype_packaging`], asks only whether an id is present at all.
+/// Verified empirically as well: three separate processes over the 385-book
+/// shelf produce byte-identical plans (`plan_order.rs` in dev-examples).
+///
+/// **So a new fixer that pushes a `ProposedFix` directly inside a
+/// `for m in &report.messages` loop would silently reintroduce it** — same
+/// proposals, different order, different `--apply` indices between two runs of
+/// the same command. Group first, then emit. There is no test for this: the
+/// failure needs two processes to show itself, which is exactly why the bug
+/// upstream survived from the day its sort was written.
 pub fn plan(report: &Report, ws: &Workspace, _goal: Goal) -> Vec<ProposedFix> {
     let mut fixes = Vec::new();
     fixes.extend(html_entities(report, ws));
