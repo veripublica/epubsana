@@ -104,6 +104,24 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
 ### Changed
 
+- **The six fixers that reach into `schema_violation` no longer match English
+  prose.** They dispatch on `violation_kind` through one helper,
+  `is_schema_violation(m, rule, kind)`, instead of on `text.starts_with(…)`.
+  That rule is a whole RELAX NG grammar rather than a family, so a fixer has to
+  say which *kind* of violation it repairs; until epubveri 0.10.0 the only way
+  to say it was to read the message.
+
+  The old matching failed safe — a reworded message made a fixer go quiet rather
+  than edit the wrong node — but the wording moved twice in two weeks and each
+  move was a silent loss of coverage nothing here could detect.
+
+  No behaviour change, measured rather than assumed: the plan over the 385-book
+  shelf is byte-identical, and those six sites carry roughly half of its 2,156
+  proposals, so a kind that was not being read would have emptied it. One site
+  did get stricter — the misplaced-inline-element predicate matched `element "`,
+  which is three kinds, and is now `ElementNotAllowed` alone; nothing on the
+  shelf depended on the looser reading.
+
 - **The `epubveri` floor moves to 0.10.0.** `report::Message` gained
   `violation_kind`, the machine token for which of six kinds a schema violation
   is, so the caret had to move. The floor is a *capability* one: epubsana now

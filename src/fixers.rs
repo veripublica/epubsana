@@ -9,9 +9,38 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ops::Range;
 
-use epubveri::report::{Report, Severity};
+use epubveri::report::{Report, Severity, ViolationKind};
 
 use crate::{Change, Goal, ProposedFix, Tier, Workspace, entities};
+
+/// Is this finding a schema violation of `kind`, under `rule`?
+///
+/// **The single place the schema-violation family is discriminated**, and the
+/// reason it exists is that until epubveri 0.10.0 there was no way to do it
+/// except by reading English. `opf.content_document.schema_violation` is not a
+/// family but a whole grammar — 39,946 findings across 88 of the 385 shelf books
+/// — so a fixer reaching into it has to say *which kind of violation* it repairs,
+/// and six fixers used to do that with `text.starts_with(…)`.
+///
+/// That matching was not wrong and it failed safe: a reworded message makes a
+/// fixer go quiet rather than edit the wrong node. But the wording moved twice in
+/// two weeks, and each move was a silent loss of coverage nothing here could
+/// detect. `violation_kind` is the same discriminant the RELAX NG engine computes
+/// and used to discard (`veripublica/epubveri#85`), so this asks the detector
+/// what it already knows instead of re-deriving it from a sentence.
+///
+/// **What it does not buy**, so nobody assumes otherwise: the kind is stable in
+/// *name*, not in *assignment*. If a construct is ever reclassified — something
+/// reported as `ElementNotAllowed` becoming `IncompleteContent` — the fixer goes
+/// quiet exactly as a rewording used to make it. Rarer, and meaningful when it
+/// happens, but the standing symptom check stands: **a fixer's proposal count
+/// dropping to zero is the thing to chase.**
+///
+/// `None` is a decline. Upstream guarantees a kind-carrying rule always sets one,
+/// so `None` here means the finding is outside this family.
+fn is_schema_violation(m: &epubveri::report::Message, rule: &str, kind: ViolationKind) -> bool {
+    m.rule == Some(rule) && m.violation_kind == Some(kind)
+}
 
 /// Build the ordered list of proposals for a detection [`Report`].
 ///
@@ -2013,11 +2042,14 @@ fn attr_span_with_leading_space(text: &str, attr: Range<usize>) -> Range<usize> 
 ///   assuming it — and if it is absent, the objection is to something other than
 ///   block-level placement.
 fn is_misplaced_inline_element(m: &epubveri::report::Message) -> bool {
-    m.rule == Some("opf.content_document.schema_violation")
-        && m.text.starts_with("element ")
-        && m.params
-            .first()
-            .is_some_and(|e| XHTML11_INLINE.contains(&e.as_str()))
+    is_schema_violation(
+        m,
+        "opf.content_document.schema_violation",
+        ViolationKind::ElementNotAllowed,
+    ) && m
+        .params
+        .first()
+        .is_some_and(|e| XHTML11_INLINE.contains(&e.as_str()))
         && m.params.iter().skip(1).any(|p| p == "div")
 }
 
@@ -2034,34 +2066,39 @@ const WRAPPABLE_CONTAINERS: &[&str] = &["blockquote", "body"];
 /// Is this finding "the container has non-block content where the grammar wants
 /// block content"?
 ///
-/// Two messages describe that one defect from opposite ends, and both are
-/// matched. A `<blockquote>` holding only text draws *stray text is not allowed
-/// directly in "blockquote"* **and** *element "blockquote" has incomplete
-/// content*, because its model requires at least one block child; a container
-/// holding only an inline element draws just the second. Wrapping the run clears
-/// whichever of them fired.
+/// Two *kinds* describe that one defect from opposite ends, and both are
+/// matched — this one and [`is_stray_text_in_body`]. A `<blockquote>` holding
+/// only text draws `StrayText` **and** `IncompleteContent`, because its model
+/// requires at least one block child; a container holding only an inline
+/// element draws just the second. Wrapping the run clears whichever fired.
 fn is_incomplete_container(m: &epubveri::report::Message) -> bool {
-    m.rule == Some("opf.content_document.schema_violation")
-        && m.text.contains("has incomplete content")
-        && m.params
-            .first()
-            .is_some_and(|c| WRAPPABLE_CONTAINERS.contains(&c.as_str()))
+    is_schema_violation(
+        m,
+        "opf.content_document.schema_violation",
+        ViolationKind::IncompleteContent,
+    ) && m
+        .params
+        .first()
+        .is_some_and(|c| WRAPPABLE_CONTAINERS.contains(&c.as_str()))
 }
 
 /// Is this finding "stray text sits directly in a container that wants blocks"?
 ///
 /// Two conditions, because `opf.content_document.schema_violation` is one rule
-/// over a whole grammar: the message shape identifies the *kind* of violation
-/// (only a text-node blame reads "stray text …"), and `params[0]` identifies the
-/// container we are willing to repair. Both are required — the prefix alone
-/// would match stray text in an `<ol>`, and the param alone would match any
-/// other violation that happens to name `body`.
+/// over a whole grammar: [`ViolationKind::StrayText`] says which kind of
+/// violation this is (see [`is_schema_violation`]), and `params[0]` says which
+/// container it is in. Both are required — the kind alone would match stray text
+/// in an `<ol>`, where the correct wrapper is an `<li>` and asserting that is a
+/// judgement; the param alone would match any other violation naming `body`.
 fn is_stray_text_in_body(m: &epubveri::report::Message) -> bool {
-    m.rule == Some("opf.content_document.schema_violation")
-        && m.params
-            .first()
-            .is_some_and(|c| WRAPPABLE_CONTAINERS.contains(&c.as_str()))
-        && m.text.starts_with("stray text is not allowed directly in")
+    is_schema_violation(
+        m,
+        "opf.content_document.schema_violation",
+        ViolationKind::StrayText,
+    ) && m
+        .params
+        .first()
+        .is_some_and(|c| WRAPPABLE_CONTAINERS.contains(&c.as_str()))
 }
 
 /// The spans to wrap: every maximal run of non-block content sitting directly
@@ -2291,11 +2328,14 @@ fn plan_anchor_name_drops(text: &str) -> Option<Vec<Range<usize>>> {
 /// rather than inferred: a *malformed* tag (`en_US`) is a different defect and
 /// must not reach the fixer.
 fn is_empty_lang(m: &epubveri::report::Message) -> bool {
-    m.rule == Some("opf.content_document.schema_violation")
-        && m.text.starts_with("value of attribute")
-        && m.params
-            .first()
-            .is_some_and(|p| p == "lang" || p == "xml:lang")
+    is_schema_violation(
+        m,
+        "opf.content_document.schema_violation",
+        ViolationKind::InvalidAttributeValue,
+    ) && m
+        .params
+        .first()
+        .is_some_and(|p| p == "lang" || p == "xml:lang")
         && m.params.get(1).is_some_and(|v| v.is_empty())
 }
 
@@ -3518,9 +3558,11 @@ fn resolve_against(from: &str, path: &str) -> Option<String> {
 fn content_document_invalid_ids(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
     let mut by_doc: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for m in &report.messages {
-        if m.rule != Some("opf.content_document.schema_violation")
-            || !m.text.starts_with("value of attribute")
-            || m.params.first().map(String::as_str) != Some("id")
+        if !is_schema_violation(
+            m,
+            "opf.content_document.schema_violation",
+            ViolationKind::InvalidAttributeValue,
+        ) || m.params.first().map(String::as_str) != Some("id")
         {
             continue;
         }
@@ -3733,7 +3775,11 @@ fn plan_id_renames(ws: &Workspace, doc: &str, values: &BTreeSet<String>) -> Opti
 fn epub3_attrs_in_epub2_package(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
     let mut by_file: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for m in &report.messages {
-        if m.rule != Some("opf.package.schema_violation") || !m.text.starts_with("attribute ") {
+        if !is_schema_violation(
+            m,
+            "opf.package.schema_violation",
+            ViolationKind::AttributeNotAllowed,
+        ) {
             continue;
         }
         let (Some(file), Some(attr)) = (m.location.as_deref(), m.params.first()) else {
@@ -5707,7 +5753,6 @@ fn escape_xml_attr(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use epubveri::report::ViolationKind;
 
     /// The fields every fixture `Message` shares, so a new field upstream is a
     /// one-line edit here instead of a nine-place edit across this module —
