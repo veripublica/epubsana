@@ -146,9 +146,9 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
   finding at every severity. Verified rather than trusted: the schema-violation
   census is byte-identical across the two, and so is the plan.
 
-- **What 0.10.0 brought, and why it is the capability floor.** `report::Message` gained
-  `violation_kind`, the machine token for which of six kinds a schema violation
-  is, so the caret had to move. The floor is a *capability* one: epubsana now
+- **What 0.10.0 brought, and why it is the capability floor.** `report::Message`
+  gained `violation_kind`, the machine token for which of six kinds a schema
+  violation is. The floor is a *capability* one: epubsana now
   carries the only mechanical check that a seventh kind was ever added
   (`ViolationKind::ALL`, asserted by name in a test), and below 0.10.0 that
   check cannot compile. See `veripublica/epubveri#85` for the agreed contract.
