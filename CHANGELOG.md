@@ -93,7 +93,24 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
 ### Changed
 
-- **The `epubveri` floor moves to 0.9.26**, which is where
+- **The `epubveri` floor moves to 0.10.0.** `report::Message` gained
+  `violation_kind`, the machine token for which of six kinds a schema violation
+  is, so the caret had to move. The floor is a *capability* one: epubsana now
+  carries the only mechanical check that a seventh kind was ever added
+  (`ViolationKind::ALL`, asserted by name in a test), and below 0.10.0 that
+  check cannot compile. See `veripublica/epubveri#85` for the agreed contract.
+
+  Measured before the bump against the unreleased build and again after release,
+  on 385 books: the plan is **byte-identical** — 152 books planned, 2,156
+  proposals, the same `--apply` indices, tiers and previews — while 11,334
+  finding positions moved underneath (0.10.0 reports an attribute fault at the
+  attribute rather than at its element). epubsana reads no position anywhere.
+
+  Whole-shelf audit on 0.10.0: errors in touched books 38,157 → 16,180, all
+  findings at every severity 39,939 → 17,734, 57 books become fully valid,
+  **zero regressions**.
+
+- **The `epubveri` floor moved to 0.9.26** earlier in this cycle, which is where
   `opf.ncx.content_src_unencoded_space` is born. Below it the new fixer is not
   wrong but silent, and a silent half-repair returns a book that is still invalid
   — an outcome a user cannot tell apart from "epubsana could not help".

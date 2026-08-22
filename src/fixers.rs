@@ -5707,6 +5707,77 @@ fn escape_xml_attr(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use epubveri::report::ViolationKind;
+
+    /// The fields every fixture `Message` shares, so a new field upstream is a
+    /// one-line edit here instead of a nine-place edit across this module —
+    /// which is exactly what epubveri 0.10.0's `violation_kind` would otherwise
+    /// have been.
+    ///
+    /// `Message` deliberately derives no `Default` upstream, and we asked them
+    /// not to add one: a finding with a defaulted `id` and `severity` is a
+    /// finding that lies. So the default lives here, where it can only ever be
+    /// a fixture.
+    fn fixture(id: &'static str, rule: &'static str) -> epubveri::report::Message {
+        epubveri::report::Message {
+            id,
+            severity: Severity::Error,
+            text: String::new(),
+            location: None,
+            position: None,
+            rule: Some(rule),
+            params: Vec::new(),
+            element_path: None,
+            violation_kind: None,
+        }
+    }
+
+    /// A schema violation, carrying the kind epubveri would carry.
+    ///
+    /// **The kind is required here even though no fixer reads it yet.** Upstream
+    /// guarantees that a rule carrying kinds always sets one — `None` is a
+    /// statement about the rule, never about the finding
+    /// (`veripublica/epubveri#85`) — so a schema-violation fixture with `None`
+    /// would be a state that cannot occur, and the first fixer to dispatch on
+    /// the kind would be tested against a lie.
+    fn schema(kind: ViolationKind, text: String, params: Vec<String>) -> epubveri::report::Message {
+        epubveri::report::Message {
+            text,
+            location: Some("OEBPS/ch1.xhtml".to_string()),
+            params,
+            violation_kind: Some(kind),
+            ..fixture("RSC-005", "opf.content_document.schema_violation")
+        }
+    }
+
+    /// Every violation kind we know about, asserted by name.
+    ///
+    /// **This is the only mechanical check on either side that a seventh kind
+    /// was added.** epubveri's `Blame::kind` mapping is a wildcard-free `match`
+    /// kept that way by a code comment, and the compile error people expect from
+    /// an exhaustive enum never fires here: our group key needs `Ord`/`Hash`/`Eq`
+    /// and our dispatch is equality, neither of which is a `match`. `ALL` exists
+    /// for exactly this test (agreed in writing, `veripublica/epubveri#85`), and
+    /// it survives the enum becoming `#[non_exhaustive]` at 1.0.
+    ///
+    /// If this fails, do not just add the name: a new kind means the grammar
+    /// grew a class of fault, and `docs/COVERAGE.md` needs the routing verdict
+    /// for it before the display can claim anything about it.
+    #[test]
+    fn violation_kind_all_six_are_known() {
+        let names: Vec<&str> = ViolationKind::ALL.iter().map(|k| k.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "element_not_allowed",
+                "incomplete_content",
+                "missing_attribute",
+                "stray_text",
+                "attribute_not_allowed",
+                "invalid_attribute_value",
+            ]
+        );
+    }
 
     /// The parse gap: an EPUB 2 doc with an XHTML 1.1 DOCTYPE and `&nbsp;` that
     /// roxmltree can't parse on its own. The fixer must locate the empty <title>
@@ -6956,14 +7027,9 @@ mod tests {
     fn ncx_missing_resource(ncx: &str, raw: &str) -> Report {
         let mut report = Report::default();
         report.messages = vec![epubveri::report::Message {
-            id: "RSC-007",
-            severity: Severity::Error,
-            text: String::new(),
             location: Some(ncx.to_string()),
-            position: None,
-            rule: Some("opf.ncx.content_src_missing_resource"),
             params: vec![raw.to_string()],
-            element_path: None,
+            ..fixture("RSC-007", "opf.ncx.content_src_missing_resource")
         }];
         report
     }
@@ -7180,14 +7246,9 @@ mod tests {
         )]);
         let mut report = Report::default();
         report.messages = vec![epubveri::report::Message {
-            id: "RSC-005",
-            severity: Severity::Error,
-            text: String::new(),
             location: Some("toc.ncx".to_string()),
-            position: None,
-            rule: Some("ncx.play_order.no_origin"),
             params: vec!["0".to_string()],
-            element_path: None,
+            ..fixture("RSC-005", "ncx.play_order.no_origin")
         }];
         assert_eq!(
             ncx_play_order(&report, &ws).len(),
@@ -7503,14 +7564,9 @@ mod tests {
     fn undeclared_property(doc: &str, prop: &str) -> Report {
         let mut report = Report::default();
         report.messages = vec![epubveri::report::Message {
-            id: "OPF-014",
-            severity: Severity::Error,
-            text: String::new(),
             location: Some(doc.to_string()),
-            position: None,
-            rule: Some("opf.content_document.property_used_undeclared"),
             params: vec![prop.to_string()],
-            element_path: None,
+            ..fixture("OPF-014", "opf.content_document.property_used_undeclared")
         }];
         report
     }
@@ -7628,14 +7684,8 @@ mod tests {
         report.messages = ids
             .iter()
             .map(|id| epubveri::report::Message {
-                id: "RSC-001",
-                severity: Severity::Error,
-                text: String::new(),
-                location: None,
-                position: None,
-                rule: Some("opf.manifest_item.missing_resource"),
                 params: vec![id.to_string(), format!("{id}.xhtml")],
-                element_path: None,
+                ..fixture("RSC-001", "opf.manifest_item.missing_resource")
             })
             .collect();
         report
@@ -8028,17 +8078,11 @@ mod tests {
 
     /// A `schema_violation` message, the way the grammar emits it: the message
     /// names the containing element and `params[0]` repeats it.
-    fn schema_violation(text: &str, param: &str) -> epubveri::report::Message {
-        epubveri::report::Message {
-            id: "RSC-005",
-            severity: Severity::Error,
-            text: text.to_string(),
-            location: Some("OEBPS/ch1.xhtml".to_string()),
-            position: None,
-            rule: Some("opf.content_document.schema_violation"),
-            params: vec![param.to_string()],
-            element_path: None,
-        }
+    ///
+    /// The `kind` is required rather than defaulted, and that is deliberate —
+    /// see [`schema`].
+    fn schema_violation(kind: ViolationKind, text: &str, param: &str) -> epubveri::report::Message {
+        schema(kind, text.to_string(), vec![param.to_string()])
     }
 
     /// An `element "X" is not allowed here` message, with the expected set the
@@ -8046,16 +8090,23 @@ mod tests {
     fn element_violation(element: &str, expected: &[&str]) -> epubveri::report::Message {
         let mut params = vec![element.to_string()];
         params.extend(expected.iter().map(|s| s.to_string()));
-        epubveri::report::Message {
-            id: "RSC-005",
-            severity: Severity::Error,
-            text: format!("element \"{element}\" is not allowed here; expected one of …"),
-            location: Some("OEBPS/ch1.xhtml".to_string()),
-            position: None,
-            rule: Some("opf.content_document.schema_violation"),
+        schema(
+            ViolationKind::ElementNotAllowed,
+            format!("element \"{element}\" is not allowed here; expected one of …"),
             params,
-            element_path: None,
-        }
+        )
+    }
+
+    /// `element "X" has incomplete content` — the same defect as stray text,
+    /// reported from the other end. Its own constructor rather than an
+    /// `element_violation` with the text overwritten, because overwriting the
+    /// text would leave the kind describing a different fault.
+    fn incomplete_content(element: &str) -> epubveri::report::Message {
+        schema(
+            ViolationKind::IncompleteContent,
+            format!("element \"{element}\" has incomplete content"),
+            vec![element.to_string()],
+        )
     }
 
     #[test]
@@ -8144,14 +8195,16 @@ mod tests {
     fn the_incomplete_content_message_triggers_only_for_wrappable_containers() {
         // The same defect, reported from the other end.
         for c in ["body", "blockquote"] {
-            let mut m = element_violation(c, &[]);
-            m.text = format!("element \"{c}\" has incomplete content");
-            assert!(is_incomplete_container(&m), "{c} must trigger");
+            assert!(
+                is_incomplete_container(&incomplete_content(c)),
+                "{c} must trigger"
+            );
         }
         for c in ["ol", "ul", "head"] {
-            let mut m = element_violation(c, &[]);
-            m.text = format!("element \"{c}\" has incomplete content");
-            assert!(!is_incomplete_container(&m), "{c} must not");
+            assert!(
+                !is_incomplete_container(&incomplete_content(c)),
+                "{c} must not"
+            );
         }
     }
 
@@ -8203,6 +8256,7 @@ mod tests {
     #[test]
     fn only_stray_text_in_body_is_matched() {
         assert!(is_stray_text_in_body(&schema_violation(
+            ViolationKind::StrayText,
             "stray text is not allowed directly in \"body\"; wrap it in an element",
             "body",
         )));
@@ -8210,18 +8264,21 @@ mod tests {
         // Right kind, wrong container: an <li> is the correct wrapper inside an
         // <ol>, and that asserts the text is a list item — a judgement.
         assert!(!is_stray_text_in_body(&schema_violation(
+            ViolationKind::StrayText,
             "stray text is not allowed directly in \"ol\"; wrap it in an element",
             "ol",
         )));
 
         // Right container, wrong kind — the param alone would have matched.
         assert!(!is_stray_text_in_body(&schema_violation(
+            ViolationKind::ElementNotAllowed,
             "element \"body\" is not allowed here",
             "body",
         )));
 
         // A sibling rule that is not a schema violation at all.
         let mut other = schema_violation(
+            ViolationKind::StrayText,
             "stray text is not allowed directly in \"body\"; wrap it in an element",
             "body",
         );
@@ -8467,15 +8524,12 @@ mod tests {
     /// malformed value and a non-`lang` attribute must both fail the match.
     #[test]
     fn only_an_empty_lang_finding_is_matched() {
-        let empty = |attr: &str, value: &str| epubveri::report::Message {
-            id: "RSC-005",
-            severity: Severity::Error,
-            text: format!("value of attribute \"{attr}\" is invalid: \"{value}\""),
-            location: Some("OEBPS/ch1.xhtml".to_string()),
-            position: None,
-            rule: Some("opf.content_document.schema_violation"),
-            params: vec![attr.to_string(), value.to_string()],
-            element_path: None,
+        let empty = |attr: &str, value: &str| {
+            schema(
+                ViolationKind::InvalidAttributeValue,
+                format!("value of attribute \"{attr}\" is invalid: \"{value}\""),
+                vec![attr.to_string(), value.to_string()],
+            )
         };
         assert!(is_empty_lang(&empty("lang", "")));
         assert!(is_empty_lang(&empty("xml:lang", "")));

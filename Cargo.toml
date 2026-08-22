@@ -23,9 +23,10 @@ members = ["epubsana-wasm"]
 # into an error) and the `rule`/`params` sub-codes epubsana's fixers dispatch on
 # both arrived on the 0.5 line, the conventions-v0.4 one.
 #
-# **The floor is 0.9.16, and it is a correctness floor, not a preference** — each
-# raise has been made for the same reason: below it, a detector false positive
-# makes some fixer here repair a book that was not broken.
+# **The floor is 0.10.0.** Most raises have been *correctness* floors, made for the
+# same reason each time: below them, a detector false positive makes some fixer
+# here repair a book that was not broken. The last two are different classes —
+# 0.9.26 is completeness and 0.10.0 is capability — and each says which it is.
 #
 # - **0.9.7.** On 0.5.x, `opf.content_document.empty_title` was an EPUB 3 rule
 #   firing on EPUB 2 books, so epubsana's most active fixer wrote TOC labels into
@@ -60,9 +61,27 @@ members = ["epubsana-wasm"]
 # (generic over the tool-owned slots since 0.5.3), so the 0.8.0 `Options` break
 # does not reach here.
 #
+# - **0.10.0 (2026-08-22) is the first floor that is a *capability* floor, and
+#   the first that cost source change.** `report::Message` gained
+#   `violation_kind` and `rng::Blame::Text` became a struct variant, so the
+#   caret had to move; below it `ViolationKind` does not exist and the
+#   `violation_kind_all_six_are_known` test cannot compile. That test is the
+#   reason the floor is not merely a preference: epubveri's own `Blame::kind`
+#   mapping stays wildcard-free by a code comment, so **ours is the only
+#   mechanical check that a seventh kind was added** (agreed in writing,
+#   veripublica/epubveri#85). On an older detector that check silently does not
+#   exist.
+#
+#   The behavioural risk of the bump was measured *before* it, against the
+#   unreleased build: 385 books, plan digest byte-identical — 152 books planned,
+#   2,156 proposals, same `--apply` indices — while 11,334 finding positions
+#   moved underneath (4e36141 reports an attribute fault at the attribute). We
+#   read no position anywhere, and every fixer re-sorts through a `BTree*`.
+#   `plan_ab.rs` + `pos_ab.rs` in dev-examples are the instruments.
+#
 # Tracking policy, agreed with epubveri 2026-08-05: **track loosely** — a caret on
-# 0.9, re-measure when a minor lands, don't chase patches. For an irreversible
-# repairer, a newer detector only matters when the rules we consume move, and
+# the current minor, re-measure when a minor lands, don't chase patches. For an
+# irreversible repairer, a newer detector only matters when the rules we consume move, and
 # across 24 releases exactly two of ours did. 0.9.14 → 0.9.16 was the same story
 # measured again: on the 146-book shelf the whole-shelf regression audit is
 # byte-identical across the two, and the full rule census differs by exactly one
@@ -70,7 +89,7 @@ members = ["epubsana-wasm"]
 #
 # For local co-development of epubveri, add an uncommitted override:
 #   [patch.crates-io] epubveri = { path = "../epubveri" }
-epubveri = "0.9.26"
+epubveri = "0.10.0"
 # Pure-Rust only (no C deps), same philosophy as epubveri: zip's "deflate"
 # feature uses zlib-rs (Rust) on the 8.x line; bzip2/zstd (C) stay disabled.
 # Aligned to epubveri's zip major — the family shares one zip version because
