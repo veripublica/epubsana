@@ -32,6 +32,17 @@ jobs:
       - name: Test (workspace)
         run: cargo test --workspace --locked
 
+      # A gate nothing here had, and its absence is not theoretical: the day it
+      # was added it caught a doc link to a private item that had shipped in the
+      # previous release. epubveri found six defects of the same kinds the same
+      # way (broken intra-doc links, bare URLs, an indented shell snippet being
+      # compiled as a Rust doctest) and passed the tip on. Warnings are denied
+      # because a rustdoc warning is the only signal these produce.
+      - name: Docs (rustdoc, warnings denied)
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps --locked
+
       # Prove the repairer still compiles to WebAssembly: the core library and
       # the epubsana-wasm bindings crate (which exercises the wasm-bindgen /
       # tsify codegen). A full `wasm-pack build` runs in the Pages workflow;

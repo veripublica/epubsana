@@ -138,7 +138,15 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
   which is three kinds, and is now `ElementNotAllowed` alone; nothing on the
   shelf depended on the looser reading.
 
-- **The `epubveri` floor moves to 0.10.0.** `report::Message` gained
+- **The `epubveri` floor moves to 0.11.0.** 0.10.0 is what epubsana actually
+  needs — it carries `violation_kind` — but a caret on `0.10.0` stops before
+  0.11.0, so leaving it there would strand library consumers on a line epubveri
+  had already left the same day. 0.11.0's change is entirely in its CLI (`-u` now
+  gates `--format json` and `--format ids`); `validate_bytes` still returns every
+  finding at every severity. Verified rather than trusted: the schema-violation
+  census is byte-identical across the two, and so is the plan.
+
+- **What 0.10.0 brought, and why it is the capability floor.** `report::Message` gained
   `violation_kind`, the machine token for which of six kinds a schema violation
   is, so the caret had to move. The floor is a *capability* one: epubsana now
   carries the only mechanical check that a seventh kind was ever added
@@ -163,6 +171,11 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
   completeness one rather than the usual correctness one.
 
 ### Fixed
+
+- **A rustdoc gate in CI, and the defect it caught on arrival.** Nothing ran
+  `cargo doc`, and a public doc comment linked to a private item — shipped in the
+  previous release. `RUSTDOCFLAGS="-D warnings" cargo doc` is a CI step now. The
+  tip came from epubveri, which had found six of its own the same way.
 
 - **`VERSION`'s `.dirty` flag no longer goes stale.** `build.rs` re-bakes when
   `.git/HEAD`, `.git/index` or the branch ref changes, but asked

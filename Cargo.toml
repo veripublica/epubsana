@@ -72,6 +72,16 @@ members = ["epubsana-wasm"]
 #   veripublica/epubveri#85). On an older detector that check silently does not
 #   exist.
 #
+#   **0.11.0 (same day) is a tracking move, not a new capability floor.** Its
+#   change is entirely in epubveri's CLI — `-u` now gates `--format json` and
+#   `--format ids`, after Doitsu found one flag meaning two things depending on
+#   the format. `validate_bytes` still returns every finding at every severity,
+#   which is the boundary this project argued for with numbers and which now has
+#   a test upstream. The caret is what forces the edit: `^0.10.0` stops before
+#   0.11.0, so leaving it would have stranded library consumers on a line
+#   epubveri had already left. Verified rather than trusted — the kind census is
+#   identical across the two (39,979 / 9 / 0) and the plan digest did not move.
+#
 #   The behavioural risk of the bump was measured *before* it, against the
 #   unreleased build: 385 books, plan digest byte-identical — 152 books planned,
 #   2,156 proposals, same `--apply` indices — while 11,334 finding positions
@@ -89,7 +99,7 @@ members = ["epubsana-wasm"]
 #
 # For local co-development of epubveri, add an uncommitted override:
 #   [patch.crates-io] epubveri = { path = "../epubveri" }
-epubveri = "0.10.0"
+epubveri = "0.11.0"
 # Pure-Rust only (no C deps), same philosophy as epubveri: zip's "deflate"
 # feature uses zlib-rs (Rust) on the 8.x line; bzip2/zstd (C) stay disabled.
 # Aligned to epubveri's zip major — the family shares one zip version because

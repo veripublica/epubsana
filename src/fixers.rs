@@ -56,7 +56,7 @@ fn is_schema_violation(m: &epubveri::report::Message, rule: &str, kind: Violatio
 /// shelf books came out shuffled between runs. It never reached our output
 /// because **every fixer here groups its findings through a `BTreeMap` or
 /// `BTreeSet` before emitting**, which re-sorts arrival order away; the one
-/// exception, [`mimetype_packaging`], asks only whether an id is present at all.
+/// exception, `mimetype_packaging`, asks only whether an id is present at all.
 /// Verified empirically as well: three separate processes over the 385-book
 /// shelf produce byte-identical plans (`plan_order.rs` in dev-examples).
 ///
