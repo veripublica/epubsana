@@ -43,7 +43,12 @@ pub struct Change {
 #[derive(Clone, Serialize, Tsify)]
 #[tsify(into_wasm_abi)]
 pub struct Fix {
-    /// Index to pass to `Session.apply`.
+    /// Index to pass to `Session.apply`. **0-based** — it indexes this array.
+    ///
+    /// The envelope's [`Data::index`], on a report item, is the same fix's
+    /// **1-based** plan position, because that is the handle `epubsana --apply`
+    /// takes and the two documents have to agree. Do not pass one where the
+    /// other is wanted.
     pub index: usize,
     /// `"AutoSafe"` (safe to auto-apply) or `"ConfirmNeeded"` (a visible change).
     /// epubsana's own axis: how much judgement the fix needs. Orthogonal to
@@ -128,6 +133,22 @@ pub struct Item {
 /// Tool-specific extras: epubsana's tier, and the exact edits.
 #[derive(Serialize, Tsify)]
 pub struct Data {
+    /// This fix's **1-based** position in the plan, mirroring the CLI
+    /// envelope's `data.index` — the selector `epubsana --apply` accepts.
+    ///
+    /// **Not the argument `Session.apply` takes.** That one is [`Fix::index`],
+    /// which is 0-based because it indexes the `Plan.fixes` array JS already
+    /// holds. The two differ on purpose: this field exists so a report saved
+    /// from the browser is the *same document* a plugin gets from the CLI, and
+    /// silently re-basing it would make the two disagree. Subtract one to cross
+    /// between them.
+    ///
+    /// It was missing until 2026-08-22 — this struct is hand-written to get a
+    /// TypeScript type out of Tsify rather than built on `epubsana::envelope`,
+    /// so "keep them in step" (see the module docs) was a comment and not a
+    /// mechanism. epubveri hit the identical gap in its own binding on the same
+    /// day and told us to look.
+    pub index: usize,
     pub fix_id: String,
     pub tier: String,
     pub changes: Vec<ChangeItem>,
@@ -251,7 +272,8 @@ impl Session {
             .infos
             .iter()
             .zip(&self.meta)
-            .map(|(f, m)| Item {
+            .enumerate()
+            .map(|(i, (f, m))| Item {
                 kind: "fix".to_string(),
                 outcome: f.outcome.clone(),
                 code: f.id.clone(),
@@ -260,6 +282,7 @@ impl Session {
                 location: m.location.clone(),
                 message: f.title.clone(),
                 data: Data {
+                    index: i + 1,
                     fix_id: m.fix_id.to_string(),
                     tier: match f.tier.as_str() {
                         "AutoSafe" => "auto_safe",

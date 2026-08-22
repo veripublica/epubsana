@@ -91,6 +91,17 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
   `PKG-006` survives the fix and should: it is a *warning* about the space in the
   ZIP entry name itself, and the book's verdict is valid with it present.
 
+- **`data.index` in the WASM report.** `Session.report()` claims to return the
+  machine envelope's `inputs[i]` shape, and one field was missing from it: the
+  fix's 1-based plan position, which is the selector `epubsana --apply` accepts.
+  A report saved from the browser is now the same document a plugin gets from
+  the CLI.
+
+  Note the two indices are different numbers on purpose. `Plan.fixes[].index` is
+  0-based — it indexes the array JS holds and is what `Session.apply` takes —
+  while `data.index` is 1-based because the CLI selector is. Both are documented
+  at each other.
+
 ### Changed
 
 - **The `epubveri` floor moves to 0.10.0.** `report::Message` gained
