@@ -96,6 +96,14 @@ pub struct Report {
 }
 
 /// Per-input counts, mirroring the envelope's `summary`.
+///
+/// Including its naming rule, which is written out on `epubsana::envelope::Summary`:
+/// a severity count here is **plural with a tense**, `<severity>s_before` /
+/// `<severity>s_after`. Do not follow epubveri's singular `summary` keys when
+/// adding one — theirs is a histogram of a single report, these are a repair
+/// run's delta, and mixing the two spellings inside one object is the failure
+/// that note exists to prevent. `Plan::warnings_before` is the shipped
+/// precedent.
 #[derive(Serialize, Tsify)]
 pub struct Summary {
     pub fatals_before: usize,

@@ -103,6 +103,34 @@ fn item(index: usize, f: &ReportedFix) -> Item<Data> {
 ///
 /// Fatals are counted apart from errors, as epubveri reports them: a book whose
 /// defects are all fatal has `errors_before: 0` and is not remotely valid.
+///
+/// # Naming: a severity count here is `<severity>s_before` / `<severity>s_after`
+///
+/// **Plural, and settled by precedent rather than by preference** — the wasm
+/// binding's `Plan` has shipped `warnings_before` since it existed. Anything
+/// added later follows the same shape.
+///
+/// The rule is written down because of one specific way it would otherwise be
+/// broken. epubveri's `summary` keys went **singular** in its 0.11.0 —
+/// `fatal`, `error`, `warning`, `info`, `usage` — on the good argument that
+/// *information* has no plural and *usages* is not English. Someone adding a
+/// severity to this struct will meet that convention first and follow it, and
+/// the result is `warning_before` sitting next to `errors_before` **inside one
+/// object**. An inconsistency within a single summary is worse than one between
+/// two tools, and it is the one thing this note exists to prevent.
+///
+/// The two are not the same slot, which is why matching them would be the wrong
+/// fix rather than merely a costly one. epubveri's keys are a **histogram of one
+/// report** — how many findings of each severity a book has. These are the
+/// **before/after delta of a repair run**, which is why each name carries a
+/// tense. FORMATS.md makes `summary` tool-owned precisely so the two can differ.
+///
+/// What is genuinely missing is a dimension, not a spelling: the human report
+/// counts warnings and this does not, so a machine consumer cannot see the work
+/// of the three fixers that run on `usage`/`warning` findings — 41 proposals and
+/// 147 findings cleared across 385 books, against a Δ-errors of exactly zero.
+/// Adding them is additive and cheap now that `ChangeReport::before` is kept.
+/// Deliberately not done here; the naming is decided, the addition is not.
 #[derive(Serialize)]
 pub struct Summary {
     pub fatals_before: usize,
