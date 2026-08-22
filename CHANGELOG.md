@@ -164,6 +164,15 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
 ### Fixed
 
+- **`VERSION`'s `.dirty` flag no longer goes stale.** `build.rs` re-bakes when
+  `.git/HEAD`, `.git/index` or the branch ref changes, but asked
+  `git status --porcelain`, which also counts *untracked* files — and creating or
+  deleting one touches none of those. The corpus-audit examples are copied into
+  `examples/` to run and deleted afterwards, so every binary built in between
+  baked `.dirty` and kept it long after the tree was clean. It now asks
+  `--untracked-files=no`, the same question the watch list answers. Tracked and
+  staged changes still flag.
+
 - **`fix.content_properties` no longer writes an EPUB 3 attribute into an EPUB 2
   package.** `properties` does not exist in OPS 2.0.1, so on a `version="2.0"`
   book the fix cleared the reported `OPF-014` and produced

@@ -35,7 +35,23 @@ fn watch(path: &str) {
 
 fn git_build_metadata() -> Option<String> {
     let hash = git(&["rev-parse", "--short=7", "HEAD"])?;
-    let dirty = match git(&["status", "--porcelain"]) {
+    // `--untracked-files=no` on purpose, and it is a correctness fix rather than
+    // a preference: the flag has to answer the same question the `watch` list
+    // above asks, or it goes stale and lies.
+    //
+    // A plain `--porcelain` counts untracked files, and creating or deleting one
+    // touches nothing this build script watches — so the answer never refreshes.
+    // That is not hypothetical here: the corpus-audit examples are copied into
+    // `examples/` to run and deleted afterwards, several times in a session, and
+    // every binary built in between silently baked `.dirty` and kept it long
+    // after the tree was clean again. Caught during the 2026-08-22 pre-release
+    // check, where a clean `git status` sat next to `epubsana -V` printing
+    // `.dirty`.
+    //
+    // Tracked modifications and staged changes both still flag, and both do move
+    // `.git/index` or a watched ref, so the flag now changes exactly when
+    // something it watches does.
+    let dirty = match git(&["status", "--porcelain", "--untracked-files=no"]) {
         Some(s) if !s.is_empty() => ".dirty",
         _ => "",
     };
