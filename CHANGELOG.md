@@ -91,6 +91,22 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
   `PKG-006` survives the fix and should: it is a *warning* about the space in the
   ZIP entry name itself, and the book's verdict is valid with it present.
 
+- **`ChangeReport::before` — the detection report the run started from.** It was
+  computed, reduced to `fatals_before`/`errors_before`, and dropped. Keeping it
+  is the first step toward telling the two halves of `No fixes to propose.`
+  apart: *a human repairs this in an editor* and *nobody should repair this
+  automatically* are opposite claims, and the second is the stronger thing this
+  tool can say.
+
+  No output changes yet. A test pins the retained report and the printed counts
+  to the same detection so the two cannot drift, and the plan over the 385-book
+  shelf is unchanged.
+
+  One limit is documented on the field rather than discovered later: there is no
+  link from a fix back to the findings it cleared — a fixer groups many findings
+  into one proposal — so the residue cannot be computed exactly from this yet,
+  and matching on `(id, rule)` would be an approximation, not the answer.
+
 - **`data.index` in the WASM report.** `Session.report()` claims to return the
   machine envelope's `inputs[i]` shape, and one field was missing from it: the
   fix's 1-based plan position, which is the selector `epubsana --apply` accepts.

@@ -222,6 +222,33 @@ pub struct ReportedFix {
 pub struct ChangeReport {
     /// Every planned fix, in proposal order, each carrying its [`Outcome`].
     pub fixes: Vec<ReportedFix>,
+    /// The detection report the run started from — **every** finding the book
+    /// had, not only the ones a fixer could reach.
+    ///
+    /// It used to be computed, reduced to `fatals_before`/`errors_before`, and
+    /// dropped. Keeping it is the first step toward the routing display, and
+    /// epubveri's framing of that work is the right one: the missing thing was
+    /// never "a findings view", it was that the data had already been thrown
+    /// away by the time anything could ask for it.
+    ///
+    /// **What it enables.** `No fixes to propose.` currently collapses two
+    /// opposite claims into one sentence — *a human repairs this in an editor*
+    /// (a choice about the book: which of two languages, which identifier is
+    /// canonical, where a broken link meant to point) and *nobody should repair
+    /// this automatically*. The second is the stronger thing this tool can say
+    /// and today it cannot say it. Grouping these findings by
+    /// `(violation_kind, params[0])` is how the display will say which.
+    ///
+    /// **What it does not enable yet, so nobody builds on the assumption.**
+    /// There is no link from a [`ReportedFix`] back to the findings it cleared.
+    /// A fixer groups many findings into one proposal — 28 navigation points in
+    /// one NCX became one fix — and only the `id`/`rule` it dispatched on
+    /// survives. So "the findings we did *not* address" cannot be computed
+    /// exactly from this field; matching on `(id, rule)` is an approximation and
+    /// must not be presented as the residue. Recording the consumed findings per
+    /// fixer is the next step, and it is the same missing primitive per-fix
+    /// rollback needs (issue #7).
+    pub before: epubveri::report::Report,
     pub fatals_before: usize,
     pub fatals_after: usize,
     pub errors_before: usize,
@@ -301,6 +328,7 @@ pub fn repair(
     let after = ws.detect()?;
     Ok(ChangeReport {
         fixes,
+        before,
         fatals_before,
         fatals_after: after.fatals(),
         errors_before,
@@ -308,4 +336,59 @@ pub fn repair(
         goal,
         goal_met: goal.is_met(&after),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Cursor, Write};
+    use zip::write::SimpleFileOptions;
+    use zip::{CompressionMethod, ZipWriter};
+
+    /// A container broken in several unrelated ways at once, so the run has both
+    /// findings a fixer reaches and findings it does not.
+    fn broken_epub() -> Vec<u8> {
+        let mut buf = Vec::new();
+        {
+            let mut zip = ZipWriter::new(Cursor::new(&mut buf));
+            let stored = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+            let deflated =
+                SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+            // mimetype neither first nor stored: PKG-006.
+            zip.start_file("mimetype", deflated).unwrap();
+            zip.write_all(b"application/epub+zip").unwrap();
+            zip.start_file("META-INF/container.xml", stored).unwrap();
+            zip.write_all(b"<container/>").unwrap();
+            zip.finish().unwrap();
+        }
+        buf
+    }
+
+    struct RejectAll;
+    impl Confirmer for RejectAll {
+        fn decide(&mut self, _: &ProposedFix) -> Decision {
+            Decision::Reject
+        }
+    }
+
+    /// The detection report the run started from is kept, not reduced to two
+    /// integers and dropped.
+    ///
+    /// The second and third assertions are the load-bearing ones: they pin the
+    /// retained report and the counts the CLI prints to the *same* detection, so
+    /// the two can never drift into disagreeing about the same book. Everything
+    /// the routing display will say is derived from this field, and a summary
+    /// that contradicts the findings under it would be worse than no display.
+    #[test]
+    fn the_before_report_survives_the_run() {
+        let mut ws = Workspace::load(&broken_epub()).unwrap();
+        let report = repair(&mut ws, Goal::Valid, Policy::DryRun, &mut RejectAll).unwrap();
+
+        assert!(
+            !report.before.messages.is_empty(),
+            "a deliberately broken container must produce findings"
+        );
+        assert_eq!(report.before.fatals(), report.fatals_before);
+        assert_eq!(report.before.errors(), report.errors_before);
+    }
 }
