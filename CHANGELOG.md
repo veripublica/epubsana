@@ -8,6 +8,66 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [0.13.0] - 2026-09-02
+
+**Minor rather than patch, and the reason is the dependency.** epubveri types are
+in this crate's public API — `ChangeReport::before` is an `epubveri::report::Report`
+and `fixers::plan` takes one — so moving the floor from `^0.11` to `^0.13` is a
+breaking change for a library consumer, whatever it looks like from the CLI. Same
+reasoning as 0.10.0 and 0.12.0, both of which carried a detector floor for the
+same reason.
+
+### Fixed
+
+- **`fix.manifest_dangling_item` no longer drops a manifest item that something
+  in the book still links to.** The absent `cover.jpg` was reported once against
+  the manifest (`RSC-001`); dropping the declaration reported the same absent
+  file again against the reference that named it (`RSC-007`), leaving the book's
+  error count **6 before and 6 after** — a trade, not a repair, and the kind an
+  instrument watching totals calls a success. It is the shelf's only regression
+  and the same class as the nav-document one this fixer already guards against.
+
+  Found by the corpus rather than by a test: the shelf grew 385 → 444 books and
+  one of the new ones has the shape. `docs/FIXERS.md` records that an earlier
+  session ran exactly this check **by hand** — grepping every content document,
+  the NCX and the OPF — on a 171-book corpus where it happened to pass; the guard
+  is that check made permanent.
+
+  It costs one of the fixer's seven whole-shelf proposals and nothing else: the
+  plan digest over 444 books loses that single line, and `regression_audit` goes
+  back to introducing nothing at any severity.
+
+### Changed
+
+- **The epubveri floor moves to `0.13.2`** (from `0.11.0`), covering eight
+  upstream releases. **No source change**; 225 + 22 tests green before the
+  manifest was touched, and the whole-shelf plan digest is **byte-identical**
+  across the boundary — 444 books, 180 planned, 2,315 digest lines, same
+  `--apply` indices, tiers and preview notes (`plan_ab.rs`, `426e3dc9…`). All 36
+  rule slugs this crate dispatches on exist verbatim at 0.13.2, and 0.13.0's one
+  breaking library change (`rng::ElementFault::MissingAttribute` gaining a
+  payload) misses a consumer that reads `violation_kind` and never `rng::`.
+
+  **This is a tracking move, not a new floor class.** Nothing below 0.13.2 is
+  required by a fixer. What it buys is the numbers epubsana *prints*: those are
+  the detector's, and below 0.13.2 they are inflated on EPUB 2 books — upstream
+  issue #94 stopped blaming the children of an element the grammar defines
+  nowhere, which removes 1,878 shelf-wide errors from
+  `opf.content_document.schema_violation` (41,140 → 39,262). On the 180 books
+  this crate can propose for, the before/after pair moves 38,684 → 16,306 to
+  **37,986 → 15,572**; every recorded total from a previous run is incomparable
+  across this boundary rather than improved or regressed.
+
+  Three populations moved and none reaches an edit, each checked rather than
+  assumed: `opf.package.schema_violation` gains two EPUB 2 books carrying
+  `prefix`, which `fix.epub3_attr_in_epub2_package` **sees and declines** — it
+  accepts exactly two shapes, and `prefix` is authored information EPUB 2 has
+  nowhere to put; `opf.content_document.duplicate_id` gains 36 findings at
+  positions previously silent (76 → 112) in the same 7 books, which
+  `fix.content_document_duplicate_id` groups per id, so its 16 proposals do not
+  move; and `opf.manifest_item.filename_contains_space` was renamed
+  `ocf.filename.contains_space`, a key this crate does not dispatch on.
+
 ## [0.12.0] - 2026-08-22
 
 ### Added

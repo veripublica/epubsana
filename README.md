@@ -51,6 +51,9 @@ apply → report) is solid, with thirty-five fixers so far:
 - **`RSC-001`** — a manifest item declaring a resource the container doesn't hold
   → dropped, together with every reference that named it (the spine entries it
   would orphan, and a legacy cover `<meta>`), in one edit you approve once.
+  Declined when something in the book still links to the missing file: deleting
+  the declaration would not make the file present, it would only move the finding
+  from the manifest to the link. Declined for the navigation document too.
 - **`OPF-049`** — a spine `itemref` naming a manifest id that doesn't exist →
   dropped. Neither fixer will leave a book with an empty spine; it declines.
 - **`OPF-034` / `RSC-005`** — the same manifest item listed twice in the spine

@@ -593,6 +593,23 @@ check — if it ever regressed, a guard here would hide the bug rather than fix 
   guard asks whether a reading order would survive every deletion these fixers
   *could* propose, so counting a deletion that will never happen would make it
   decline runs that are safe.
+- **If anything else in the container still links to the missing file.** The
+  absent `cover.jpg` is reported once, against the manifest (`RSC-001`); drop the
+  declaration and the same absent file is reported again, against the reference
+  that named it (`RSC-007`, `reference_missing_resource`). Deleting a declaration
+  does not make a file present. This is the nav guard's principle a second time:
+  a repair that trades one finding for another is not a repair.
+
+  The package document is excluded from the scan, because its own manifest entry
+  is exactly what is being dropped and the `<meta name="cover">` that may name it
+  goes in the same edit. Everything else that can hold a reference is scanned as
+  **text rather than parsed** — these are books being repaired *because* their
+  markup is defective, and a document that failed to parse would silently answer
+  "nothing references it", which is the unsafe direction for a guard. A candidate
+  counts only when it is a whole quoted attribute value that resolves, against
+  the referring document's own directory, to the missing entry: the filename in
+  prose, in a comment, inside a longer string, or in a remote URL is not a
+  reference.
 
 **Measured.** 2 books in the 171-book corpus, both the same shape: a conversion
 left `cover-1.jpg`/`cover-2.jpg` declared beside the real, present cover
@@ -601,6 +618,19 @@ On this corpus neither guard fires — the dangling items are images, so nothing
 the spine references them, and they are not the declared cover. Grepping every
 content document, the NCX and the OPF confirms the manifest entry itself is the
 **only** thing in either book that mentions them.
+
+**The reference guard is measured too, and it closes a check an earlier session
+had been doing by hand.** The paragraph above ends by saying that grepping every
+content document, the NCX and the OPF confirmed the manifest entry was the only
+mention of those two items — the right check, run manually, on a 171-book corpus
+where it happened to pass. On the 444-book shelf (2026-09-02) it does not: one
+book declares a missing `cover.jpg` that its own `cover.xhtml` links to, and
+dropping the item moved the finding from `RSC-001` to `RSC-007` while leaving the
+book's error count **6 before and 6 after**. An instrument watching totals would
+have called that a repair; `regression_audit`, which watches for findings that did
+not exist before, called it the shelf's only regression. The guard costs exactly
+one of the fixer's seven shelf proposals — the whole-shelf plan digest loses that
+single line and nothing else — and takes the run back to introducing nothing.
 
 The **nav guard is not argued but measured**, and it is the reason this entry
 grew a third decline clause. On the shared 94-book shelf (2026-08-05), one book

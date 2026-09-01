@@ -2626,6 +2626,75 @@ fn spine_survives_dangling_drops(opf: &str, dangling: &BTreeSet<&str>) -> bool {
     })
 }
 
+/// Does any container entry still point at `target` (a container-absolute entry
+/// name), other than the package document itself?
+///
+/// This is the third guard on `fix.manifest_dangling_item`, and it exists for
+/// the same reason as the other two: dropping the declaration must not author a
+/// finding in place of the one it clears. A missing `cover.jpg` that `cover.xhtml`
+/// links to is reported once, against the manifest (`RSC-001`); delete the item
+/// and the same absent file is reported again, now against the reference
+/// (`RSC-007`). Measured on a real book where the error count was **6 before and
+/// 6 after** — an instrument watching totals would have called that a repair.
+///
+/// The package document is excluded because its own manifest entry is precisely
+/// what is being dropped, and the `<meta name="cover">` that may name it goes in
+/// the same edit.
+///
+/// **Scanned as text, not parsed.** These are books being repaired *because*
+/// their markup is defective, and a document that fails to parse would silently
+/// answer "nothing references it" — the unsafe direction for a guard. The walk
+/// back to the opening quote is `reference_path`'s, bounded by the characters
+/// that cannot occur inside an attribute value.
+fn any_entry_references(ws: &Workspace, target: &str, except: &str) -> bool {
+    let Some(base) = target.rsplit('/').next() else {
+        return false;
+    };
+    for name in ws.names() {
+        if name == except || !can_reference_a_fragment(name) {
+            continue;
+        }
+        let Some(text) = ws.get_text(name) else {
+            continue;
+        };
+        for (at, _) in text.match_indices(base) {
+            let Some(value) = enclosing_attr_value(&text, at, base.len()) else {
+                continue;
+            };
+            let path = value.split(['#', '?']).next().unwrap_or_default();
+            if path.is_empty() || path.contains(':') {
+                continue; // a remote or data URL names no container entry
+            }
+            if resolve_against(name, path).as_deref() == Some(target) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// The whole quoted attribute value containing `text[at..at + len]`, or `None`
+/// when that occurrence is not inside one — prose, a comment, script, or a value
+/// the scan cannot bound. Unlike [`reference_path`] this returns the value in
+/// full rather than the part before a fragment, because the caller splits it
+/// itself.
+fn enclosing_attr_value(text: &str, at: usize, len: usize) -> Option<String> {
+    let before = &text[..at];
+    let (qpos, qchar) = before
+        .char_indices()
+        .rev()
+        .take(512)
+        .find(|(_, c)| matches!(c, '"' | '\'' | '<' | '>' | '\n'))
+        .and_then(|(i, c)| matches!(c, '"' | '\'').then_some((i, c)))?;
+    let after = &text[at + len..];
+    let close = after.find(qchar)?;
+    let tail = &after[..close];
+    if tail.contains(['"', '\'', '<', '>']) {
+        return None;
+    }
+    Some(text[qpos + 1..at + len + close].to_string())
+}
+
 /// `RSC-001` / `opf.manifest_item.missing_resource`: a manifest `<item>` declares
 /// a resource the container doesn't hold. The declaration is simply false, and
 /// nothing in the book records what it was meant to point at — so the entry
@@ -2689,6 +2758,15 @@ fn manifest_dangling_items(report: &Report, ws: &Workspace) -> Vec<ProposedFix> 
         // same element is a reason for a human to look at it, not a licence for
         // us to delete it faster.
         if nav.contains(&id) {
+            continue;
+        }
+        // Something in the book still links to the absent file. Dropping the
+        // declaration does not make it present; it only moves the finding from
+        // the manifest to the reference, which is a trade rather than a repair.
+        // See `any_entry_references`.
+        if resolve_against(&opf_path, &href)
+            .is_some_and(|target| any_entry_references(ws, &target, &opf_path))
+        {
             continue;
         }
         let Some((_, spine_drops, cover_meta)) = compute_dangling_item_edits(&opf, &id) else {
@@ -7764,6 +7842,109 @@ mod tests {
             "the dangling cover meta goes"
         );
         assert!(out.contains("id=\"ch1\""), "nothing else is touched");
+    }
+
+    /// A book shaped like the one that produced the shelf's only regression:
+    /// `cover.jpg` is absent, the manifest declares it, and `cover.xhtml` links
+    /// to it. Both halves are asserted together on purpose — a guard that
+    /// declines everything would pass the first assertion alone, and the pair is
+    /// what shows the decline is caused by the reference and nothing else.
+    #[test]
+    fn a_dangling_item_something_still_links_to_is_declined() {
+        const CONTAINER: &str = r#"<?xml version="1.0"?><container xmlns="urn:oasis:names:tc:opendocument:xmlns:container:1.0"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#;
+        const PKG: &str = r#"<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><manifest><item id="cover-img" href="images/cover.jpg" media-type="image/jpeg"/><item id="cov" href="cover.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="cov"/></spine></package>"#;
+
+        let report = {
+            let mut r = report_with_dangling(&[]);
+            r.messages.push(epubveri::report::Message {
+                params: vec!["cover-img".to_string(), "images/cover.jpg".to_string()],
+                ..fixture("RSC-001", "opf.manifest_item.missing_resource")
+            });
+            r
+        };
+
+        let linking = container(&[
+            ("META-INF/container.xml", CONTAINER),
+            ("OEBPS/content.opf", PKG),
+            (
+                "OEBPS/cover.xhtml",
+                r#"<html><body><img src="images/cover.jpg" alt=""/></body></html>"#,
+            ),
+        ]);
+        assert!(
+            manifest_dangling_items(&report, &linking).is_empty(),
+            "dropping the item would move RSC-001 to RSC-007, not clear it"
+        );
+
+        let orphan = container(&[
+            ("META-INF/container.xml", CONTAINER),
+            ("OEBPS/content.opf", PKG),
+            (
+                "OEBPS/cover.xhtml",
+                r#"<html><body><p>no cover</p></body></html>"#,
+            ),
+        ]);
+        assert_eq!(
+            manifest_dangling_items(&report, &orphan).len(),
+            1,
+            "with nothing pointing at it the declaration is simply false, and droppable"
+        );
+    }
+
+    /// The reference is resolved against the *referring* document's directory,
+    /// so a link that climbs out of a subdirectory is still seen.
+    #[test]
+    fn a_reference_is_resolved_from_the_document_that_makes_it() {
+        let ws = container(&[
+            ("OEBPS/Text/ch1.xhtml", r#"<img src="../Images/x.png"/>"#),
+            ("OEBPS/Images/other.png", "x"),
+        ]);
+        assert!(any_entry_references(&ws, "OEBPS/Images/x.png", "none"));
+        assert!(!any_entry_references(&ws, "OEBPS/Text/x.png", "none"));
+    }
+
+    /// The package document is excluded: its own manifest entry is what is being
+    /// dropped, so letting it answer would veto every deletion.
+    #[test]
+    fn the_package_documents_own_declaration_does_not_count_as_a_reference() {
+        let ws = container(&[("OEBPS/content.opf", r#"<item id="a" href="images/x.png"/>"#)]);
+        assert!(any_entry_references(&ws, "OEBPS/images/x.png", "none"));
+        assert!(!any_entry_references(
+            &ws,
+            "OEBPS/images/x.png",
+            "OEBPS/content.opf"
+        ));
+    }
+
+    /// The name appearing in prose, in a comment, or in a longer string is not a
+    /// reference. The scan bounds itself to a whole quoted attribute value.
+    #[test]
+    fn a_bare_mention_of_the_filename_is_not_a_reference() {
+        for body in [
+            "<p>the file cover.jpg is missing</p>",
+            "<!-- cover.jpg was here -->",
+            r#"<p title="see cover.jpg for details">x</p>"#,
+        ] {
+            let ws = container(&[("OEBPS/a.xhtml", body)]);
+            assert!(
+                !any_entry_references(&ws, "OEBPS/cover.jpg", "none"),
+                "not a reference: {body}"
+            );
+        }
+    }
+
+    /// A remote URL that happens to end in the same name names no container
+    /// entry, and a fragment or query after the path does not hide one.
+    #[test]
+    fn a_remote_url_is_not_a_container_reference_but_a_query_does_not_hide_one() {
+        let remote = container(&[(
+            "OEBPS/a.xhtml",
+            r#"<img src="https://example.com/images/x.png"/>"#,
+        )]);
+        assert!(!any_entry_references(&remote, "OEBPS/images/x.png", "none"));
+
+        let queried = container(&[("OEBPS/a.xhtml", r#"<img src="images/x.png?v=2"/>"#)]);
+        assert!(any_entry_references(&queried, "OEBPS/images/x.png", "none"));
     }
 
     #[test]

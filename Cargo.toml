@@ -1,6 +1,6 @@
 [package]
 name = "epubsana"
-version = "0.12.0"
+version = "0.13.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Repairs the EPUB defects epubveri detects — a pure-Rust, confirm-each-step EPUB fixer."
@@ -23,7 +23,7 @@ members = ["epubsana-wasm"]
 # into an error) and the `rule`/`params` sub-codes epubsana's fixers dispatch on
 # both arrived on the 0.5 line, the conventions-v0.4 one.
 #
-# **The floor is 0.10.0.** Most raises have been *correctness* floors, made for the
+# **The floor is 0.13.2.** Most raises have been *correctness* floors, made for the
 # same reason each time: below them, a detector false positive makes some fixer
 # here repair a book that was not broken. The last two are different classes —
 # 0.9.26 is completeness and 0.10.0 is capability — and each says which it is.
@@ -89,6 +89,27 @@ members = ["epubsana-wasm"]
 #   read no position anywhere, and every fixer re-sorts through a `BTree*`.
 #   `plan_ab.rs` + `pos_ab.rs` in dev-examples are the instruments.
 #
+#   **0.13.2 (2026-09-02) is a tracking move like 0.11.0, and the reason it is
+#   not a completeness floor is worth writing down, because upstream told us it
+#   was one.** Their note of 2026-09-02 reported that
+#   `opf.package.opf_identifier_not_empty` — the rule `fix.package_identifier`
+#   shares with `opf.package.unique_identifier_unresolved` — first appears at
+#   0.13.2, making that half of the fixer unreachable code below it. It is not.
+#   The rule key existed at 0.11.0, **derived at runtime from the Schematron
+#   pattern id** `opf-identifier-not-empty` in `schemas/package.sch:168`, and
+#   0.13.2 only moved its emission into Rust byte-identically (their own
+#   changelog says so). Measured here: the rule census reports **26 books / 27
+#   findings on both sides of the bump**, and the plan digest does not move.
+#   Their extraction searched rule-key *literals* in `src/*.rs`, which cannot
+#   see a Schematron-derived key — so the same blind spot applies to the
+#   retired/added key lists in that note.
+#
+#   What the bump does buy is the counts epubsana prints, which are the
+#   detector's: below 0.13.2 they are inflated on EPUB 2 books (upstream #94,
+#   1,878 shelf-wide errors). No fixer acted on any of them — the plan digest is
+#   byte-identical across 444 books — so this is a reporting improvement, not a
+#   correctness floor, and it is recorded as the weaker claim on purpose.
+#
 # Tracking policy, agreed with epubveri 2026-08-05: **track loosely** — a caret on
 # the current minor, re-measure when a minor lands, don't chase patches. For an
 # irreversible repairer, a newer detector only matters when the rules we consume move, and
@@ -99,7 +120,7 @@ members = ["epubsana-wasm"]
 #
 # For local co-development of epubveri, add an uncommitted override:
 #   [patch.crates-io] epubveri = { path = "../epubveri" }
-epubveri = "0.11.0"
+epubveri = "0.13.2"
 # Pure-Rust only (no C deps), same philosophy as epubveri: zip's "deflate"
 # feature uses zlib-rs (Rust) on the 8.x line; bzip2/zstd (C) stay disabled.
 # Aligned to epubveri's zip major — the family shares one zip version because
