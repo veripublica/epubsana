@@ -8,7 +8,19 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
-## [Unreleased]
+## [0.14.0] - 2026-09-09
+
+**Minor rather than patch, and the reason is the dependency again.** epubveri
+types are in this crate's public API — `ChangeReport::before` is an
+`epubveri::report::Report` and `fixers::plan` takes one — so moving the floor
+from `^0.13.2` to `^0.13.7` breaks a library consumer even though the CLI looks
+unchanged. Same reasoning as 0.10.0, 0.12.0 and 0.13.0, each of which carried a
+detector floor. This one goes further than tracking: it consumes
+`epubveri::xmlext::is_xml_blank`, so the floor is load-bearing at compile time.
+
+**Two bad repairs that shipped in 0.13.0 are fixed here**, both found by
+whole-shelf audit rather than by any test, and both in fixers that looked
+finished.
 
 ### Added
 
