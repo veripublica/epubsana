@@ -574,6 +574,26 @@ check — if it ever regressed, a guard here would hide the bug rather than fix 
 **When it declines.**
 
 - If the OPF won't parse, or no manifest item carries the reported `id`.
+- **If more than one manifest item carries it.** An `id` is meant to be unique,
+  and a book that breaks that is reporting a second defect rather than granting a
+  guess. `compute_dangling_item_edits` used to take the first match, and on the
+  474-book shelf one book had two `<item id="added2">` — one naming the missing
+  font the finding is about, one naming a font the container really holds. It
+  deleted the *present* one: `RSC-001` stayed, an `OPF-003` was authored, and a
+  real resource lost its only declaration. Narrowing by the reported href instead
+  was rejected — the manifest's spelling of an href and epubveri's need not agree
+  character for character, so it would trade a wrong deletion for a
+  sometimes-wrong one — and the ambiguity is not confined to the item lookup
+  anyway, since `<itemref idref>` and `<meta name="cover" content>` key on the
+  same id.
+- **If `<spine toc="…">` or `<spine page-map="…">` names it.** Both attributes
+  hold a manifest id and neither is an `<itemref>`, so the spine walk every other
+  check here uses cannot see them. On the same shelf, dropping the item named by
+  `<spine page-map="_page_map_">` cleared `RSC-001` and authored `OPF-063` in its
+  place — the nav guard's trade at a third site. Repairing it properly would mean
+  deleting the attribute too, which is a different edit on a different element and
+  is not this fixer's to make. `toc` is guarded on the argument that it is the
+  same shape, not on a measurement: no shelf book has a dangling NCX item.
 - **If the cascade would empty the `<spine>`.** A book whose every spine entry
   names a missing resource has no reading order at all, and emitting a spine-less
   EPUB trades this finding for a different broken book rather than repairing
@@ -631,6 +651,18 @@ have called that a repair; `regression_audit`, which watches for findings that d
 not exist before, called it the shelf's only regression. The guard costs exactly
 one of the fixer's seven shelf proposals — the whole-shelf plan digest loses that
 single line and nothing else — and takes the run back to introducing nothing.
+
+**The two guards above were measured the same way, on 2026-09-09, and the first
+of them is the sharpest example this file has of an error total lying.** Before
+the guard, "repairing" *Kutadgu Bilig* deleted one of the two `added2` items —
+which cleared **both** `duplicate id "added2"` errors as a side effect, so the
+book's error count went *down* while a font it actually contains lost its
+manifest entry and the reported `RSC-001` never moved. Adding the two guards
+costs three errors that now stay unrepaired and exactly **two of the fixer's
+eight shelf proposals** — the whole-shelf plan digest loses those two lines and
+nothing else — and takes `regression_audit` back to introducing nothing at any
+severity on 474 books. That is the fifth defect the shelf has found that no unit
+test could, and the second and third in this fixer.
 
 The **nav guard is not argued but measured**, and it is the reason this entry
 grew a third decline clause. On the shared 94-book shelf (2026-08-05), one book
@@ -1874,3 +1906,4 @@ its own.
 repaired. One book is thin evidence and the honest claim is the mechanism: it
 moves an id off a wrapper that exists only to hold it, and refuses every case
 where the wrapper carries anything else.
+

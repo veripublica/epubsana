@@ -8,6 +8,38 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **`fix.manifest_dangling_item` no longer deletes the wrong item when two share
+  an `id`.** One book on the 474-book shelf declares two `<item id="added2">` —
+  one naming the missing font the finding is about, one naming a font the
+  container really holds. The lookup took the first match and deleted the
+  *present* one: the reported `RSC-001` never moved, an `OPF-003` was authored,
+  and a real resource lost its only manifest declaration. The fixer now declines
+  when the id is not unique, because `<itemref idref>` and
+  `<meta name="cover" content>` are ambiguous on exactly the same book.
+
+  **The error count went down while the book got worse** — deleting one of the
+  two items cleared both `duplicate id "added2"` errors as a side effect — which
+  is why only `regression_audit`, which watches for findings that did not exist
+  before, could see it.
+
+- **`fix.manifest_dangling_item` no longer drops an item named by a `<spine>`
+  attribute.** `toc` (the NCX) and `page-map` (Adobe's extension) both hold a
+  manifest id and neither is an `<itemref>`, so the spine walk the fixer's other
+  checks use cannot see them. Dropping the item named by
+  `<spine page-map="_page_map_">` cleared `RSC-001` and authored `OPF-063` in its
+  place — the same trade the navigation-document guard already refuses. `toc` is
+  guarded on the argument that it is the same shape; no shelf book has a dangling
+  NCX item.
+
+  Both defects are live in 0.13.0 on crates.io. Together the guards cost exactly
+  **two of the fixer's eight whole-shelf proposals** — the plan digest over 474
+  books loses those two lines and nothing else — and take `regression_audit` back
+  to introducing nothing at any severity.
+
 ## [0.13.0] - 2026-09-02
 
 **Minor rather than patch, and the reason is the dependency.** epubveri types are

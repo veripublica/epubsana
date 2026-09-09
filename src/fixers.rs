@@ -2563,6 +2563,33 @@ fn manifest_ids<'a>(doc: &'a roxmltree::Document<'_>) -> HashSet<&'a str> {
         .collect()
 }
 
+/// The manifest ids named by an id-valued attribute on `<spine>` itself, rather
+/// than by an `<itemref>`.
+///
+/// There are two: `toc`, which names the NCX, and `page-map`, Adobe's extension.
+/// Both hold a manifest id and neither is an `<itemref>`, so
+/// [`spine_itemrefs`] — which is what every other check here walks — cannot see
+/// either of them.
+///
+/// A real book paid for that blind spot: dropping a manifest item named by
+/// `<spine page-map="_page_map_">` cleared its `RSC-001` and authored an
+/// `OPF-063` in its place, which is the trade the sibling guards exist to
+/// refuse. `toc` is included on the same argument rather than on a measurement —
+/// no shelf book has a dangling NCX item — because the two attributes are the
+/// same shape and finding out by shipping the second one is not worth the
+/// saving.
+fn spine_id_attr_refs(doc: &roxmltree::Document<'_>) -> BTreeSet<String> {
+    doc.descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "spine")
+        .into_iter()
+        .flat_map(|s| {
+            ["toc", "page-map"]
+                .into_iter()
+                .filter_map(move |a| s.attr_no_ns(a).map(String::from))
+        })
+        .collect()
+}
+
 /// The manifest ids that declare the publication's navigation document.
 ///
 /// `properties` is a space-separated token list, so this matches the `nav`
@@ -2741,6 +2768,9 @@ fn manifest_dangling_items(report: &Report, ws: &Workspace) -> Vec<ProposedFix> 
         return Vec::new();
     }
     let nav = nav_item_ids(&opf);
+    let spine_attr_refs = parse_xml(&opf)
+        .map(|d| spine_id_attr_refs(&d))
+        .unwrap_or_default();
 
     let mut fixes = Vec::new();
     for (id, href) in items {
@@ -2758,6 +2788,17 @@ fn manifest_dangling_items(report: &Report, ws: &Workspace) -> Vec<ProposedFix> 
         // same element is a reason for a human to look at it, not a licence for
         // us to delete it faster.
         if nav.contains(&id) {
+            continue;
+        }
+        // `<spine toc="...">` or `<spine page-map="...">` names this item. The
+        // resource is missing either way, so the reference is already dead —
+        // but dropping the item turns a dead reference into a *dangling* one,
+        // and epubveri says so (`OPF-063` for the page map). Trading `RSC-001`
+        // for `OPF-063` is the nav guard's principle at a second site: a repair
+        // that swaps one finding for another is not a repair. Repairing it
+        // properly means also deleting the attribute, which is a different
+        // edit in a different element and is not this fixer's to make.
+        if spine_attr_refs.contains(&id) {
             continue;
         }
         // Something in the book still links to the absent file. Dropping the
@@ -2835,10 +2876,31 @@ fn manifest_dangling_items(report: &Report, ws: &Workspace) -> Vec<ProposedFix> 
 fn compute_dangling_item_edits(opf: &str, id: &str) -> Option<(Vec<MetaEdit>, usize, bool)> {
     let doc = parse_xml(opf)?;
 
-    let item = doc
+    // Exactly one item, or nothing. An `id` is meant to be unique and a book
+    // that breaks that is telling us it has a second defect, not granting us a
+    // guess: with two `<item id="added2">` — one naming the missing font the
+    // finding is about, one naming a font the container really holds — a
+    // first-match lookup deleted the *present* one, left `RSC-001` standing and
+    // authored an `OPF-003`. It did not repair anything and it removed a real
+    // resource's only declaration.
+    //
+    // Narrowing by the reported href instead was the alternative and was
+    // rejected: the manifest's spelling of an href and the one epubveri reports
+    // need not agree character for character, so it would trade a wrong deletion
+    // for an occasionally-wrong one. Declining costs a single proposal on the
+    // shelf and that proposal was the damaging one.
+    //
+    // The ambiguity is not confined to this lookup either — `<itemref idref>`
+    // and `<meta name="cover" content>` below key on the same id — so there is
+    // no version of this proposal that is safe while the id is shared.
+    let mut items = doc
         .descendants()
         .filter(|n| n.is_element() && n.tag_name().name() == "item")
-        .find(|n| n.attr_no_ns("id") == Some(id))?;
+        .filter(|n| n.attr_no_ns("id") == Some(id));
+    let item = items.next()?;
+    if items.next().is_some() {
+        return None;
+    }
 
     let mut edits = vec![MetaEdit {
         range: item.range(),
@@ -7950,6 +8012,77 @@ mod tests {
     #[test]
     fn dangling_item_declines_when_no_item_carries_the_id() {
         assert!(compute_dangling_item_edits(OPF, "no-such-id").is_none());
+    }
+
+    /// A book shaped like *Kutadgu Bilig*: two manifest items share `id`, one
+    /// naming a font the container holds and one naming a font it does not.
+    /// A first-match lookup deleted the present one, left the `RSC-001`
+    /// standing and authored an `OPF-003`.
+    ///
+    /// The three assertions go together on purpose. The decline alone would
+    /// pass with a guard that refuses everything; the second shows a unique id
+    /// still works, and the third pins what the damage actually was — the
+    /// surviving text still declares the resource that exists.
+    #[test]
+    fn a_duplicated_manifest_id_is_declined_rather_than_guessed() {
+        let opf = OPF.replace(
+            r#"<item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/>"#,
+            r#"<item id="dup" href="present.ttf" media-type="application/x-font-truetype"/>
+    <item id="dup" href="absent.ttf" media-type="application/x-font-truetype"/>"#,
+        );
+        assert!(
+            compute_dangling_item_edits(&opf, "dup").is_none(),
+            "two items carry the id — which one the finding meant is not ours to guess"
+        );
+        assert!(
+            compute_dangling_item_edits(&opf, "gone").is_some(),
+            "an id that is still unique is unaffected by the guard"
+        );
+        assert!(
+            dropping(&opf, "gone").contains(r#"href="present.ttf""#),
+            "the resource the container really holds keeps its declaration"
+        );
+    }
+
+    /// `<spine page-map="...">` names the dangling item. Dropping it cleared
+    /// `RSC-001` and produced `OPF-063` on a real book — the nav guard's trade,
+    /// at an attribute `spine_itemrefs` cannot see. `toc` is the same shape and
+    /// is guarded on that argument, not on a measurement.
+    #[test]
+    fn a_spine_attribute_naming_the_dangling_item_declines_it() {
+        for attr in ["page-map", "toc"] {
+            let opf = OPF.replace("<spine>", &format!(r#"<spine {attr}="gone">"#));
+            let doc = parse_xml(&opf).expect("parses");
+            assert_eq!(
+                spine_id_attr_refs(&doc),
+                BTreeSet::from(["gone".to_string()]),
+                "{attr} holds a manifest id and must be read as a reference"
+            );
+
+            const CONTAINER: &str = r#"<?xml version="1.0"?><container xmlns="urn:oasis:names:tc:opendocument:xmlns:container:1.0"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#;
+            let ws = container(&[
+                ("META-INF/container.xml", CONTAINER),
+                ("OEBPS/content.opf", &opf),
+            ]);
+            let report = report_with_dangling(&["gone"]);
+            assert!(
+                manifest_dangling_items(&report, &ws).is_empty(),
+                "{attr} would be left naming an id that no longer exists"
+            );
+        }
+    }
+
+    /// The guard reads those two attributes and not every attribute on
+    /// `<spine>`: `id` is the element's own and names nothing in the manifest.
+    #[test]
+    fn other_spine_attributes_do_not_hold_back_a_deletion() {
+        let opf = OPF.replace("<spine>", r#"<spine id="gone" toc="ncx">"#);
+        let doc = parse_xml(&opf).expect("parses");
+        assert_eq!(
+            spine_id_attr_refs(&doc),
+            BTreeSet::from(["ncx".to_string()]),
+            "the spine's own id is not a manifest reference"
+        );
     }
 
     /// A dangling item that is also the navigation document: dropping it would
