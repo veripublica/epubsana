@@ -5345,13 +5345,24 @@ fn with_leading_whitespace(text: &str, range: Range<usize>) -> Range<usize> {
 /// trade every guard in this file exists to refuse.
 ///
 /// **This fixer dispatches per file and re-derives its own target, which is the
-/// dangerous shape.** The finding carries **empty `params`** and epubsana never
-/// reads `Message::position`, so nothing in the report says *which* `<ol>` is
-/// meant. Four different shapes emit the identical message with identical params
-/// and only the first is repairable; a fifth emits nothing at all and must never
-/// be acted on. Hence [`plan_empty_nav_drops`] re-implements the grammar's
-/// question exactly, and `docs/FIXERS.md` carries the fixture table it was
-/// derived from:
+/// dangerous shape.** The finding carries **empty `params`**, so nothing in
+/// `params` says *which* `<ol>` is meant — four shapes emit the identical
+/// message and only the first below is repairable, while a fifth emits nothing
+/// at all and must never be acted on.
+///
+/// **The `Message` itself is not silent, though, and this comment used to say it
+/// was.** `navdoc.ol.empty` is pushed through `push_node`, which sets
+/// `element_path` — `/h:html[1]/h:body[1]/h:nav[2]/h:ol[1]` on all three shelf
+/// books, naming the exact node. Reading it would remove the re-derivation
+/// entirely; it is not read here, and that is a choice (see `docs/FIXERS.md`).
+///
+/// **What makes the choice safe is a subset property, not the predicate's
+/// fidelity.** For a typed `<nav>` whose single element child is an `<ol>`,
+/// upstream's `check_nav_content_model` always reaches `check_ol`, and
+/// `check_ol` always reports an empty `<ol>` — so every node
+/// [`plan_empty_nav_drops`] selects is one epubveri reported. That is an
+/// argument about upstream's source, and it is the thing to re-check if either
+/// grammar moves:
 ///
 /// | shape | detector | here |
 /// |---|---|---|

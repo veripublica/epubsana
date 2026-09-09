@@ -1977,13 +1977,34 @@ one whose list is empty states nothing — the same argument
 to lose, and no reader-visible content is removed: the element is a list with no
 entries.
 
-**The finding cannot tell the shapes apart, and the fixer must.** Because
-`params` is empty and epubsana never reads `Message::position` (see `plan()`),
-this fixer dispatches on the *file* and re-derives the target itself — the same
-structure that let `fix.empty_metadata_element` delete an element upstream had
-stopped reporting. **The predicate below must therefore match the grammar
-exactly, not approximately.** Four different books produce the identical message
-with the identical (empty) params:
+**`params` cannot tell the shapes apart. The finding can — and this fixer does
+not read the part that does.** Corrected 2026-09-09, after v0.14.0 shipped with
+the weaker claim: `navdoc.ol.empty` is emitted through `push_node`, which sets
+`element_path`, and on all three shelf books that path is
+`/h:html[1]/h:body[1]/h:nav[2]/h:ol[1]` — the exact `<ol>`, distinguishing a
+nav's own list from one nested inside an `<li>`. So the discriminant exists and
+we decline to consume it, which is a choice with a cost, not an absence.
+
+**Why the choice is nonetheless safe here, and this is the real argument.** The
+proposals are a **strict subset of the findings, by construction**: for a typed
+`<nav>` whose single element child is an `<ol>`, epubveri's
+`check_nav_content_model` always reaches `check_ol`, and `check_ol` always
+reports an `<ol>` with no `<li>`. Every element this predicate selects is
+therefore an element epubveri reported. That is a property of the two grammars
+agreeing, checkable in upstream's source (`src/navdoc.rs`), and it is what makes
+the file dispatch safe — *not* the vaguer "the predicate matches the grammar",
+which is what the first version of this entry said.
+
+**Keep the subset property in mind if either side moves.** It is the whole of the
+safety argument, and it is an argument about someone else's code. If upstream
+narrows when `check_ol` is reached, this fixer could begin acting where nothing
+was reported — the failure `fix.empty_metadata_element` actually had. Consuming
+`element_path` would remove the dependency entirely, at the cost of a path
+matcher (roxmltree has no XPath) and a new coupling to upstream's path
+computation; it is the right change if this family grows.
+
+Four different books produce the identical message with the identical (empty)
+params:
 
 | shape | what the detector says | what the fixer must do |
 | --- | --- | --- |

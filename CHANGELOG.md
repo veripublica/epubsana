@@ -8,6 +8,22 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [Unreleased]
+
+### Documentation
+
+- **`fix.navdoc_empty_nav`'s safety argument was overstated in 0.14.0 and is
+  corrected.** That entry says the finding cannot say which `<ol>` it means. Only
+  `params` cannot: `navdoc.ol.empty` is emitted with an `element_path`, which on
+  every shelf book names the exact node. The fixer does not read it — a choice,
+  not an absence.
+
+  What actually makes its file dispatch safe is a **subset property**: for a
+  typed `<nav>` whose single element child is an `<ol>`, epubveri always reaches
+  the check that reports an empty list, so every node this fixer selects is one
+  epubveri reported. No code changed and no behaviour was wrong; the reasoning
+  was, and it is the reasoning a future session would rely on.
+
 ## [0.14.0] - 2026-09-09
 
 **Minor rather than patch, and the reason is the dependency again.** epubveri
