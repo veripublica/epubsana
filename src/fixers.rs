@@ -102,6 +102,7 @@ pub fn plan(report: &Report, ws: &Workspace, _goal: Goal) -> Vec<ProposedFix> {
     fixes.extend(empty_metadata_element(report, ws));
     fixes.extend(non_preferred_media_type(report, ws));
     fixes.extend(font_face_missing_target(report, ws));
+    fixes.extend(navdoc_empty_navs(report, ws));
     fixes.extend(mimetype_packaging(report, ws));
     // Future fixers append here, in a sensible confirm order — and in
     // `handled_rules()` below.
@@ -139,6 +140,7 @@ pub fn handled_rules() -> &'static [&'static str] {
         "htm.entity.undeclared",
         "htm.epub2_dom.nested_anchor",
         "htm.obsolete_attribute",
+        "navdoc.ol.empty",
         "ncx.ids.duplicate_id",
         "ncx.ids.invalid_ncname",
         "ncx.play_order.duplicate",
@@ -5331,6 +5333,164 @@ fn with_leading_whitespace(text: &str, range: Range<usize>) -> Range<usize> {
     start..range.end
 }
 
+/// `RSC-005` / `navdoc.ol.empty`: an `<ol>` in the EPUB 3 navigation document has
+/// no `<li>`. The repair deletes the **whole optional `<nav>`** the empty list
+/// belongs to — a `landmarks` or `page-list` nav is optional, and one whose list
+/// is empty states nothing, which is the argument [`empty_metadata_element`]
+/// makes for an empty `<dc:*>`.
+///
+/// **Deleting only the `<ol>` is the wrong repair, measured rather than
+/// reasoned.** It leaves the `<nav>` incomplete and produces `navdoc.nav.missing_ol`
+/// (error) plus `navdoc.nav.not_flat` (warning) in place of the finding — the
+/// trade every guard in this file exists to refuse.
+///
+/// **This fixer dispatches per file and re-derives its own target, which is the
+/// dangerous shape.** The finding carries **empty `params`** and epubsana never
+/// reads `Message::position`, so nothing in the report says *which* `<ol>` is
+/// meant. Four different shapes emit the identical message with identical params
+/// and only the first is repairable; a fifth emits nothing at all and must never
+/// be acted on. Hence [`plan_empty_nav_drops`] re-implements the grammar's
+/// question exactly, and `docs/FIXERS.md` carries the fixture table it was
+/// derived from:
+///
+/// | shape | detector | here |
+/// |---|---|---|
+/// | optional nav, own `<ol>` empty | `navdoc.ol.empty` | repair |
+/// | `toc` nav, own `<ol>` empty | `navdoc.ol.empty` | decline |
+/// | empty `<ol>` nested in an `<li>` | `navdoc.ol.empty` | decline |
+/// | `<nav>` with no `epub:type` | **nothing** | never act |
+///
+/// `ConfirmNeeded`: it is a deletion, however empty the thing deleted.
+fn navdoc_empty_navs(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    let docs: BTreeSet<&str> = report
+        .messages
+        .iter()
+        .filter(|m| m.rule == Some("navdoc.ol.empty"))
+        .filter_map(|m| m.location.as_deref())
+        .collect();
+
+    let mut fixes = Vec::new();
+    for doc in docs {
+        let Some(text) = ws.get_text(doc) else {
+            continue;
+        };
+        let Some(edits) = plan_empty_nav_drops(&text) else {
+            continue;
+        };
+        let n = edits.len();
+
+        let doc_for_apply = doc.to_string();
+        fixes.push(ProposedFix {
+            fix_id: "fix.navdoc_empty_nav",
+            addresses_id: "RSC-005".to_string(),
+            addresses_rule: Some("navdoc.ol.empty"),
+            addresses_severity: addressed_severity(report, "RSC-005", Some("navdoc.ol.empty")),
+            tier: Tier::ConfirmNeeded,
+            title: format!(
+                "Drop {n} optional <nav> element(s) with an empty list in {doc}"
+            ),
+            rationale:
+                "A landmarks or page-list nav is optional, and one whose <ol> holds no <li>                  states nothing — there is no entry in it to lose. The whole <nav> goes rather                  than just the list, because a <nav> without an <ol> is itself invalid. The toc                  nav is never touched, nor is a list nested inside an <li>, nor a nav carrying a                  heading or an id."
+                    .to_string(),
+            preview: vec![Change {
+                path: doc.to_string(),
+                note: format!("drop {n} optional <nav> element(s) whose <ol> is empty"),
+            }],
+            apply_fn: Box::new(move |ws: &mut Workspace| {
+                if let Some(text) = ws.get_text(&doc_for_apply)
+                    && let Some(edits) = plan_empty_nav_drops(&text)
+                {
+                    ws.set_text(&doc_for_apply, apply_edits(&text, edits));
+                }
+            }),
+        });
+    }
+    fixes
+}
+
+/// The `epub:type` namespace, matched by URI rather than by the `epub:` prefix —
+/// a document is free to bind it to any prefix it likes.
+const EPUB_OPS_NS: &str = "http://www.idpf.org/2007/ops";
+
+/// Deletions for every optional `<nav>` whose own `<ol>` is empty.
+/// `None` (decline) if the document won't parse or nothing qualifies.
+///
+/// Every condition below is a decline the spec argues for; see
+/// `docs/FIXERS.md`. The order is deliberate — the document-level check comes
+/// first, because a book with no `toc` nav has a larger defect than this one and
+/// repairing around it is not this fixer's business.
+fn plan_empty_nav_drops(text: &str) -> Option<Vec<MetaEdit>> {
+    let prepared = prepare_content_doc(text);
+    let doc = prepared.parse()?;
+
+    let nav_type = |n: &roxmltree::Node| -> Option<String> {
+        n.attribute((EPUB_OPS_NS, "type")).map(str::to_string)
+    };
+
+    let navs: Vec<_> = doc
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "nav")
+        .collect();
+
+    // No `toc` nav to survive the deletion: leave the whole document alone.
+    if !navs.iter().any(|n| nav_type(n).as_deref() == Some("toc")) {
+        return None;
+    }
+
+    let mut edits = Vec::new();
+    for nav in &navs {
+        // An untyped <nav> has an unrestricted content model, so the detector
+        // never reports its list. Acting on one would be repairing something
+        // nothing reported — the file-dispatch trap this fixer is shaped like.
+        let Some(ty) = nav_type(nav) else {
+            continue;
+        };
+        // The table of contents is required; dropping it produces
+        // `navdoc.document.missing_toc` in place of this finding.
+        if ty == "toc" {
+            continue;
+        }
+        // Exactly one element child, and it is the `<ol>`. This single
+        // destructuring carries two of the spec's declines at once:
+        //
+        // - **a heading.** `<nav><h2>Landmarks</h2><ol></ol></nav>` has two
+        //   element children. The heading is visible text, so two repairs exist
+        //   — drop the nav, or fill the list — and it is not determinate.
+        // - **anything else the content model allows**, which would be lost.
+        let children: Vec<_> = nav.children().filter(|c| c.is_element()).collect();
+        let [only] = children.as_slice() else {
+            continue;
+        };
+        if only.tag_name().name() != "ol" {
+            continue;
+        }
+        // The nav's OWN list, never one nested inside an `<li>`: the nested
+        // shape draws the identical message, and there the whole-`<nav>`
+        // deletion would remove a populated table of contents.
+        if only
+            .children()
+            .any(|c| c.is_element() && c.tag_name().name() == "li")
+        {
+            continue;
+        }
+        // Anything in the deleted subtree may be the target of a fragment link
+        // from anywhere in the book. Stricter than a reference scan and accepted
+        // as such: the subtree is two elements.
+        if nav
+            .descendants()
+            .filter(|n| n.is_element())
+            .any(|n| n.attr_no_ns("id").is_some())
+        {
+            continue;
+        }
+        edits.push(MetaEdit {
+            range: with_leading_whitespace(text, prepared.unshift(nav.range())),
+            replacement: String::new(),
+        });
+    }
+    (!edits.is_empty()).then_some(edits)
+}
+
 /// `PKG-006`: the archive carries a `mimetype` entry, but not first. OCF wants
 /// it first and stored so a reader can identify the file from its opening bytes.
 ///
@@ -6081,6 +6241,123 @@ mod tests {
     }
 
     /// Which of two nested links to keep is not ours to decide.
+    const NAV_TOC: &str = "  <nav epub:type=\"toc\">\n  <ol>\n    <li><a href=\"main-1.xhtml\">One</a></li>\n  </ol>\n</nav>";
+
+    fn navdoc(body: &str) -> String {
+        format!(
+            "<?xml version='1.0' encoding='utf-8'?>\n<html xmlns=\"http://www.w3.org/1999/xhtml\" xmlns:epub=\"http://www.idpf.org/2007/ops\" lang=\"tr\" xml:lang=\"tr\">\n<head><title>Navigation</title></head>\n<body>\n{body}\n</body>\n</html>"
+        )
+    }
+
+    fn drop_navs(body: &str) -> Option<String> {
+        let doc = navdoc(body);
+        plan_empty_nav_drops(&doc).map(|e| apply_edits(&doc, e))
+    }
+
+    /// The shelf's shape, all three books: a `landmarks` nav whose `<ol>` holds
+    /// nothing, sitting after a populated `toc`.
+    #[test]
+    fn an_empty_landmarks_nav_is_dropped_whole() {
+        let out = drop_navs(&format!(
+            "{NAV_TOC}\n  <nav epub:type=\"landmarks\" hidden=\"\">\n  <ol></ol>\n</nav>"
+        ))
+        .expect("fix");
+        assert!(!out.contains("landmarks"), "the whole <nav> goes: {out}");
+        assert!(
+            !out.contains("<ol></ol>"),
+            "not just the nav's tags — the empty list goes with it"
+        );
+        assert!(
+            out.contains("epub:type=\"toc\"") && out.contains("main-1.xhtml"),
+            "the table of contents is untouched"
+        );
+    }
+
+    /// Measured, not reasoned: dropping the `toc` produces
+    /// `navdoc.document.missing_toc` in place of this finding.
+    #[test]
+    fn the_toc_nav_is_never_dropped() {
+        assert!(
+            drop_navs("  <nav epub:type=\"toc\">\n  <ol></ol>\n</nav>").is_none(),
+            "the book would lose its table of contents and stay invalid"
+        );
+    }
+
+    /// A nested empty `<ol>` inside an `<li>` draws the **identical** message
+    /// with the identical (empty) params. Nothing in the report distinguishes it
+    /// from the repairable shape, so only this predicate does — and getting it
+    /// wrong deletes a populated table of contents.
+    #[test]
+    fn an_empty_ol_nested_in_an_li_is_not_the_navs_own_list() {
+        assert!(
+            drop_navs(
+                "  <nav epub:type=\"toc\">\n  <ol>\n    <li><a href=\"main-1.xhtml\">One</a><ol></ol></li>\n  </ol>\n</nav>"
+            )
+            .is_none()
+        );
+    }
+
+    /// A `<nav>` with no `epub:type` is unrestricted, so the detector reports
+    /// nothing about its list (fixture-confirmed, and epubveri's own module
+    /// comment says so). Acting on one would be repairing something nothing
+    /// reported — see `navdoc_empty_navs`' doc comment.
+    #[test]
+    fn an_untyped_nav_is_never_touched() {
+        assert!(drop_navs(&format!("{NAV_TOC}\n  <nav><ol></ol></nav>")).is_none());
+    }
+
+    /// The prefix is not the namespace. A document binding the OPS namespace to
+    /// some other prefix must be read the same way.
+    #[test]
+    fn the_epub_type_namespace_is_matched_not_the_prefix() {
+        let doc = "<?xml version='1.0' encoding='utf-8'?>\n<html xmlns=\"http://www.w3.org/1999/xhtml\" xmlns:e=\"http://www.idpf.org/2007/ops\"><head><title>N</title></head><body>\n  <nav e:type=\"toc\"><ol><li><a href=\"a.xhtml\">A</a></li></ol></nav>\n  <nav e:type=\"landmarks\"><ol></ol></nav>\n</body></html>";
+        let out = apply_edits(doc, plan_empty_nav_drops(doc).expect("fix"));
+        assert!(!out.contains("landmarks"));
+        assert!(out.contains("e:type=\"toc\""));
+    }
+
+    #[test]
+    fn an_empty_nav_carrying_a_heading_declines() {
+        // Deleting it removes visible text, and filling the list is the other
+        // repair — so it is not determinate.
+        assert!(
+            drop_navs(&format!(
+                "{NAV_TOC}\n  <nav epub:type=\"landmarks\"><h2>Landmarks</h2><ol></ol></nav>"
+            ))
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn an_empty_nav_whose_subtree_carries_an_id_declines() {
+        // `nav.xhtml#lm` may point at it from anywhere in the book.
+        for body in [
+            "<nav epub:type=\"landmarks\" id=\"lm\"><ol></ol></nav>",
+            "<nav epub:type=\"landmarks\"><ol id=\"lm\"></ol></nav>",
+        ] {
+            assert!(
+                drop_navs(&format!("{NAV_TOC}\n  {body}")).is_none(),
+                "deleting it would author a dangling fragment: {body}"
+            );
+        }
+    }
+
+    /// A list with entries is not empty, whatever else is wrong with it.
+    #[test]
+    fn a_populated_optional_nav_is_left_alone() {
+        assert!(
+            drop_navs(&format!(
+                "{NAV_TOC}\n  <nav epub:type=\"landmarks\"><ol><li><a href=\"main-1.xhtml\">L</a></li></ol></nav>"
+            ))
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn an_unparseable_navigation_document_declines() {
+        assert!(plan_empty_nav_drops("<html><body><nav").is_none());
+    }
+
     #[test]
     fn an_outer_anchor_that_is_a_real_link_declines() {
         assert!(unwrap_anchors(r##"<p><a href="a.xhtml"><a href="#f">1</a></a></p>"##).is_none());

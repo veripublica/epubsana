@@ -10,6 +10,31 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`fix.navdoc_empty_nav` — an optional `<nav>` in the navigation document
+  whose `<ol>` holds no `<li>`** (`RSC-005` / `navdoc.ol.empty`, error). The
+  whole `<nav>` is deleted, not just the list: leaving the `<nav>` behind
+  produces `navdoc.nav.missing_ol` and `navdoc.nav.not_flat` in its place. A
+  `landmarks` or `page-list` nav is optional, and one whose list is empty states
+  nothing.
+
+  **The finding cannot say which `<ol>` it means** — `params` is empty, and
+  epubsana never reads a finding's position — so the fixer re-derives the target
+  from the document. Four shapes emit the identical message and only one is
+  repairable, so it declines the `toc` nav (deleting it would author
+  `navdoc.document.missing_toc`), a list nested inside an `<li>`, a nav carrying
+  a heading, and any subtree holding an `id` that a fragment link could name. A
+  `<nav>` with no `epub:type` is never touched at all: its content model is
+  unrestricted, so the detector reports nothing about it. Each decline is an
+  answer the detector gave to a fixture, and each is pinned by a
+  mutation-checked test.
+
+  Measured on 474 books: **3 proposals on 3 books, exactly the finding count**,
+  three errors cleared, nothing authored at any severity, and **one book becomes
+  fully valid** (72 → 73). All three books are one producer's output, so the
+  shape is not known to generalise.
+
 ### Fixed
 
 - **`fix.manifest_dangling_item` no longer deletes the wrong item when two share

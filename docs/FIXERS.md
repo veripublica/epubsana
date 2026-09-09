@@ -55,6 +55,7 @@ grows one carefully-argued entry at a time.
 | `RSC-007` | `css.font_face.missing_target` | ConfirmNeeded | A `@font-face` sources a font file the book does not contain | [Drop the whole rule; decline one with a second source](#rsc-007--a-font-face-whose-font-file-is-not-in-the-book) |
 | `OPF-030` / `RSC-005` | `opf.package.unique_identifier_unresolved`, `opf.package.opf_identifier_not_empty` | ConfirmNeeded | The package's declared unique identifier resolves to nothing usable | [Attach the declared id to the book's one real identifier](#opf-030--rsc-005--the-packages-declared-identifier-points-at-nothing-usable) |
 | `RSC-005` | `htm.epub2_dom.nested_anchor` | ConfirmNeeded | An `<a>` with only an `id` wraps a real link | [Unwrap it, moving the `id` to the child](#rsc-005--an-anchor-target-wrapped-around-a-link) |
+| `RSC-005` | `navdoc.ol.empty` | ConfirmNeeded | An optional `<nav>` in the navigation document holds an `<ol>` with no `<li>` | [Delete the whole `<nav>`](#rsc-005--an-optional-nav-whose-list-is-empty) |
 | `OPF-054` | *(none)* | ConfirmNeeded | A `<dc:date>` holds no date at all (EPUB 2) | [Drop the empty element; never touch a non-empty one](#opf-054--an-empty-dcdate-epub-2) |
 
 **A note on structural fixers.** Fixers that must locate an element (rather than
@@ -1930,3 +1931,123 @@ repaired. One book is thin evidence and the honest claim is the mechanism: it
 moves an id off a wrapper that exists only to hold it, and refuses every case
 where the wrapper carries anything else.
 
+
+---
+
+## RSC-005 — an optional `<nav>` whose list is empty
+
+> **Written spec-first on 2026-09-09, then built the same day.** Every claim
+> below was an answer the detector gave to a fixture *before* any code existed;
+> the *Measured* section at the end is what the shelf said afterwards, and it
+> did not move a single one of them.
+
+**Finding.** `RSC-005` / `navdoc.ol.empty`, **Error**, *element "ol" incomplete;
+missing required element "li"*. An `<ol>` in the EPUB 3 navigation document has
+no `<li>` children. `params` is **empty** and the location is the navigation
+document, so the finding names the file and nothing else.
+
+**Measured (474 books, epubveri 0.13.7): 3 books, 3 findings, one shape.**
+
+```xml
+  <nav epub:type="landmarks" hidden="">
+  <ol></ol>
+</nav>
+```
+
+All three sit last in `<body>`, after a populated `toc` nav, and all three are
+Calibre output — one is in `calibre/`, two in `commercial/`, but the single
+quotes in the XML declaration and the identical indentation give away one
+producer wearing three covers. **The shelf therefore cannot tell us whether the
+shape generalises**, and this entry does not claim it does.
+
+**Fix** (`fix.navdoc_empty_nav`, ConfirmNeeded). Delete the **whole `<nav>`
+element**, with the whitespace that preceded it.
+
+**Why the whole `<nav>` and not the `<ol>`.** Measured, not reasoned: deleting
+only the empty `<ol>` and leaving the `<nav>` standing produces *two* new
+findings — `navdoc.nav.missing_ol` (`RSC-005`, error: *element "nav" is
+incomplete; it requires an "ol" element*) and `navdoc.nav.not_flat` (`RSC-017`,
+warning). That is the trade `fix.manifest_dangling_item`'s guards exist to
+refuse. Deleting the whole `<nav>` leaves the detector with nothing to say about
+the navigation document at all.
+
+**Why it is safe.** A `landmarks` or `page-list` nav is optional in EPUB 3, and
+one whose list is empty states nothing — the same argument
+`fix.empty_metadata_element` makes for an empty `<dc:*>`. There is no value in it
+to lose, and no reader-visible content is removed: the element is a list with no
+entries.
+
+**The finding cannot tell the shapes apart, and the fixer must.** Because
+`params` is empty and epubsana never reads `Message::position` (see `plan()`),
+this fixer dispatches on the *file* and re-derives the target itself — the same
+structure that let `fix.empty_metadata_element` delete an element upstream had
+stopped reporting. **The predicate below must therefore match the grammar
+exactly, not approximately.** Four different books produce the identical message
+with the identical (empty) params:
+
+| shape | what the detector says | what the fixer must do |
+| --- | --- | --- |
+| optional nav, own `<ol>` empty | `navdoc.ol.empty` | **repair** |
+| `toc` nav, own `<ol>` empty | `navdoc.ol.empty` | **decline** |
+| empty `<ol>` nested inside an `<li>` | `navdoc.ol.empty` | **decline** |
+| untyped `<nav>`, `<ol>` empty | *nothing at all* | **never act** |
+
+**When it declines.**
+
+- **The nav is the `toc`.** Measured: deleting it produces
+  `navdoc.document.missing_toc` (`RSC-005`, error) — the book would be no more
+  valid and would have lost its table of contents. This is the navigation-
+  document guard `fix.manifest_dangling_item` already carries, at a third site.
+- **The document has no surviving `toc` nav for any other reason.** A book
+  already missing one has a larger defect than this; repairing around it is not
+  this fixer's business.
+- **The empty `<ol>` is not the nav's own direct child.** A nested `<ol>` inside
+  an `<li>` draws the identical message, and there the whole-`<nav>` deletion
+  would remove a populated table of contents. Dropping just the nested `<ol>` is
+  plausibly determinate — an `<li>` whose content is `(a|span), ol?` is valid
+  without it — but **there is no case of it on the shelf**, so it is left
+  unranked rather than specified. Recorded here so the next probe does not have
+  to rediscover the shape.
+- **The `<nav>` has no `epub:type`.** Such a nav is *unrestricted* — epubveri's
+  own module comment says so, confirmed there against a real fixture, and a
+  fixture here confirms the finding never fires. Acting on one would be repairing
+  something no detector reported: exactly the file-dispatch failure the NBSP
+  deletion was.
+- **The `<nav>` carries a heading.** `<nav><h2>Landmarks</h2><ol></ol></nav>`
+  draws the same finding, and deleting it removes visible text. Two repairs exist
+  — drop the nav, or fill the list — so it is not determinate. Zero cases on the
+  shelf; this is a decline on the argument, and it would stay one if a case
+  appeared.
+- **Anything inside the deleted subtree carries an `id`.** A `<nav id="lm">` may
+  be the target of `nav.xhtml#lm` from anywhere in the book, and deleting it
+  would author a dangling fragment. This is stricter than necessary — a fragment
+  scan like `any_entry_references` would be exact — and it is accepted as
+  stricter because the subtree is at most two elements and **no shelf case
+  carries an `id` at all**, so the cheap version costs nothing measurable. Revisit
+  only if a real book is declined by it.
+- A navigation document that will not parse.
+
+**What it does not do.** It never creates a `landmarks` nav, never fills one, and
+never touches a nav whose list has entries. `navdoc.li.span_missing_ol`,
+`navdoc.nav.missing_ol` and `navdoc.nav.not_flat` are separate rules with
+separate arguments and are out of scope here.
+
+**Measured after building (474 books, epubveri 0.13.7).** 3 proposals on the 3
+books, one each — exactly the finding count, so nothing was re-derived that had
+not been reported, which is the check this fixer's shape most needs. Errors
+15,722 → **15,719** and findings at every severity 17,509 → **17,506**: three
+errors out, nothing authored at any severity, `regression_audit` introducing
+nothing. The whole-shelf plan digest gains exactly three lines and changes
+nothing else.
+
+**One book goes fully valid** — *Bitmemiş Öyküler*, 14 errors → **0**, this fixer
+being the last of its fourteen. Fully-valid books on the shelf: 72 → 73. The
+other two land at 2 errors each and the residue is nobody's mistake to fix here:
+an empty `<title>` plus a `file:///` URL in one, two `element "div" is not
+allowed here` schema violations in the other.
+
+**Do not read that as the fixer's general worth.** Three findings is a small
+population from a single producer, and the fully-valid book is fully valid
+because its *other* thirteen defects were already repairable — this one happened
+to be the last brick. The durable claim is narrower: `navdoc.ol.empty` was one of
+the error-severity rules with no fixer, and it no longer is.

@@ -13,7 +13,7 @@ changed**. It never guesses, and it preserves everything it doesn't touch.
 ## Status
 
 Early but working. The core contract (`Workspace` → detect → propose → confirm →
-apply → report) is solid, with thirty-five fixers so far:
+apply → report) is solid, with thirty-six fixers so far:
 
 - **`RSC-016`** — undeclared HTML entities (`&nbsp;`, `&mdash;`, …) → the exact
   character each denotes.
@@ -26,6 +26,10 @@ apply → report) is solid, with thirty-five fixers so far:
 - **`NCX-001`** — NCX `dtb:uid` synced to the package's unique identifier.
 - **`RSC-005` / `empty_title`** — an empty `<title>` filled from the book's own
   TOC label (or its first heading); never invented.
+- **`RSC-005` / `navdoc.ol.empty`** — an optional `<nav>` in the navigation
+  document whose list holds no entries → the whole `<nav>` dropped. Never the
+  `toc`, never a list nested inside an `<li>`, never a nav carrying a heading or
+  an id.
 - **`RSC-020`** — an unencoded space in a manifest `href` → `%20`.
 - **`RSC-020` / `ncx.content_src`** — the same space in an NCX `<content src>`.
   A book carrying both needs both: encoding only the manifest leaves it invalid.
