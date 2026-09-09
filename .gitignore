@@ -6,6 +6,11 @@
 /docs/SPIKE.md
 /docs/API.md
 /docs/COVERAGE.md
+# ANNOUNCEMENTS.md MOVED OUT of this repo on 2026-09-09 (Baris): public-post
+# drafts and framing notes are marketing, not engineering, and GitHub is for
+# code. It now lives at ~/Documents/Projects/epubsana-comms/ANNOUNCEMENTS.md.
+# This line stays as a tripwire: if a future session recreates the file here
+# from a stale instruction, it must not become publishable by accident.
 /docs/ANNOUNCEMENTS.md
 
 # Local-only dev scaffolding: corpus scanner for grounding fixer ROI in real
