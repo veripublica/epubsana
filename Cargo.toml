@@ -110,6 +110,46 @@ members = ["epubsana-wasm"]
 #   byte-identical across 444 books — so this is a reporting improvement, not a
 #   correctness floor, and it is recorded as the weaker claim on purpose.
 #
+#   **0.13.6 (2026-09-09) is the weakest floor in this list: nothing moved at
+#   all.** Four upstream releases, no source change, 230 + 22 tests green before
+#   the manifest was touched — and the *whole `rule_census`* is byte-identical
+#   across the boundary, not merely the plan digest. Both arms had their linkage
+#   checked (`strings … | grep epubveri-0.13.x`) before either null was believed,
+#   and the census is the arm that could have moved: 0.13.3 closed eleven false
+#   positives and none of them had a population on this shelf. Two rows of the
+#   key table upstream sent with it are wrong, neither in a direction that
+#   reaches an edit — `opf.metadata.empty_element` is `OPF-072` and not
+#   `OPF-034`, and `navdoc.ol.empty` is not new in 0.13.3 (it is in `src/` at
+#   every tag from v0.9.20, and fires on 3 shelf books at 0.13.2). Raised by
+#   note, not by issue: a wrong row in a private note is neither a rule nor a
+#   commitment.
+#
+#   **0.13.7 (2026-09-09) is a CORRECTNESS floor, and the first one that is also
+#   an API floor.** We consume `epubveri::xmlext::is_xml_blank` from it — the
+#   sixth item in our whole upstream surface, and taken deliberately rather than
+#   reimplemented. "Is this element empty" now has one spelling in the family,
+#   which is the thing whose absence caused the defect: upstream already had the
+#   predicate, already documented the trap in its docstring, and four of its own
+#   sites still read `trim()`.
+#
+#   Below this floor, four sites here decide emptiness with Rust's `str::trim`,
+#   which strips the Unicode `White_Space` class and so swallows NO-BREAK SPACE.
+#   epubcheck 5.3.0 does not (its Java handler trims `<= U+0020`, its Schematron
+#   uses `normalize-space()`; the two sets differ only in C0 controls that XML
+#   1.0 forbids anyway, which is why one predicate covers both exactly). Two of
+#   ours *delete* on that predicate and two decide whether to overwrite or
+#   unwrap, so on this shelf the risk is not a bad finding, it is a bad edit.
+#
+#   **Upstream's own fix does not reach it, which is why the floor is not the
+#   repair.** `fix.empty_metadata_element` dispatches per *file* and re-derives
+#   every droppable element itself, so a finding disappearing upstream does not
+#   stop the deletion: with an NBSP-only `<dc:description>` beside a genuinely
+#   empty `<dc:source>`, epubveri reports only the second and we dropped both.
+#   Measured as a fixture (`nbsp_probe.rs` in dev-examples) — no book on the
+#   474-book shelf holds the shape, and the whole-shelf plan digest is
+#   byte-identical across the change, so the shelf can neither confirm nor deny
+#   any of this.
+#
 # Tracking policy, agreed with epubveri 2026-08-05: **track loosely** — a caret on
 # the current minor, re-measure when a minor lands, don't chase patches. For an
 # irreversible repairer, a newer detector only matters when the rules we consume move, and
@@ -120,7 +160,7 @@ members = ["epubsana-wasm"]
 #
 # For local co-development of epubveri, add an uncommitted override:
 #   [patch.crates-io] epubveri = { path = "../epubveri" }
-epubveri = "0.13.2"
+epubveri = "0.13.7"
 # Pure-Rust only (no C deps), same philosophy as epubveri: zip's "deflate"
 # feature uses zlib-rs (Rust) on the 8.x line; bzip2/zstd (C) stay disabled.
 # Aligned to epubveri's zip major — the family shares one zip version because

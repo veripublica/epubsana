@@ -4810,7 +4810,12 @@ fn plan_nested_anchor_unwraps(text: &str) -> Option<Vec<MetaEdit>> {
                     extra = true;
                 }
                 child = Some(c);
-            } else if c.is_text() && !c.text().unwrap_or("").trim().is_empty() {
+            } else if c.is_text() && !epubveri::xmlext::is_xml_blank(c.text().unwrap_or("")) {
+                // A NO-BREAK SPACE beside the inner anchor is *rendered* — the
+                // author typed it — so unwrapping would delete a space a reader
+                // can see. This is not the parity argument the three metadata
+                // sites make; it is the plainer one that `trim()` swallows
+                // content in a content document.
                 extra = true;
             }
         }
@@ -4942,7 +4947,7 @@ fn compute_empty_dc_date_edits(opf: &str) -> Option<Vec<MetaEdit>> {
             .filter(|t| t.is_text())
             .filter_map(|t| t.text())
             .collect();
-        if !text.trim().is_empty() {
+        if !epubveri::xmlext::is_xml_blank(&text) {
             continue; // a real date, however malformed — never ours to delete
         }
         if n.attribute("id").is_some_and(|id| refined.contains(id)) {
@@ -5305,7 +5310,7 @@ fn compute_empty_metadata_edits(opf: &str) -> Option<Vec<MetaEdit>> {
             .filter(|t| t.is_text())
             .filter_map(|t| t.text())
             .collect();
-        if !text.trim().is_empty() {
+        if !epubveri::xmlext::is_xml_blank(&text) {
             continue; // it says something — never ours to delete
         }
         if n.attribute("id").is_some_and(|id| refined.contains(id)) {
@@ -5658,7 +5663,7 @@ fn plan_title_fill(text: &str, title: &str) -> Option<MetaEdit> {
         .descendants()
         .filter(|n| n.is_text())
         .filter_map(|n| n.text())
-        .any(|t| !t.trim().is_empty());
+        .any(|t| !epubveri::xmlext::is_xml_blank(t));
     if has_text {
         return None; // not empty — never overwrite existing content
     }
@@ -6054,6 +6059,24 @@ mod tests {
         assert!(
             out.contains(r##"<sup id="bookmark1"><a href="#footnote1">1</a></sup>"##),
             "{out}"
+        );
+    }
+
+    /// A NO-BREAK SPACE beside the inner anchor is *rendered* — the author
+    /// typed it — so unwrapping the outer anchor would delete a space a reader
+    /// can see. Distinct from the metadata sites: the argument here is not
+    /// epubcheck parity but that `trim()` swallows content in a content
+    /// document. The ordinary-space case still unwraps, which is what shows the
+    /// predicate did not simply stop working.
+    #[test]
+    fn an_outer_anchor_holding_a_no_break_space_declines() {
+        assert!(
+            unwrap_anchors("<p><a id=\"b1\">\u{a0}<a href=\"#f\">1</a></a></p>").is_none(),
+            "the NBSP is content the unwrap would delete"
+        );
+        assert!(
+            unwrap_anchors("<p><a id=\"b1\"> <a href=\"#f\">1</a></a></p>").is_some(),
+            "insignificant whitespace is still insignificant"
         );
     }
 
@@ -6853,6 +6876,67 @@ mod tests {
             out.contains("<dc:rights>© 2019</dc:rights>"),
             "a value is never touched"
         );
+    }
+
+    /// A NO-BREAK SPACE is not XML whitespace, so an element holding one is not
+    /// empty — epubcheck 5.3.0 says so, and epubveri agreed from 0.13.7
+    /// (`xmlext::is_xml_blank`, four false positives, two verdict-moving).
+    ///
+    /// **Upstream's fix does not reach this code and that is the point.** This
+    /// fixer dispatches per *file* and then re-derives every droppable element
+    /// itself, so a finding disappearing upstream does not stop the deletion:
+    /// with the NBSP element beside a genuinely empty one, epubveri reports only
+    /// the second and we used to drop both. Measured as a fixture, because no
+    /// book on the 474-book shelf holds the shape.
+    ///
+    /// `dc:source` is asserted alongside on purpose — a predicate that called
+    /// everything non-empty would pass the first assertion alone.
+    #[test]
+    fn empty_metadata_keeps_an_element_holding_only_a_no_break_space() {
+        let opf = "<package xmlns=\"http://www.idpf.org/2007/opf\"><metadata xmlns:dc=\"http://purl.org/dc/elements/1.1/\">
+    <dc:source/>
+    <dc:description>\u{a0}</dc:description>
+  </metadata></package>";
+        let out = apply_edits(opf, compute_empty_metadata_edits(opf).unwrap());
+        assert!(
+            out.contains("dc:description"),
+            "a NO-BREAK SPACE is content epubcheck accepts, not emptiness"
+        );
+        assert!(
+            !out.contains("dc:source"),
+            "the genuinely empty one still goes"
+        );
+    }
+
+    /// The sibling fixer reads the same predicate for the same reason.
+    #[test]
+    fn empty_dc_date_keeps_a_date_holding_only_a_no_break_space() {
+        let opf = "<package xmlns=\"http://www.idpf.org/2007/opf\"><metadata xmlns:dc=\"http://purl.org/dc/elements/1.1/\">
+    <dc:date>\u{a0}</dc:date>
+  </metadata></package>";
+        assert!(
+            compute_empty_dc_date_edits(opf).is_none(),
+            "not empty, so there is nothing here to drop"
+        );
+    }
+
+    /// The `<p>text</p>` Calibre writes into a `dc:description`: epubveri reads
+    /// **direct text children** at this site and calls it empty; we read
+    /// **descendants** and decline. That difference used to be an accident
+    /// documented in a comment — upstream pointed out (2026-09-09) that it is
+    /// now the only thing between the two behaviours, so it is pinned here.
+    #[test]
+    fn empty_metadata_declines_an_element_whose_text_sits_in_a_child() {
+        let opf = r#"<package xmlns="http://www.idpf.org/2007/opf"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:source/>
+    <dc:description><p>real prose</p></dc:description>
+  </metadata></package>"#;
+        let out = apply_edits(opf, compute_empty_metadata_edits(opf).unwrap());
+        assert!(
+            out.contains("real prose"),
+            "epubveri reports this one empty; deleting it would delete the author's text"
+        );
+        assert!(!out.contains("dc:source"));
     }
 
     #[test]
@@ -8316,6 +8400,30 @@ mod tests {
         // Never overwrite real content, even if a stale finding says otherwise.
         let doc = "<html><head><title>Chapter 1</title></head><body/></html>";
         assert!(plan_title_fill(doc, "Something Else").is_none());
+    }
+
+    /// A `<title>` whose whole content is a NO-BREAK SPACE. epubcheck 5.3.0
+    /// accepts it and epubveri stopped reporting it at 0.13.7 — the
+    /// **error-severity** one of that release's four sites. This fixer's verb
+    /// is overwrite rather than delete, so the old `trim()` predicate meant
+    /// replacing a character the author typed with a title taken from the
+    /// table of contents.
+    ///
+    /// The ordinary-space case is asserted with it: that one *is* empty to both
+    /// tools, so a predicate that had simply stopped filling anything would
+    /// pass the first assertion alone.
+    #[test]
+    fn title_fill_declines_a_title_holding_only_a_no_break_space() {
+        let nbsp = "<html><head><title>\u{a0}</title></head><body/></html>";
+        assert!(
+            plan_title_fill(nbsp, "Chapter One").is_none(),
+            "not empty — overwriting it would delete a rendered character"
+        );
+        let spaces = "<html><head><title>   </title></head><body/></html>";
+        assert!(
+            plan_title_fill(spaces, "Chapter One").is_some(),
+            "XML whitespace still counts as empty"
+        );
     }
 
     #[test]

@@ -1277,6 +1277,29 @@ declares nothing.
   `refines` is an EPUB 3 mechanism and this rule is EPUB 2 only, so it is vacuous
   here in any case.
 
+**A third guard, added 2026-09-09: an element is empty only when its content is
+XML whitespace.** Rust's `str::trim` strips the Unicode `White_Space` class, so
+an element whose whole content is a NO-BREAK SPACE looked empty and was deleted.
+epubcheck 5.3.0 accepts it, and epubveri stopped reporting it at 0.13.7 — one of
+four sites it fixed there, two of them verdict-moving.
+
+**Upstream's fix does not cover this fixer, and the mechanism is worth
+understanding because it applies to every file-dispatched fixer here.** This one
+takes only the *file* from the finding and then re-derives every droppable
+element itself. So when an NBSP-only `<dc:description>` sits beside a genuinely
+empty `<dc:source>`, epubveri reports the second alone and epubsana dropped both:
+the deletion never needed a finding of its own. Measured as a fixture
+(`nbsp_probe.rs`), because no book on the 474-book shelf holds the shape.
+
+The predicate is `epubveri::xmlext::is_xml_blank` rather than a local copy, on
+purpose. Upstream's own account of how the bug survived is that `is_xml_space`
+already existed and already documented the trap, while four sites kept reading
+`trim()` — a migration written up and left half done. One spelling in the family
+is the guard against a second half-migration. `fix.empty_dc_date`,
+`fix.empty_title` and the nested-anchor unwrap read the same predicate; the last
+of those on a different argument, that an NBSP in a content document is a space a
+reader can see.
+
 **Measured on the 157-book shelf (2026-08-13): 29 findings across 9 books.**
 Every one is `dc:coverage`, `dc:relation`, `dc:rights`, `dc:source`,
 `dc:subject` or `dc:description`. **27 are self-closing (`<dc:source/>`) and 2

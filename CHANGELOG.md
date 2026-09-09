@@ -40,6 +40,35 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
   books loses those two lines and nothing else — and take `regression_audit` back
   to introducing nothing at any severity.
 
+- **Four sites no longer treat a NO-BREAK SPACE as emptiness.** `str::trim`
+  strips Unicode whitespace, so an element whose entire content is `&#160;`
+  looked empty. epubcheck 5.3.0 does not agree, and epubveri stopped agreeing at
+  0.13.7. Two of the four sites *delete* on that judgement
+  (`fix.empty_metadata_element`, `fix.empty_dc_date`), one decides whether to
+  **overwrite** a `<title>` (`fix.empty_title`), and one decides whether to
+  unwrap a nested anchor — where the argument is not epubcheck parity but simply
+  that an NBSP is a space a reader can see.
+
+  **The upstream fix does not cover this, which is the part worth knowing.**
+  `fix.empty_metadata_element` dispatches per *file* and then re-derives every
+  droppable element itself, so a finding disappearing upstream does not stop the
+  deletion: with an NBSP-only `<dc:description>` beside a genuinely empty
+  `<dc:source>`, epubveri reports only the second and epubsana dropped both.
+
+  All four now read `epubveri::xmlext::is_xml_blank`, rather than a local copy,
+  so the family has one spelling for "is this element empty". Verified by
+  fixture, because no book on the 474-book shelf holds the shape — the
+  whole-shelf plan digest is byte-identical across the change.
+
+### Changed
+
+- **The epubveri floor is `0.13.7`** (from `0.13.2`, five upstream releases).
+  Through 0.13.6 this was tracking only: no source change was needed, and both
+  the whole-shelf plan digest and the whole `rule_census` are **byte-identical**
+  across that boundary — none of the eleven false positives 0.13.3 closed had a
+  population on this shelf. **0.13.7 is a correctness floor**, and the first that
+  is also an API floor: the NBSP predicate above is consumed from it.
+
 ## [0.13.0] - 2026-09-02
 
 **Minor rather than patch, and the reason is the dependency.** epubveri types are
