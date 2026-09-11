@@ -10,6 +10,25 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **The envelope states epubsana's own convention version.** epubveri 0.13.x
+  hard-coded its own key into every envelope built through
+  `Envelope::for_tool`, so this crate's `--format json` was claiming *epubveri's*
+  convention version; it happened to be right, both being `v0.4`. 0.14.0 made
+  the key a required parameter. epubsana claims **`"0.4"`** and will move it
+  when it implements v0.5.0, not when its dependency does. No output changes.
+
+### Dependencies
+
+- **epubveri floor raised to `0.14`** (from `0.13.7`) — a capability floor: the
+  `params` contract the OPF-090 fixer now reads (an absent `params[1]` meaning
+  *decline*, and only a real media type ever appearing in it) does not exist
+  below it. Measured across the boundary on 474 books: the whole-shelf plan
+  digest and the entire regression audit are byte-identical — 194 books planned,
+  2,337 proposals, errors 40,584 → 15,719, 73 books fully valid, zero
+  regressions at any severity.
+
 ### Documentation
 
 - **`fix.navdoc_empty_nav`'s safety argument was overstated in 0.14.0 and is

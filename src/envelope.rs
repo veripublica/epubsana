@@ -20,6 +20,40 @@ use epubveri::envelope::Item;
 
 use crate::{ChangeReport, ReportedFix, Tier};
 
+/// The FORMATS.md convention version **this crate implements** — not the one
+/// its detector implements.
+///
+/// epubveri 0.13.x hard-coded its own `CONVENTION` into every envelope built
+/// through [`epubveri::envelope::Envelope::for_tool`], so epubsana's output was
+/// claiming epubveri's convention version; it was right by accident, both being
+/// `"0.4"`. 0.14.0 made the key a required parameter precisely so that raising
+/// the dependency cannot be mistaken for adopting a convention release, and
+/// epubveri now claims `"0.5"`.
+///
+/// **Ours stays `"0.4"` until v0.5.0 is implemented here.** The outstanding
+/// piece is the missing `proposed` counter on [`Summary`] (and, under the wider
+/// reading of #30's rule 1, the three unreported severities beside it); claim
+/// `"0.5"` in the release that ships them, not before.
+const CONVENTION: &str = "0.4";
+
+/// epubsana's `Outcome` in the envelope's vocabulary.
+///
+/// The conversion — rather than a shared enum — is what epubsana asked
+/// conventions for on 2026-09-10 and what epubveri 0.14.0 shipped: a tool keeps
+/// its own vocabulary, and the *place the two meet* becomes something the
+/// compiler forces you to revisit. **The `match` must stay wildcard-free**: a
+/// `_ =>` arm turns that compile error back into the silence the type exists to
+/// prevent, exactly as `violation_kind` does upstream.
+impl From<crate::Outcome> for epubveri::envelope::Outcome {
+    fn from(o: crate::Outcome) -> Self {
+        match o {
+            crate::Outcome::Applied => epubveri::envelope::Outcome::Applied,
+            crate::Outcome::Skipped => epubveri::envelope::Outcome::Skipped,
+            crate::Outcome::Proposed => epubveri::envelope::Outcome::Proposed,
+        }
+    }
+}
+
 /// epubsana's envelope, with its two tool-owned slots filled in.
 pub type Envelope = epubveri::envelope::Envelope<Summary, Data>;
 /// One repaired input, in the shared shape.
@@ -28,7 +62,7 @@ pub type Input = epubveri::envelope::Input<Summary, Data>;
 /// Build the whole run's envelope: one input (a transformer takes exactly one),
 /// `dry_run` set when nothing was written on purpose.
 pub fn envelope(input: Input, dry_run: bool) -> Envelope {
-    let mut env = Envelope::for_tool("epubsana", crate::VERSION, None, vec![input]);
+    let mut env = Envelope::for_tool("epubsana", crate::VERSION, CONVENTION, None, vec![input]);
     env.dry_run = dry_run;
     env
 }
@@ -73,7 +107,7 @@ pub fn input_error(path: String, error: String) -> Input {
 /// epubsana's opinion of its own fix.
 fn item(index: usize, f: &ReportedFix) -> Item<Data> {
     Item::fix(
-        f.outcome.as_str(),
+        f.outcome,
         f.addresses_id.clone(),
         f.addresses_rule,
         f.addresses_severity.as_str(),

@@ -150,6 +150,33 @@ members = ["epubsana-wasm"]
 #   byte-identical across the change, so the shelf can neither confirm nor deny
 #   any of this.
 #
+#   **0.14 (2026-09-11) is a CAPABILITY floor, and it is what makes this crate's
+#   OPF-090 fixer honest.** Two things arrive with it, and neither is optional
+#   for the way `fix.non_preferred_media_type` now works:
+#
+#   - `opf.manifest_item.non_preferred_media_type` stops naming a replacement
+#     the resource's own signature rules out, so `params` may have length **1**
+#     — a *decline* this crate reads and obeys. Below the floor that answer does
+#     not exist and the fixer would rename regardless.
+#   - only a real media type reaches `params[1]`. **0.13.x put the human hint
+#     `font/(ttf|otf)` there** for `application/font-sfnt`, which a fixer writing
+#     `params[1]` verbatim into a manifest would turn into a defect of its own.
+#     `is_media_type` guards that shape, but the guard is a seatbelt: the floor
+#     is the contract.
+#
+#   `Envelope::for_tool` also gained a required `convention` parameter, which is
+#   the point of it — 0.13.x hard-coded epubveri's own key into *our* envelope,
+#   so our output claimed their convention version (right by accident at "0.4").
+#   Ours is now stated in `envelope.rs` and moves when we implement v0.5.0, not
+#   when the dependency does.
+#
+#   Measured across the boundary on the 474-book shelf: the whole-shelf plan
+#   digest and the **entire** `regression_audit` output are byte-identical (194
+#   books planned, 2,337 proposals, errors 40,584 → 15,719, 73 fully valid, zero
+#   regressions). Not a vacuous null — this fixer carries 10 of those proposals
+#   and 50 renames, so a `params` answer that failed to arrive would have deleted
+#   every one of them.
+#
 # Tracking policy, agreed with epubveri 2026-08-05: **track loosely** — a caret on
 # the current minor, re-measure when a minor lands, don't chase patches. For an
 # irreversible repairer, a newer detector only matters when the rules we consume move, and
@@ -160,7 +187,7 @@ members = ["epubsana-wasm"]
 #
 # For local co-development of epubveri, add an uncommitted override:
 #   [patch.crates-io] epubveri = { path = "../epubveri" }
-epubveri = "0.13.7"
+epubveri = "0.14"
 # Pure-Rust only (no C deps), same philosophy as epubveri: zip's "deflate"
 # feature uses zlib-rs (Rust) on the 8.x line; bzip2/zstd (C) stay disabled.
 # Aligned to epubveri's zip major — the family shares one zip version because
