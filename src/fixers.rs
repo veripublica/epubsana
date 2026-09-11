@@ -6,6 +6,7 @@
 //! real books ask for: what a fixer changes, why that is content-preserving, and
 //! when it declines is specified in `docs/FIXERS.md` before it is coded.
 
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ops::Range;
 
@@ -5156,51 +5157,43 @@ fn plan_font_face_drops(css: &str, urls: &BTreeSet<String>) -> Option<Vec<MetaEd
     (!edits.is_empty()).then_some(edits)
 }
 
-/// Superseded Core Media Type names, and the current name for the same format.
-///
-/// **This table is ours and epubveri has no equivalent** — it holds a *set* of
-/// non-preferred types (`epubveri/src/cmt.rs`), so it can say a name is
-/// superseded but not what supersedes it. Every target here was checked against
-/// its `PREFERRED` list: a target missing from that list would give a fix that
-/// does not clear its own finding.
-///
-/// `application/font-sfnt` is **deliberately absent**. SFNT is the container
-/// both TrueType and OpenType use, so the name does not say which the file is,
-/// and deciding would mean reading the font's version tag — inferring a
-/// declaration from binary content rather than renaming one. It is the only
-/// genuinely ambiguous member of the set.
-const PREFERRED_MEDIA_TYPE: [(&str, &str); 5] = [
-    ("application/vnd.ms-opentype", "font/otf"),
-    ("application/x-font-ttf", "font/ttf"),
-    ("application/font-woff", "font/woff"),
-    ("application/ecmascript", "application/javascript"),
-    ("text/javascript", "application/javascript"),
-];
+/// The rule this fixer dispatches on, spelled once.
+const NON_PREFERRED_MEDIA_TYPE: &str = "opf.manifest_item.non_preferred_media_type";
 
 /// `OPF-090` / `opf.manifest_item.non_preferred_media_type`: a manifest item
 /// declares a valid Core Media Type under a name the spec has superseded.
 ///
-/// Renames the declaration to the current name for the *same* format. Nothing is
-/// asserted about the bytes on disk — which is what separates this from
-/// `declared_media_type_mismatch`, where the declaration and the file genuinely
-/// disagree and choosing between them is not ours.
+/// Renames the declaration to **the type the finding names** (`params[1]`).
+/// Nothing is asserted about the bytes on disk — which is what separates this
+/// from `declared_media_type_mismatch`, where the declaration and the file
+/// genuinely disagree and choosing between them is not ours.
 ///
-/// `ConfirmNeeded`: the edit is small and provably safe, but it rests on a table
-/// this crate owns rather than on anything the detector told us.
+/// **The mapping is epubveri's, not ours (2026-09-11).** This fixer used to
+/// carry a five-row table of its own, written when epubveri held only a *set*
+/// of non-preferred types; it has named the replacement in `params[1]` since
+/// **0.12.3**, so the table was a second answer to a question the detector was
+/// already answering — and a second answer is a second oracle. Reading `params`
+/// also closes the hole the table could not see: where the detector refuses to
+/// name a target because the resource's own signature rules it out (an `OTTO`
+/// font declared `application/x-font-ttf`), a table-driven fixer renames it
+/// anyway. See `docs/FIXERS.md` for the measured population of that shape
+/// (zero, on 474 books) and for why `application/font-sfnt` is now repairable.
+///
+/// `ConfirmNeeded`: the edit is small and provably safe, but it is a
+/// declaration a publisher may have written deliberately.
 fn non_preferred_media_type(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
-    let files: BTreeSet<&str> = report
-        .messages
-        .iter()
-        .filter(|m| m.rule == Some("opf.manifest_item.non_preferred_media_type"))
-        .filter_map(|m| m.location.as_deref())
-        .collect();
-
+    // file -> declared type (base) -> the target every finding for it agrees
+    // on. `None` means *decline this declared type*: either a finding named no
+    // target, or two findings named different ones. Both are real — since
+    // 0.14.1 the answer for `application/font-sfnt` depends on each file's own
+    // bytes, so one manifest can carry two different right answers for one
+    // spelling, and this fixer renames per declared type.
     let mut fixes = Vec::new();
-    for file in files {
+    for (file, renames) in media_type_renames(report) {
         let Some(text) = ws.get_text(file) else {
             continue;
         };
-        let Some(edits) = compute_media_type_edits(&text) else {
+        let Some(edits) = compute_media_type_edits(&text, &renames) else {
             continue;
         };
         let n = edits.len();
@@ -5209,19 +5202,20 @@ fn non_preferred_media_type(report: &Report, ws: &Workspace) -> Vec<ProposedFix>
         fixes.push(ProposedFix {
             fix_id: "fix.non_preferred_media_type",
             addresses_id: "OPF-090".to_string(),
-            addresses_rule: Some("opf.manifest_item.non_preferred_media_type"),
+            addresses_rule: Some(NON_PREFERRED_MEDIA_TYPE),
             addresses_severity: addressed_severity(
                 report,
                 "OPF-090",
-                Some("opf.manifest_item.non_preferred_media_type"),
+                Some(NON_PREFERRED_MEDIA_TYPE),
             ),
             tier: Tier::ConfirmNeeded,
             title: format!("Rename {n} superseded media-type declaration(s) in {file}"),
             rationale:
                 "Both names denote the same format, so this renames a declaration and asserts \
-                 nothing new about the file itself. application/font-sfnt is never touched: SFNT \
-                 is the container TrueType and OpenType share, so the name does not say which \
-                 the file is, and deciding would mean reading the font's own bytes."
+                 nothing new about the file itself. The replacement is the one the finding \
+                 names: where epubveri declines to name a type — because the resource's own \
+                 signature rules it out, or because the spec's table leaves the case open — \
+                 this declines too."
                     .to_string(),
             preview: vec![Change {
                 path: file.to_string(),
@@ -5229,7 +5223,7 @@ fn non_preferred_media_type(report: &Report, ws: &Workspace) -> Vec<ProposedFix>
             }],
             apply_fn: Box::new(move |ws: &mut Workspace| {
                 if let Some(text) = ws.get_text(&file_for_apply)
-                    && let Some(edits) = compute_media_type_edits(&text)
+                    && let Some(edits) = compute_media_type_edits(&text, &renames)
                 {
                     ws.set_text(&file_for_apply, apply_edits(&text, edits));
                 }
@@ -5239,9 +5233,87 @@ fn non_preferred_media_type(report: &Report, ws: &Workspace) -> Vec<ProposedFix>
     fixes
 }
 
-/// Edits renaming every superseded `media-type` on a `<manifest>` item. `None`
-/// (decline) if the package document won't parse or nothing is renameable.
-fn compute_media_type_edits(opf: &str) -> Option<Vec<MetaEdit>> {
+/// Per package document, the rename each declared type's findings agree on.
+///
+/// A declared type is **dropped** when a finding for it named no target, or two
+/// findings named different ones. Both cases are real: epubveri names no type
+/// when the resource's own signature rules the row's candidate out, and since
+/// 0.14.1 the answer for `application/font-sfnt` is decided per file — so one
+/// manifest can legitimately carry two right answers for one spelling, and this
+/// fixer, which renames per declared type across the manifest, can honour
+/// neither. Declining a repair that exists is the cheap error here.
+fn media_type_renames(report: &Report) -> BTreeMap<&str, BTreeMap<String, String>> {
+    let mut agreed: BTreeMap<&str, BTreeMap<String, Option<String>>> = BTreeMap::new();
+    for m in report
+        .messages
+        .iter()
+        .filter(|m| m.rule == Some(NON_PREFERRED_MEDIA_TYPE))
+    {
+        let (Some(file), Some(declared)) = (m.location.as_deref(), m.params.first()) else {
+            continue;
+        };
+        let target = m.params.get(1).filter(|t| is_media_type(t)).cloned();
+        match agreed
+            .entry(file)
+            .or_default()
+            .entry(base_media_type(declared).to_string())
+        {
+            Entry::Vacant(v) => {
+                v.insert(target);
+            }
+            Entry::Occupied(mut o) => {
+                if *o.get() != target {
+                    o.insert(None);
+                }
+            }
+        }
+    }
+    agreed
+        .into_iter()
+        .filter_map(|(file, declared)| {
+            let renames: BTreeMap<String, String> = declared
+                .into_iter()
+                .filter_map(|(d, t)| t.map(|t| (d, t)))
+                .collect();
+            (!renames.is_empty()).then_some((file, renames))
+        })
+        .collect()
+}
+
+/// Strip any `; charset=…` parameter before comparing a declared media type,
+/// exactly as epubveri does (`epubveri/src/cmt.rs`, `base_media_type`) — so the
+/// two never disagree about which declaration a finding is about.
+fn base_media_type(mt: &str) -> &str {
+    mt.split(';').next().unwrap_or(mt).trim()
+}
+
+/// Whether a string is shaped like a bare `type/subtype` this fixer may write
+/// into a manifest verbatim.
+///
+/// epubveri contracts that only a real media type reaches `params[1]`, and this
+/// does not second-guess *which* type it named. It is a guard on the one thing
+/// a value written verbatim into a document must be: **0.13.x put the human
+/// hint `font/(ttf|otf)` in that slot**, so the malformed shape is a version
+/// away rather than hypothetical, and a `media-type="font/(ttf|otf)"` would be
+/// this fixer authoring a defect of its own.
+fn is_media_type(s: &str) -> bool {
+    let mut parts = s.split('/');
+    let (Some(t), Some(sub), None) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    !t.is_empty()
+        && !sub.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '+' | '-' | '.'))
+}
+
+/// Edits renaming each `<manifest>` item whose declared type `renames` has an
+/// answer for. `None` (decline) if the package document won't parse or nothing
+/// is renameable.
+fn compute_media_type_edits(
+    opf: &str,
+    renames: &BTreeMap<String, String>,
+) -> Option<Vec<MetaEdit>> {
     let doc = parse_xml(opf)?;
     let manifest = doc
         .descendants()
@@ -5258,8 +5330,7 @@ fn compute_media_type_edits(opf: &str) -> Option<Vec<MetaEdit>> {
         // Parameters are stripped before matching, as epubveri strips them —
         // but the replacement takes the whole value, so a `; charset=…` goes
         // with the old name rather than being carried onto the new one.
-        let base = mt.split(';').next().unwrap_or(mt).trim();
-        let Some((_, current)) = PREFERRED_MEDIA_TYPE.iter().find(|(old, _)| *old == base) else {
+        let Some(current) = renames.get(base_media_type(mt)) else {
             continue;
         };
         let Some(attr) = n.attribute_node("media-type") else {
@@ -7097,31 +7168,104 @@ mod tests {
         assert!(plan_font_face_drops(css, &urls).is_none());
     }
 
+    /// Shorthand: an OPF-090 finding on `content.opf`, with or without a target.
+    fn cmt(declared: &str, preferred: Option<&str>) -> epubveri::report::Message {
+        let mut params = vec![declared.to_string()];
+        if let Some(p) = preferred {
+            params.push(p.to_string());
+        }
+        epubveri::report::Message {
+            severity: Severity::Usage,
+            location: Some("OEBPS/content.opf".to_string()),
+            params,
+            ..fixture("OPF-090", "opf.manifest_item.non_preferred_media_type")
+        }
+    }
+
+    fn renames(of: &[(&str, &str)]) -> BTreeMap<String, String> {
+        of.iter()
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+            .collect()
+    }
+
     #[test]
-    fn media_type_renames_the_unambiguous_ones() {
+    fn media_type_renames_to_the_type_the_finding_names() {
         let opf = r#"<package xmlns="http://www.idpf.org/2007/opf"><manifest>
     <item id="f1" href="a.otf" media-type="application/vnd.ms-opentype"/>
     <item id="s1" href="s.js" media-type="text/javascript"/>
     <item id="c1" href="c.xhtml" media-type="application/xhtml+xml"/>
   </manifest></package>"#;
-        let out = apply_edits(opf, compute_media_type_edits(opf).unwrap());
+        let r = renames(&[
+            ("application/vnd.ms-opentype", "font/otf"),
+            ("text/javascript", "application/javascript"),
+        ]);
+        let out = apply_edits(opf, compute_media_type_edits(opf, &r).unwrap());
         assert!(out.contains(r#"media-type="font/otf""#));
         assert!(out.contains(r#"media-type="application/javascript""#));
         assert!(
             out.contains(r#"media-type="application/xhtml+xml""#),
-            "a type that is already preferred is not touched"
+            "a type no finding named is not touched"
         );
         assert!(!out.contains("vnd.ms-opentype"));
     }
 
     #[test]
-    fn media_type_declines_the_ambiguous_sfnt() {
-        // SFNT is the container TrueType and OpenType share: the name cannot
-        // say which the file is, and this fixer never reads the file.
+    fn media_type_takes_the_sfnt_case_the_detector_decides() {
+        // Repairable now, and only because epubveri answered it: 0.14.1 reads
+        // the sfnt signature (only `font/otf` admits `OTTO`) on its own side of
+        // the boundary. This crate still never opens the font.
         let opf = r#"<package xmlns="http://www.idpf.org/2007/opf"><manifest>
     <item id="f" href="a.font" media-type="application/font-sfnt"/>
   </manifest></package>"#;
-        assert!(compute_media_type_edits(opf).is_none());
+        let r = renames(&[("application/font-sfnt", "font/otf")]);
+        let out = apply_edits(opf, compute_media_type_edits(opf, &r).unwrap());
+        assert!(out.contains(r#"media-type="font/otf""#));
+    }
+
+    #[test]
+    fn media_type_declines_when_the_finding_names_no_type() {
+        // `params` of length 1 is the detector refusing to name a target — an
+        // `OTTO` font declared `application/x-font-ttf` is the shape. The old
+        // table-driven fixer renamed it to `font/ttf` regardless.
+        let report = Report {
+            messages: vec![cmt("application/x-font-ttf", None)],
+            ..Default::default()
+        };
+        assert!(media_type_renames(&report).is_empty());
+    }
+
+    #[test]
+    fn media_type_declines_a_type_two_findings_disagree_about() {
+        // One manifest, two `application/font-sfnt` items whose own bytes give
+        // different right answers. This fixer renames per declared type, so it
+        // cannot honour both and proposes neither.
+        let report = Report {
+            messages: vec![
+                cmt("application/font-sfnt", Some("font/otf")),
+                cmt("application/font-sfnt", Some("font/ttf")),
+                cmt("text/javascript", Some("application/javascript")),
+            ],
+            ..Default::default()
+        };
+        let out = media_type_renames(&report);
+        let file = out.get("OEBPS/content.opf").expect("the file is planned");
+        assert_eq!(
+            file.get("text/javascript").map(String::as_str),
+            Some("application/javascript"),
+            "the unambiguous type survives its neighbour's conflict"
+        );
+        assert!(!file.contains_key("application/font-sfnt"));
+    }
+
+    #[test]
+    fn media_type_refuses_a_target_that_is_not_a_media_type() {
+        // epubveri 0.13.x put the human hint `font/(ttf|otf)` in `params[1]`.
+        // Writing it verbatim would author a defect of this fixer's own.
+        let report = Report {
+            messages: vec![cmt("application/font-sfnt", Some("font/(ttf|otf)"))],
+            ..Default::default()
+        };
+        assert!(media_type_renames(&report).is_empty());
     }
 
     #[test]
@@ -7129,11 +7273,35 @@ mod tests {
         let opf = r#"<package xmlns="http://www.idpf.org/2007/opf"><manifest>
     <item id="s" href="s.js" media-type="text/javascript; charset=utf-8"/>
   </manifest></package>"#;
-        let out = apply_edits(opf, compute_media_type_edits(opf).unwrap());
+        let r = renames(&[("text/javascript", "application/javascript")]);
+        let out = apply_edits(opf, compute_media_type_edits(opf, &r).unwrap());
         assert!(out.contains(r#"media-type="application/javascript""#));
         assert!(
             !out.contains("charset=utf-8"),
             "the parameter belonged to the old name"
+        );
+    }
+
+    #[test]
+    fn media_type_groups_a_parameterised_declaration_with_its_base() {
+        // `params[0]` is the declared type verbatim, parameter and all, so the
+        // grouping key has to be the base type or one manifest's two spellings
+        // of one type would never meet to be checked for conflict.
+        let report = Report {
+            messages: vec![
+                cmt(
+                    "text/javascript; charset=utf-8",
+                    Some("application/javascript"),
+                ),
+                cmt("text/javascript", Some("application/javascript")),
+            ],
+            ..Default::default()
+        };
+        let out = media_type_renames(&report);
+        assert_eq!(
+            out["OEBPS/content.opf"].len(),
+            1,
+            "one declared type, not two"
         );
     }
 
@@ -7144,7 +7312,8 @@ mod tests {
         let opf = r#"<package xmlns="http://www.idpf.org/2007/opf"><metadata>
     <meta name="note" content="text/javascript"/>
   </metadata><manifest/></package>"#;
-        assert!(compute_media_type_edits(opf).is_none());
+        let r = renames(&[("text/javascript", "application/javascript")]);
+        assert!(compute_media_type_edits(opf, &r).is_none());
     }
 
     #[test]

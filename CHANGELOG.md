@@ -12,6 +12,35 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
 ### Changed
 
+- **`fix.non_preferred_media_type` takes the replacement from the finding
+  instead of from a table of its own.** epubveri has named the preferred media
+  type in `params[1]` since 0.12.3; this crate went on consulting a five-row
+  table written before that existed, which made it a second answer to a question
+  the detector was already answering.
+
+  It closes a hole the table could not see. Where epubveri declines to name a
+  replacement — because the resource's own signature rules the candidate out, an
+  `OTTO` (CFF) font declared `application/x-font-ttf` being the shape — a
+  table-driven fixer renamed it anyway. No book on the 474-book shelf carries
+  that shape (121 `application/vnd.ms-opentype` + 285 `application/x-font-ttf`
+  declarations, none contradicted by its own bytes), so this closes a hole
+  rather than repairing damage.
+
+  Two declines are new and deliberate: a finding that names no replacement, and
+  two findings about one declared type that name **different** replacements —
+  which epubveri 0.14.1 can now legitimately produce for
+  `application/font-sfnt`, because it answers that row from each file's own
+  signature. The fix renames per declared type across a manifest, so it cannot
+  honour both and proposes neither.
+
+- **`application/font-sfnt` is now repaired where the detector decides it.** It
+  was declined outright because SFNT is the container TrueType and OpenType
+  share and EPUB 3.3 lists the spelling on *both* rows — the name cannot say
+  which the file is. epubveri 0.14.1 answers it from the font's own signature
+  (only `font/otf` admits `OTTO`), on its side of the boundary, where deciding
+  what the defect is belongs. This crate still never opens a font. Zero books on
+  the shelf carry the spelling, so nothing here moves today.
+
 - **The envelope states epubsana's own convention version.** epubveri 0.13.x
   hard-coded its own key into every envelope built through
   `Envelope::for_tool`, so this crate's `--format json` was claiming *epubveri's*

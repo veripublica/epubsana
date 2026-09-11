@@ -1318,12 +1318,21 @@ the burden this tool is for. Do not quote it as coverage of anything.
 
 **Finding.** `OPF-090` / `opf.manifest_item.non_preferred_media_type`, **Usage**,
 EPUB 3 only, reported on the package document: *media-type 'X' is a non-preferred
-(but valid) Core Media Type*, with `params[0]` = the declared type. The resource
-is fine and the book is valid; the declaration uses a superseded name for a
-format that has a current one.
+(but valid) Core Media Type*, with `params[0]` = the declared type **exactly as
+written** (any `; charset=…` parameter included) and `params[1]` = the type that
+supersedes it. The resource is fine and the book is valid; the declaration uses a
+superseded name for a format that has a current one.
+
+**`params[1]` is optional and its absence is the detector's answer**, not a gap.
+epubveri names no replacement when the resource's own signature rules the
+row's candidate out — an `OTTO` (CFF) font declared `application/x-font-ttf`, a
+non-WOFF declared `application/font-woff` — and when the spec's table names two
+rows for one spelling and nothing decides between them. Read `params.get(1)`,
+**never `params[1]`**.
 
 **Fix** (`fix.non_preferred_media_type`, ConfirmNeeded). Rewrite the
-`media-type` attribute to the current name. One proposal per package document.
+`media-type` attribute to the type the finding names. One proposal per package
+document.
 
     <item ... media-type="application/vnd.ms-opentype"/>
     →
@@ -1335,38 +1344,65 @@ it different from `opf.manifest_item.declared_media_type_mismatch` (where the
 declaration and the file genuinely disagree, and choosing between them is not
 ours).
 
-**We own the mapping, and that is the one thing to keep honest.** epubveri holds
-a *set* of non-preferred types (`epubveri/src/cmt.rs:54`), not a mapping — it can
-tell you a name is superseded but not what supersedes it. So the table below
-lives here, and **every target was checked against epubveri's own `PREFERRED`
-list before being written down**; a target missing from that list would produce a
-fix that does not clear its finding.
+**The mapping is the detector's, not ours — changed 2026-09-11, and this is the
+substance of the fixer.** It used to be a five-row table in `fixers.rs`, written
+when epubveri held only a *set* of non-preferred types. epubveri has named the
+replacement in `params[1]` since **0.12.3**, so the table had been a second
+answer to a question the detector was already answering. Reading `params`
+instead:
 
-| non-preferred | current | |
-| --- | --- | --- |
-| `application/vnd.ms-opentype` | `font/otf` | |
-| `application/x-font-ttf` | `font/ttf` | |
-| `application/font-woff` | `font/woff` | |
-| `application/ecmascript` | `application/javascript` | |
-| `text/javascript` | `application/javascript` | |
-| `application/font-sfnt` | — | **declined, see below** |
+- **closes a gap the table could not see.** A file-dispatched fixer reading its
+  own table renames every item whose declared type it recognises, including one
+  the detector deliberately refused to name a target for. Zero books on the
+  474-book shelf carry that shape (121 `vnd.ms-opentype` + 285
+  `x-font-ttf` declarations, **none** ruled out by its own signature, 26
+  unreadable) — so this is a closed hole, not a repaired one;
+- **takes `application/font-sfnt` for free**, without this crate reading a
+  single byte (see below);
+- **keeps the detector boundary where it belongs**: deciding *which format a file is*
+  is the detector's job, and this fixer now has no opinion of its own to drift.
 
-**`application/font-sfnt` is declined and must stay declined.** SFNT is the
-*container* both TrueType and OpenType use, so the name does not say which the
-file is. Deciding would mean reading the font's own bytes — the sfnt version tag,
-`0x00010000` for TrueType against `OTTO` for CFF-flavoured OpenType — and that is
-inspecting binary content to infer a declaration, which is a different kind of
-act from renaming one. It is also the only member of the set that is genuinely
-ambiguous; the other five are one format under two names.
+**`application/font-sfnt` is repaired where the detector decides it, and
+declined where it does not.** SFNT is the *container* TrueType and OpenType
+share, and EPUB 3.3 lists the spelling on **both** rows — so the table names no
+answer and this fixer used to refuse the whole case. epubveri 0.14.1 answers it
+on its own side of the line: only `font/otf` admits `OTTO`, so a CFF-flavoured
+sfnt resolves to `font/otf` whatever its filename says; a `glyf` sfnt is admitted
+by both rows and falls back to epubcheck's guess from the extension; and a WOFF,
+WOFF2 or collection gets no answer at all. Whatever arrives in `params[1]` is a
+media type this fixer writes verbatim. **What this crate must never do is read
+the signature itself** — that decides what the defect is.
 
-**Media-type parameters are ignored when matching**, the same way epubveri
-ignores them (`base_media_type` strips `; charset=…`), so a declaration carrying
-one is matched but rewritten whole — the parameter goes with the old name.
+| the detector says | this fixer does |
+| --- | --- |
+| `params[1]` present | rename to it |
+| `params[1]` absent | **decline** — the detector refused to name a target |
+| two findings, same declared type, different targets | **decline both** |
 
-**Measured on the 157-book shelf (2026-08-13): 9 findings across 2 books** —
-`application/vnd.ms-opentype` ×8 and `text/javascript` ×1, both unambiguous.
-**`application/font-sfnt` does not appear at all**, so the decline costs nothing
-here; it is written for the book that has not arrived yet.
+**The conflict rule is not hypothetical, and it is new with 0.14.1.** Because
+the answer for `application/font-sfnt` now depends on each file's own bytes, one
+package document can legitimately carry `application/font-sfnt → font/otf` for
+one item and `→ font/ttf` for the next. The fix is per *declared type* across the
+manifest and cannot honour both, so it proposes neither. Declining a repair that
+exists is the cheap error here; renaming a font to the wrong format is the
+expensive one, and it is the error JSWolf's report was mistaken for.
+
+**Media-type parameters are matched past and dropped with the old name.** A
+declaration reading `text/javascript; charset=utf-8` is matched on its base type,
+the way epubveri matches it (`base_media_type`), and rewritten whole — the
+parameter belonged to the name being replaced.
+
+**It only ever acts where a finding is.** The proposal exists only for a package
+document epubveri reported on, and only for declared types it reported there; an
+EPUB 2 book draws no OPF-090 at all (the rule is EPUB 3 only) and is never
+touched. `application/x-font-truetype` — 165 declarations on this shelf, the
+second commonest font spelling here — is in **no** Core Media Type table, draws
+no finding, and is correctly none of this fixer's business.
+
+**Measured on the 474-book shelf (2026-09-11): 50 findings across 10 books**,
+`application/vnd.ms-opentype` and `text/javascript` dominating.
+**`application/font-sfnt` does not appear at all**, so taking the case costs and
+buys nothing here; it is written for the book that has not arrived yet.
 
 **It moves no verdict.** `OPF-090` is Usage severity: nothing becomes valid. It
 removes a line from an epubcheck report that describes a name, not a fault.
