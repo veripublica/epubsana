@@ -57,7 +57,21 @@ jobs:
       - name: Build against the declared minimum epubveri
         run: |
           set -euo pipefail
-          min=$(grep -E '^epubveri = "' Cargo.toml | sed -E 's/.*"([0-9]+\.[0-9]+\.[0-9]+)".*/\1/')
+          # The floor is written as a caret, and it is spelled either way on
+          # purpose: `0.14` when tracking a minor, `0.13.7` when a specific
+          # patch is load-bearing. Read the version out, then fill in a missing
+          # patch component — a two-component caret's minimum is `X.Y.0`. The
+          # earlier expression matched only the three-component spelling and,
+          # when the floor moved to `0.14`, silently handed `cargo update` the
+          # whole line instead of failing to match.
+          min=$(grep -E '^epubveri = "' Cargo.toml \
+                | sed -E 's/^epubveri = "\^?([0-9]+(\.[0-9]+){1,2})".*/\1/')
+          case "$min" in
+            *.*.*) ;;
+            *.*)   min="$min.0" ;;
+            *)     echo "error: could not read the epubveri floor from Cargo.toml (got '$min')" >&2
+                   exit 1 ;;
+          esac
           echo "declared minimum: $min"
           cargo update -p epubveri --precise "$min"
           cargo check --workspace
