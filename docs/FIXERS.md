@@ -1775,7 +1775,7 @@ approving half of this would leave a finding epubsana created itself.
   hints (`uuid_id`), and hints are not evidence.
 - **No `<dc:identifier>` at all** (two books). The repair would have to generate
   one — a UUID from nowhere — which is the invention this project does not do.
-  Note the standing question in `CLAUDE.md` about generated identifiers is
+  Note the standing project question about generated identifiers is
   therefore still unanswered and still not needed.
 - **The single candidate is itself empty.** Attaching the id would clear
   `OPF-030` and raise the empty-identifier finding in its place, which is not a
