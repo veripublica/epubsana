@@ -12,6 +12,25 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
 ### Added
 
+- **`fix.fragment_wrong_path` — a link whose `#fragment` is real but has moved
+  to another document** (`RSC-012` / `opf.content_document.dangling_fragment`,
+  ConfirmNeeded). If exactly one document in the book defines that anchor, the
+  path is written in front of the fragment, relative to the referring document;
+  where the anchor turns out to be in the referring document itself, the link
+  becomes a plain same-document `#fragment`.
+
+  On real books this is an editor splitting a file at a page break and leaving a
+  footnote link and its return link as bare fragments pointing into the wrong
+  half. Third member of the family beside `fix.reference_wrong_path` and
+  `fix.ncx_src_wrong_path`, sharing their machinery and their discipline:
+  exactly one answer, or decline.
+
+  It declines an anchor defined in several documents (which one the link meant
+  is a guess), an anchor defined nowhere (only "drop the fragment" is available,
+  and that loses the author's target), a target outside the reading order, and a
+  reference not visible as a whole quoted attribute value.
+
+
 - **`--format json`'s `summary` reports every counter it has a concept of.**
   Seven fields appear: `proposed`, and `warnings_before`/`warnings_after`,
   `infos_before`/`infos_after`, `usages_before`/`usages_after`.

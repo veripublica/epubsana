@@ -96,6 +96,7 @@ pub fn plan(report: &Report, ws: &Workspace, _goal: Goal) -> Vec<ProposedFix> {
     fixes.extend(content_document_duplicate_ids(report, ws));
     fixes.extend(reference_wrong_path(report, ws));
     fixes.extend(ncx_src_wrong_path(report, ws));
+    fixes.extend(fragment_wrong_path(report, ws));
     fixes.extend(package_identifier(report, ws));
     fixes.extend(nested_anchors(report, ws));
     fixes.extend(epub3_attrs_in_epub2_package(report, ws));
@@ -150,6 +151,7 @@ pub fn handled_rules() -> &'static [&'static str] {
         "ncx.play_order.target_mismatch",
         "ncx.uid.package_identifier_mismatch",
         "ocf.mimetype.not_first_entry",
+        "opf.content_document.dangling_fragment",
         "opf.content_document.duplicate_id",
         "opf.content_document.empty_title",
         "opf.content_document.invalid_content_type_meta",
@@ -4384,6 +4386,278 @@ fn ncx_src_wrong_path(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
     fixes
 }
 
+/// `RSC-012` / `opf.content_document.dangling_fragment`: a link's `#fragment` is
+/// not defined in the document the link resolves to, but **exactly one** entry in
+/// the container does define it — the fragment did not die, it moved.
+///
+/// On the corpus this is an editor splitting a file at a page break: a footnote
+/// link and its return link were left as bare `#frag`s pointing into the wrong
+/// half. The repair writes the path in front of the fragment, relative to the
+/// referring document, and touches nothing else.
+///
+/// **Third member of the family beside [`reference_wrong_path`] and
+/// [`ncx_src_wrong_path`]**, sharing [`relative_path`] and the
+/// whole-quoted-attribute discipline. It cannot share [`repointed_reference`]:
+/// those two ask *which entry carries this basename*, this one asks *which entry
+/// defines this id*. Same discipline — exactly one answer or decline.
+///
+/// **`params[1]` is evidence, never a needle.** It is the target resolved and
+/// NFC-normalised, so it is not a string the referring document contains; the
+/// document holds a relative href. `params[0]`, the fragment, is the findable
+/// half, and the reference is located by its attribute value's fragment.
+///
+/// **The home may be the referring document itself** (2 of 22 on the shelf), and
+/// then the repair is a bare `#fragment` rather than a path to the document's own
+/// name — same-document is what a bare fragment means.
+///
+/// **Declines**, every one of them measured (`frag_spec.rs`, 474 books): several
+/// entries define the id (71 findings / 8 books — which one it meant is a guess);
+/// the id is nowhere in the book (109 / 19 — only "drop the fragment" is
+/// available, and that loses the author's target); the home is outside the
+/// spine (0 of 22 here, and written anyway — repointing at a document outside
+/// the reading order trades this finding for `hyperlink_target_not_in_spine`,
+/// and a file the manifest never declared cannot be in the spine either); the
+/// reference is not visible as a whole quoted attribute value (0 of 22).
+fn fragment_wrong_path(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    // referring document -> the fragments epubveri flagged in it
+    let mut by_doc: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for m in &report.messages {
+        if m.rule != Some("opf.content_document.dangling_fragment") {
+            continue;
+        }
+        let (Some(doc), Some(frag)) = (m.location.as_deref(), m.params.first()) else {
+            continue;
+        };
+        if frag.is_empty() {
+            continue;
+        }
+        by_doc
+            .entry(doc.to_string())
+            .or_default()
+            .insert(frag.clone());
+    }
+    if by_doc.is_empty() {
+        return Vec::new();
+    }
+
+    let Some(opf_path) = opf_path(ws) else {
+        return Vec::new();
+    };
+    let Some(opf) = ws.get_text(&opf_path) else {
+        return Vec::new();
+    };
+    let in_spine = spine_paths(&opf, &dir_of(&opf_path));
+
+    let mut fixes = Vec::new();
+    for (doc, frags) in by_doc {
+        let Some(text) = ws.get_text(&doc) else {
+            continue;
+        };
+        let mut repoints: Vec<(String, String, String)> = Vec::new(); // (frag, from, to)
+        for frag in &frags {
+            let Some(home) = sole_id_home(ws, frag) else {
+                continue;
+            };
+            if !in_spine.contains(&home) {
+                continue;
+            }
+            let replacement = if home == doc {
+                format!("#{frag}")
+            } else {
+                let Some(rel) = relative_path(&doc, &home) else {
+                    continue;
+                };
+                format!("{rel}#{frag}")
+            };
+            for from in references_to_fragment(&text, frag) {
+                if from == replacement {
+                    continue; // already says what we would write
+                }
+                repoints.push((frag.clone(), from, replacement.clone()));
+            }
+        }
+        if repoints.is_empty() {
+            continue;
+        }
+
+        let n = repoints.len();
+        let preview: Vec<Change> = repoints
+            .iter()
+            .take(6)
+            .map(|(_, from, to)| Change {
+                path: doc.clone(),
+                note: format!("repoint {from} → {to}"),
+            })
+            .collect();
+        let doc_for_apply = doc.clone();
+        let repoints_for_apply = repoints.clone();
+
+        fixes.push(ProposedFix {
+            fix_id: "fix.fragment_wrong_path",
+            addresses_id: "RSC-012".to_string(),
+            addresses_rule: Some("opf.content_document.dangling_fragment"),
+            addresses_severity: addressed_severity(
+                report,
+                "RSC-012",
+                Some("opf.content_document.dangling_fragment"),
+            ),
+            tier: Tier::ConfirmNeeded,
+            title: format!(
+                "Repoint {n} moved fragment{} in {doc}",
+                if n == 1 { "" } else { "s" }
+            ),
+            rationale:
+                "These links name an anchor the book still contains, in a document other than the \
+                 one the link points at — the file was split after it was written, and the anchor \
+                 stayed on one side while the link stayed on the other. Exactly one document \
+                 defines each anchor, so the target is not a guess; it is a manifest item and part \
+                 of the reading order, so the repair cannot trade this defect for another. Only \
+                 the path in front of the fragment is written, and where the anchor turns out to \
+                 be in this very document the link becomes a plain same-document fragment. An \
+                 anchor defined in several documents, or in none, is left alone."
+                    .to_string(),
+            preview,
+            apply_fn: Box::new(move |ws: &mut Workspace| {
+                if let Some(text) = ws.get_text(&doc_for_apply) {
+                    let mut edits = Vec::new();
+                    for (_, from, to) in &repoints_for_apply {
+                        for span in quoted_attr_spans(&text, from) {
+                            edits.push(MetaEdit {
+                                range: span,
+                                replacement: to.clone(),
+                            });
+                        }
+                    }
+                    ws.set_text(&doc_for_apply, apply_edits(&text, edits));
+                }
+            }),
+        });
+    }
+    fixes
+}
+
+/// The container entry paths the spine puts in the reading order.
+///
+/// **This subsumes "is it a manifest item".** The set is built by resolving each
+/// `<itemref idref>` through the manifest, so a path can only be in it if an
+/// `<item>` declared it — a separate manifest check cannot fire and was deleted
+/// rather than kept as decoration. Mutation-testing is what found it: removing
+/// the manifest half of the condition broke no test, because no container entry
+/// can be outside the manifest and inside the spine.
+fn spine_paths(opf: &str, base: &str) -> BTreeSet<String> {
+    let Some(doc) = parse_xml(opf) else {
+        return BTreeSet::new();
+    };
+    let by_id: BTreeMap<String, String> = doc
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "item")
+        .filter_map(|n| {
+            Some((
+                n.attr_no_ns("id")?.to_string(),
+                resolve_href(base, n.attr_no_ns("href")?),
+            ))
+        })
+        .collect();
+    spine_itemrefs(&doc)
+        .iter()
+        .filter_map(|n| n.attr_no_ns("idref"))
+        .filter_map(|id| by_id.get(id).cloned())
+        .collect()
+}
+
+/// The one container entry defining `frag` as an anchor, or `None` when several
+/// do or none does.
+///
+/// Matches the same four spellings [`repointed_reference`] accepts — `id` and the
+/// legacy `name`, either quoting — because those are the two attributes a
+/// fragment can address in the documents this corpus holds.
+fn sole_id_home(ws: &Workspace, frag: &str) -> Option<String> {
+    let anchored = [
+        format!("id=\"{frag}\""),
+        format!("id='{frag}'"),
+        format!("name=\"{frag}\""),
+        format!("name='{frag}'"),
+    ];
+    let mut home = None;
+    for name in ws.names() {
+        if !is_markup_entry(name) {
+            continue;
+        }
+        let Some(text) = ws.get_text(name) else {
+            continue;
+        };
+        if anchored.iter().any(|a| text.contains(a.as_str())) {
+            if home.is_some() {
+                return None; // several documents define it — which one is a guess
+            }
+            home = Some(name.clone());
+        }
+    }
+    home
+}
+
+/// Whether `name` is an entry this project will search for an anchor: a content
+/// document or an SVG. Deliberately extension-based — the manifest's media type
+/// is the authority elsewhere, but here a false negative only costs a decline.
+fn is_markup_entry(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    [".xhtml", ".html", ".htm", ".xht", ".svg"]
+        .iter()
+        .any(|e| lower.ends_with(e))
+}
+
+/// Every whole quoted attribute value in `text` whose fragment is exactly
+/// `frag`, deduplicated and in document order.
+///
+/// A value carrying `%` or a scheme is skipped: a percent-encoded path is not
+/// ours to rewrite, and a fragment on an absolute URL is not this finding.
+fn references_to_fragment(text: &str, frag: &str) -> Vec<String> {
+    let suffix = format!("#{frag}");
+    let mut out: Vec<String> = Vec::new();
+    for quote in ['"', '\''] {
+        let open = format!("={quote}");
+        let mut from = 0usize;
+        while let Some(at) = text[from..].find(open.as_str()) {
+            let start = from + at + 2;
+            let Some(end_rel) = text[start..].find(quote) else {
+                break;
+            };
+            let value = &text[start..start + end_rel];
+            from = start + end_rel;
+            if value.ends_with(suffix.as_str())
+                && !value.contains('%')
+                && !value.contains(':')
+                && !out.iter().any(|v| v == value)
+            {
+                out.push(value.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// **Every** span where `value` is a whole quoted attribute value, not just the
+/// first.
+///
+/// [`quoted_attr_span`] returns one span, which is right for its callers — they
+/// rewrite a path that appears once. A moved fragment does not: the same
+/// `#frag` is routinely linked from two places in one document, and rewriting
+/// only the first would leave the second dangling and the finding standing.
+fn quoted_attr_spans(text: &str, value: &str) -> Vec<Range<usize>> {
+    let mut out = Vec::new();
+    for quote in ['"', '\''] {
+        let needle = format!("={quote}{value}{quote}");
+        let mut from = 0usize;
+        while let Some(at) = text[from..].find(needle.as_str()) {
+            let start = from + at + 2;
+            out.push(start..start + value.len());
+            from = start + value.len();
+        }
+    }
+    out.sort_by_key(|r| r.start);
+    out
+}
+
 fn repointed_reference(ws: &Workspace, names: &[String], doc: &str, raw: &str) -> Option<String> {
     let (path, fragment) = match raw.split_once('#') {
         Some((p, f)) => (p, Some(f)),
@@ -6945,6 +7219,227 @@ mod tests {
         // The finding named only `properties`, so the spine attribute is not
         // touched even though it would qualify.
         assert_eq!(droppable(&opf, &["properties"]), vec!["properties"]);
+    }
+
+    // ---- fix.fragment_wrong_path --------------------------------------
+
+    const MOVED_FRAG_OPF: &str = r##"<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="i">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="i">u</dc:identifier></metadata>
+  <manifest>
+    <item id="a" href="Text/a.xhtml" media-type="application/xhtml+xml"/>
+    <item id="b" href="Text/b.xhtml" media-type="application/xhtml+xml"/>
+    <item id="c" href="Text/c.xhtml" media-type="application/xhtml+xml"/>
+    <item id="off" href="Text/off.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine><itemref idref="a"/><itemref idref="b"/><itemref idref="c"/></spine>
+</package>"##;
+
+    const MOVED_FRAG_CONTAINER: &str = r##"<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"##;
+
+    /// The fixture container. `bodies` names the body of any of five documents;
+    /// anything left out gets an inert paragraph.
+    ///
+    /// The five are the guards made visible: **`a`** refers, **`b`** and **`c`**
+    /// are ordinary spine documents (so an anchor in both is ambiguous for no
+    /// other reason than being in both), **`off`** is a manifest item the spine
+    /// leaves out, and **`nodecl`** is in the container and absent from the
+    /// manifest. Each decline therefore has a document that triggers it and
+    /// nothing else.
+    fn frag_ws(bodies: &[(&str, &str)]) -> Workspace {
+        let body_of = |n: &str| {
+            bodies
+                .iter()
+                .find(|(k, _)| *k == n)
+                .map(|(_, v)| *v)
+                .unwrap_or("<p>inert</p>")
+        };
+        let doc = |body: &str| {
+            format!(
+                r##"<?xml version="1.0" encoding="utf-8"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>t</title></head><body>{body}</body></html>"##
+            )
+        };
+        container(&[
+            ("META-INF/container.xml", MOVED_FRAG_CONTAINER),
+            ("content.opf", MOVED_FRAG_OPF),
+            ("Text/a.xhtml", &doc(body_of("a"))),
+            ("Text/b.xhtml", &doc(body_of("b"))),
+            ("Text/c.xhtml", &doc(body_of("c"))),
+            ("Text/off.xhtml", &doc(body_of("off"))),
+            ("Text/nodecl.xhtml", &doc(body_of("nodecl"))),
+        ])
+    }
+
+    fn frag_report(doc: &str, frags: &[&str]) -> Report {
+        let mut r = Report::default();
+        for f in frags {
+            let mut m = fixture("RSC-012", "opf.content_document.dangling_fragment");
+            m.location = Some(doc.to_string());
+            m.params = vec![f.to_string(), "Text/a.xhtml".to_string()];
+            r.messages.push(m);
+        }
+        r
+    }
+
+    fn frag_applied(ws: &mut Workspace, report: &Report, doc: &str) -> Option<String> {
+        let fix = fragment_wrong_path(report, ws).into_iter().next()?;
+        fix.apply(ws);
+        ws.get_text(doc)
+    }
+
+    fn frag_declines(ws: &Workspace, frag: &str) -> bool {
+        fragment_wrong_path(&frag_report("Text/a.xhtml", &[frag]), ws).is_empty()
+    }
+
+    /// The determinate case: the anchor is in exactly one other document, so the
+    /// path is written in front of the fragment.
+    #[test]
+    fn a_moved_fragment_gets_the_path_of_the_document_that_defines_it() {
+        let mut ws = frag_ws(&[
+            ("a", r##"<a href="#moved">x</a>"##),
+            ("b", r##"<p id="moved">y</p>"##),
+        ]);
+        let out = frag_applied(
+            &mut ws,
+            &frag_report("Text/a.xhtml", &["moved"]),
+            "Text/a.xhtml",
+        )
+        .expect("a determinate moved fragment must be proposed");
+        assert!(out.contains(r##"href="b.xhtml#moved""##), "got: {out}");
+    }
+
+    /// The anchor turns out to be in the referring document itself, which is
+    /// what a bare `#fragment` says. Two of the shelf's twenty-two are this.
+    #[test]
+    fn a_fragment_whose_anchor_is_here_becomes_a_bare_fragment() {
+        let mut ws = frag_ws(&[("a", r##"<a href="b.xhtml#here">x</a><p id="here">y</p>"##)]);
+        let out = frag_applied(
+            &mut ws,
+            &frag_report("Text/a.xhtml", &["here"]),
+            "Text/a.xhtml",
+        )
+        .expect("a same-document anchor must be proposed");
+        assert!(out.contains(r##"href="#here""##), "got: {out}");
+        assert!(!out.contains("b.xhtml#here"), "got: {out}");
+    }
+
+    /// **Every** occurrence is rewritten, not the first. The same footnote is
+    /// routinely linked twice in one document, and leaving the second behind
+    /// would leave the finding standing.
+    #[test]
+    fn every_occurrence_of_a_moved_fragment_is_rewritten() {
+        let mut ws = frag_ws(&[
+            ("a", r##"<a href="#moved">x</a><a href="#moved">again</a>"##),
+            ("b", r##"<p id="moved">y</p>"##),
+        ]);
+        let out = frag_applied(
+            &mut ws,
+            &frag_report("Text/a.xhtml", &["moved"]),
+            "Text/a.xhtml",
+        )
+        .expect("must be proposed");
+        assert_eq!(
+            out.matches(r##"href="b.xhtml#moved""##).count(),
+            2,
+            "got: {out}"
+        );
+        assert!(!out.contains(r##"href="#moved""##), "got: {out}");
+    }
+
+    /// Two documents define the anchor and **both are ordinary spine
+    /// documents**, so uniqueness is the only thing that can decline it. The
+    /// first version of this test used the out-of-spine document as the second
+    /// definition, and passed with the uniqueness guard deleted.
+    #[test]
+    fn a_fragment_defined_twice_is_declined() {
+        let ws = frag_ws(&[
+            ("a", r##"<a href="#moved">x</a>"##),
+            ("b", r##"<p id="moved">y</p>"##),
+            ("c", r##"<p id="moved">z</p>"##),
+        ]);
+        assert!(frag_declines(&ws, "moved"));
+    }
+
+    /// The anchor is nowhere: only "drop the fragment" is available, and that
+    /// loses the author's target.
+    #[test]
+    fn a_fragment_defined_nowhere_is_declined() {
+        let ws = frag_ws(&[("a", r##"<a href="#gone">x</a>"##)]);
+        assert!(frag_declines(&ws, "gone"));
+    }
+
+    /// The anchor lives in a manifest item the spine leaves out. Repointing
+    /// there would clear this finding and author `hyperlink_target_not_in_spine`
+    /// in its place — the `fix.content_properties` trade, one rule over.
+    #[test]
+    fn a_target_outside_the_reading_order_is_declined() {
+        let ws = frag_ws(&[
+            ("a", r##"<a href="#moved">x</a>"##),
+            ("off", r##"<p id="moved">z</p>"##),
+        ]);
+        assert!(frag_declines(&ws, "moved"));
+    }
+
+    /// The anchor lives in a file the container holds and the manifest never
+    /// declares. It is declined by the spine check, which is the point: an
+    /// undeclared entry cannot be in the reading order, so one guard covers
+    /// both faults and a second would be unreachable.
+    #[test]
+    fn a_target_the_manifest_does_not_declare_is_declined() {
+        let ws = frag_ws(&[
+            ("a", r##"<a href="#moved">x</a>"##),
+            ("nodecl", r##"<p id="moved">z</p>"##),
+        ]);
+        assert!(frag_declines(&ws, "moved"));
+    }
+
+    /// The legacy `<a name>` anchor counts, as it does for the sibling fixers.
+    #[test]
+    fn a_legacy_name_anchor_is_a_home() {
+        let mut ws = frag_ws(&[
+            ("a", r##"<a href="#old">x</a>"##),
+            ("b", r##"<a name="old">y</a>"##),
+        ]);
+        let out = frag_applied(
+            &mut ws,
+            &frag_report("Text/a.xhtml", &["old"]),
+            "Text/a.xhtml",
+        )
+        .expect("a legacy name anchor must count as a definition");
+        assert!(out.contains(r##"href="b.xhtml#old""##), "got: {out}");
+    }
+
+    /// An absolute URL carrying the same fragment is not this finding and is
+    /// never rewritten.
+    #[test]
+    fn an_external_url_with_the_same_fragment_is_left_alone() {
+        assert!(
+            references_to_fragment(r##"<a href="https://x.example/p#moved">x</a>"##, "moved")
+                .is_empty()
+        );
+        assert_eq!(
+            references_to_fragment(r##"<a href="c.xhtml#moved">x</a>"##, "moved"),
+            vec!["c.xhtml#moved".to_string()]
+        );
+    }
+
+    /// A fragment is matched whole: `#note1` is not a reference to `#note`.
+    #[test]
+    fn a_fragment_is_matched_whole() {
+        assert!(references_to_fragment(r##"<a href="c.xhtml#note1">x</a>"##, "note").is_empty());
+    }
+
+    /// The spine set is read through `idref`: a manifest item no `<itemref>`
+    /// names is outside it, and so is a container entry the manifest never
+    /// declared.
+    #[test]
+    fn the_spine_set_holds_only_documents_the_reading_order_names() {
+        let spine = spine_paths(MOVED_FRAG_OPF, "");
+        // declared, but no `<itemref>` names it
+        assert!(!spine.contains("Text/off.xhtml"));
+        // in the container, never declared — so it cannot reach the spine
+        assert!(!spine.contains("Text/nodecl.xhtml"));
+        assert!(spine.contains("Text/a.xhtml") && spine.contains("Text/b.xhtml"));
     }
 
     /// A container holding exactly the files given, so a cross-file rename can

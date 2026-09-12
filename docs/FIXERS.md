@@ -46,6 +46,7 @@ grows one carefully-argued entry at a time.
 | `RSC-007` | `opf.guide.reference_missing_resource` | ConfirmNeeded | A `<guide>` reference points at a resource that doesn't exist | [Drop the reference; drop the guide if it empties](#rsc-007--rsc-017--rsc-012--guide-references) |
 | `RSC-017` | `opf.guide.duplicate_reference` | ConfirmNeeded | Two `<guide>` references share a `type` and `href` | [Keep the first, drop the duplicates](#rsc-007--rsc-017--rsc-012--guide-references) |
 | `RSC-012` | `opf.guide.reference_fragment_not_defined` | ConfirmNeeded | A `<guide>` reference's `#fragment` resolves to no `id` in a target that does exist | [Drop the fragment, keep the document](#rsc-007--rsc-017--rsc-012--guide-references) |
+| `RSC-012` | `opf.content_document.dangling_fragment` | ConfirmNeeded | A link's `#fragment` is real but now lives in another document — an editor split the file | [Write the path in front of the fragment](#rsc-012--a-fragment-that-is-real-but-has-moved-to-another-document) |
 | `RSC-005` | `htm.obsolete_attribute` (`params[0] == "name"`) | AutoSafe | A legacy `<a name>` anchor duplicating the element's own `id` | [Drop the `name` attribute](#rsc-005--a-legacy-name-attribute-on-a) |
 | `RSC-005` | `opf.content_document.schema_violation` (empty `lang`/`xml:lang`) | ConfirmNeeded | An empty language tag, which EPUB 2's grammar does not allow | [Delete the attribute](#rsc-005--an-empty-lang--xmllang) |
 | `RSC-005` | `opf.content_document.schema_violation` (`params[0] == "id"`) | ConfirmNeeded | An `id` that is not a valid XML NCName (on the shelf: it starts with a digit) | [Rename it, moving every reference with it](#rsc-005--an-id-that-is-not-a-valid-ncname-the-first-cross-file-fixer) |
@@ -1879,6 +1880,74 @@ was nothing to repair toward and the rule was left alone. The shelf then grew to
 385 and produced one case with the determinate shape. The same thing happened to
 `opf.content_document.reference_missing_resource` on 2026-08-07. **Re-probe a
 closure when the corpus moves; a closure is a statement about the books you had.**
+
+---
+
+## RSC-012 — a fragment that is real but has moved to another document
+
+**Finding.** `opf.content_document.dangling_fragment`. A link's `#fragment` is
+not defined in the document the link resolves to. `params` carries
+`[fragment, resolved target]`.
+
+**Read `params[1]` as evidence, never as a needle.** It is the target
+*resolved* and NFC-normalised, so it is not a string the referring document
+contains — the document holds a relative href. `params[0]`, the fragment, is
+the findable half, and the reference is located by the attribute value ending
+in `#{fragment}`.
+
+**Fix** (`fix.fragment_wrong_path`, ConfirmNeeded). If **exactly one** container
+entry defines that id, write that entry's path in front of the fragment,
+relative to the referring document. When the id turns out to live in the
+referring document itself, write the bare `#fragment` instead of a path to the
+document's own name — same-document is what a bare fragment means, and it is
+the form an editor would have left.
+
+This is the third member of the family beside `fix.reference_wrong_path` and
+`fix.ncx_src_wrong_path`, and it **shares their machinery** — `relative_path`
+and `quoted_attr_span` — rather than re-deriving it. It cannot share
+`repointed_reference`: those two ask *which entry has this basename*, and this
+one asks *which entry defines this id*. Different question, same discipline —
+exactly one answer or decline.
+
+**What the corpus is.** An editor split a file at a page break and left a
+footnote link and its return link as bare `#frag`s pointing into the wrong half.
+Verified by hand in *Harika Piç*: `..._split_008.htm` links to `#bookmark1`
+while `bookmark1` now sits in `..._split_025.htm`, and `..._split_025.htm` links
+back to `#footnote1`, which stayed behind in `..._split_008.htm`.
+
+**Guards, and every one of them is a measurement rather than an argument**
+(`frag_spec.rs` / `frag_reprobe.rs`, 474 books, epubveri 0.14.3):
+
+| guard | why | what it declines here |
+| --- | --- | --- |
+| exactly one entry defines the id | several is a guess about the author's intent | 71 findings / 8 books |
+| the id exists somewhere in the book | nothing to repair toward; only "drop the fragment" is available, and that loses the author's target | 109 findings / 19 books |
+| the target is in the spine | epubveri 0.12/0.13 added `hyperlink_target_not_in_spine`; without this the repair could author it | 0 of 22 |
+| the reference is visible as a whole quoted attribute value | never rewrite from inside a longer string | 0 of 22 |
+
+**The last two decline nothing on this shelf, and they are still written.** That
+is the point of recording the number: a guard whose population is zero is
+carried by argument, and the argument is that each names a finding the repair
+would otherwise author. `fix.content_properties` is the standing reminder — it
+cleared an `OPF-014` and wrote an `RSC-005` in its place, at an error count that
+did not move.
+
+**There was a third, and mutation-testing deleted it.** A separate "is the
+target a manifest item" check read like safety and could never fire: the spine
+set is built by resolving each `<itemref idref>` through the manifest, so an
+undeclared entry cannot reach it. Removing that half of the condition broke no
+test — which is the correct answer, not a gap in the tests. Every other guard
+here fails a test when removed.
+
+**Measured population.** 22 findings / 6 books have the determinate shape,
+becoming **10 proposals** (one per document). 2 of the 22 take the bare
+`#fragment` form. Identical at 444 books and at 474, so the shape is the
+corpus's and not one book's.
+
+**Why it was not built sooner, which is the part worth keeping.** This rule was
+dismissed on 2026-08-12 with *"worth a probe, but it is seven findings"* —
+**by size, not by argument**, which is exactly the dismissal that a growing
+shelf turns into a mistake. It came back at 24 books / 201 findings.
 
 ---
 
