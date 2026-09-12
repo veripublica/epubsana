@@ -1,4 +1,4 @@
-//! epubsana's CLI, following the **veripublica CLI convention v0.4**
+//! epubsana's CLI, following the **veripublica CLI convention v0.5**
 //! (<https://github.com/veripublica/conventions>).
 //!
 //! epubsana is a *transformer*: it takes **exactly one** input, writes a
@@ -80,7 +80,7 @@ EXIT CODES:
         path that is the input, an existing output file without -f, an
         unanswerable prompt, or an I/O failure.
 
-Conforms to veripublica conventions v0.4.";
+Conforms to veripublica conventions v0.5.";
 
 /// The outcome of parsing `argv` — decided entirely before any work is done.
 #[derive(Debug, PartialEq)]

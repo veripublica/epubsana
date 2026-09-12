@@ -1,6 +1,6 @@
 //! epubsana's `--format json` — the veripublica machine envelope, built on
 //! **epubveri's reference types** ([`epubveri::envelope`], FORMATS.md
-//! convention v0.4).
+//! convention v0.5).
 //!
 //! The skeleton is not epubsana's: `Envelope`/`Input`/`Item` come from epubveri,
 //! generic over the two slots FORMATS.md §2 leaves to each tool — the `summary`
@@ -30,11 +30,12 @@ use crate::{ChangeReport, ReportedFix, Tier};
 /// the dependency cannot be mistaken for adopting a convention release, and
 /// epubveri now claims `"0.5"`.
 ///
-/// **Ours stays `"0.4"` until v0.5.0 is implemented here.** The outstanding
-/// piece is the missing `proposed` counter on [`Summary`] (and, under the wider
-/// reading of #30's rule 1, the three unreported severities beside it); claim
-/// `"0.5"` in the release that ships them, not before.
-const CONVENTION: &str = "0.4";
+/// **`"0.5"` since the release that shipped [`Summary`]'s seven missing
+/// counters** — `proposed`, and the three severities below `error` in both
+/// tenses. The key moves when this crate implements a convention release, never
+/// when the dependency does: it is an assertion about ourselves (FORMATS.md
+/// §1.1, settled by conventions on 2026-09-10).
+const CONVENTION: &str = "0.5";
 
 /// epubsana's `Outcome` in the envelope's vocabulary.
 ///
@@ -171,8 +172,28 @@ pub struct Summary {
     pub fatals_after: usize,
     pub errors_before: usize,
     pub errors_after: usize,
+    pub warnings_before: usize,
+    pub warnings_after: usize,
+    pub infos_before: usize,
+    pub infos_after: usize,
+    pub usages_before: usize,
+    pub usages_after: usize,
     pub applied: usize,
     pub skipped: usize,
+    /// Planned and neither applied nor declined. **Every member of `outcome`'s
+    /// closed set is counted, including zero** — a `--dry-run` used to report
+    /// `applied: 0, skipped: 0` while every item carried `"outcome":
+    /// "proposed"`, so the summary and the items disagreed about the size of
+    /// the run and every number in the document was true.
+    ///
+    /// The identity a consumer may rely on:
+    /// `applied + skipped + proposed == items.len()`.
+    ///
+    /// `reverted` is deliberately absent rather than zero: a build that cannot
+    /// revert has no concept of the value, and emitting `0` would claim no
+    /// revert happened where the truth is that none could (conventions #31,
+    /// held against epubsana#7).
+    pub proposed: usize,
     /// The bar this run was measured against: `valid` (the default — no error-
     /// and no fatal-severity findings remain) or `openable` (no fatals remain).
     /// Carried so `status: "ok"` is never read without it (CLI.md §6; a shared
@@ -187,8 +208,15 @@ impl Summary {
             fatals_after: report.fatals_after,
             errors_before: report.errors_before,
             errors_after: report.errors_after,
+            warnings_before: report.warnings_before,
+            warnings_after: report.warnings_after,
+            infos_before: report.infos_before,
+            infos_after: report.infos_after,
+            usages_before: report.usages_before,
+            usages_after: report.usages_after,
             applied: report.applied().count(),
             skipped: report.skipped().count(),
+            proposed: report.proposed().count(),
             goal: report.goal.as_str(),
         }
     }
@@ -236,4 +264,183 @@ pub struct ChangeItem {
     pub path: String,
     /// Human description of the edit, e.g. "replace `&mdash;` → `—` (88×)".
     pub note: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Confirmer, Decision, Goal, Policy, ProposedFix, Workspace, repair};
+    use std::io::{Cursor, Write};
+    use zip::write::SimpleFileOptions;
+    use zip::{CompressionMethod, ZipWriter};
+
+    /// A small EPUB 3 carrying one `error` and two `usage` findings, one of
+    /// each reachable by a fixer.
+    ///
+    /// The two severities are the point. `PKG-006` moves the error line;
+    /// `OPF-090` (a non-preferred font media type) is repaired without moving
+    /// it at all, which is exactly the work a summary reporting only fatals and
+    /// errors describes as nothing. A fixture with errors alone would let every
+    /// assertion below pass while the new counters stayed dead.
+    fn fixture_epub() -> Vec<u8> {
+        const OPF: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="bookid">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:identifier id="bookid">urn:uuid:11111111-2222-3333-4444-555555555555</dc:identifier>
+    <dc:title>Fixture</dc:title>
+    <dc:language>en</dc:language>
+    <meta property="dcterms:modified">2026-01-01T00:00:00Z</meta>
+  </metadata>
+  <manifest>
+    <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+    <item id="c1" href="c1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="f1" href="f.ttf" media-type="application/x-font-ttf"/>
+  </manifest>
+  <spine><itemref idref="c1"/></spine>
+</package>
+"#;
+        const NAV: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><head><title>nav</title></head>
+<body><nav epub:type="toc"><ol><li><a href="c1.xhtml">One</a></li></ol></nav></body></html>
+"#;
+        const DOC: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml"><head><title>One</title></head><body><p>Hello</p></body></html>
+"#;
+        const CONTAINER: &str = r#"<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#;
+
+        let mut buf = Vec::new();
+        {
+            let mut zip = ZipWriter::new(Cursor::new(&mut buf));
+            let stored = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+            let deflated =
+                SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+            zip.start_file("META-INF/container.xml", stored).unwrap();
+            zip.write_all(CONTAINER.as_bytes()).unwrap();
+            // `mimetype` neither first nor stored: PKG-006, the error half.
+            zip.start_file("mimetype", deflated).unwrap();
+            zip.write_all(b"application/epub+zip").unwrap();
+            zip.start_file("content.opf", stored).unwrap();
+            zip.write_all(OPF.as_bytes()).unwrap();
+            zip.start_file("nav.xhtml", stored).unwrap();
+            zip.write_all(NAV.as_bytes()).unwrap();
+            zip.start_file("c1.xhtml", stored).unwrap();
+            zip.write_all(DOC.as_bytes()).unwrap();
+            // A `glyf` sfnt, so the declared type is non-preferred rather than wrong.
+            zip.start_file("f.ttf", stored).unwrap();
+            zip.write_all(&[0x00, 0x01, 0x00, 0x00]).unwrap();
+            zip.write_all(&[0u8; 60]).unwrap();
+            zip.finish().unwrap();
+        }
+        buf
+    }
+
+    struct ApproveAll;
+    impl Confirmer for ApproveAll {
+        fn decide(&mut self, _: &ProposedFix) -> Decision {
+            Decision::Approve
+        }
+    }
+
+    struct RejectAll;
+    impl Confirmer for RejectAll {
+        fn decide(&mut self, _: &ProposedFix) -> Decision {
+            Decision::Reject
+        }
+    }
+
+    fn summary_of(policy: Policy, confirmer: &mut dyn Confirmer) -> (Summary, usize) {
+        let mut ws = Workspace::load(&fixture_epub()).unwrap();
+        let report = repair(&mut ws, Goal::Valid, policy, confirmer).unwrap();
+        let n = report.fixes.len();
+        (Summary::of(&report), n)
+    }
+
+    /// **The identity a consumer is invited to rely on**, across all three run
+    /// shapes. It is the whole point of adding `proposed`: before it, a
+    /// `--dry-run` reported `applied: 0, skipped: 0` beside a non-empty `items`,
+    /// so this sum was short by exactly the proposals.
+    #[test]
+    fn applied_skipped_and_proposed_account_for_every_item() {
+        for (policy, confirmer) in [
+            (Policy::DryRun, &mut ApproveAll as &mut dyn Confirmer),
+            (Policy::AskEach, &mut ApproveAll),
+            (Policy::AskEach, &mut RejectAll),
+        ] {
+            let (s, items) = summary_of(policy, confirmer);
+            assert!(items > 0, "the fixture must plan something to count");
+            assert_eq!(
+                s.applied + s.skipped + s.proposed,
+                items,
+                "summary and items disagree about the size of the run"
+            );
+        }
+    }
+
+    /// A dry run proposes and neither applies nor declines — the exact shape
+    /// that used to report two zeroes and say nothing about the rest.
+    #[test]
+    fn a_dry_run_counts_its_proposals() {
+        let (s, items) = summary_of(Policy::DryRun, &mut ApproveAll);
+        assert_eq!(s.proposed, items);
+        assert_eq!((s.applied, s.skipped), (0, 0));
+    }
+
+    /// Every severity is reported in both tenses, not just the two the verdict
+    /// is computed from. The fixture's own `usage` findings are the witness:
+    /// the check would pass vacuously against a book that had none.
+    #[test]
+    fn all_five_severities_are_reported_in_both_tenses() {
+        let mut ws = Workspace::load(&fixture_epub()).unwrap();
+        let report = repair(&mut ws, Goal::Valid, Policy::DryRun, &mut RejectAll).unwrap();
+        let s = Summary::of(&report);
+
+        assert_eq!(s.fatals_before, report.before.fatals());
+        assert_eq!(s.errors_before, report.before.errors());
+        assert_eq!(s.warnings_before, report.before.warnings());
+        assert_eq!(s.infos_before, report.before.infos());
+        assert_eq!(s.usages_before, report.before.usages());
+
+        assert!(
+            s.usages_before > 0,
+            "fixture carries no finding below `error`, so this test proves nothing"
+        );
+        // A declined dry run writes nothing, so every `after` equals its `before`.
+        assert_eq!(
+            (s.warnings_after, s.infos_after, s.usages_after),
+            (s.warnings_before, s.infos_before, s.usages_before)
+        );
+    }
+
+    /// A repair the error line reports as nothing still shows in the summary.
+    ///
+    /// This is the measured reason rule 1 was read the wider way here rather
+    /// than stopping at `proposed`: `fix.non_preferred_media_type` clears a
+    /// `usage` finding and moves neither `errors_*` nor `fatals_*`, and three
+    /// fixers in this crate are of that kind. Before these fields the document
+    /// described that work as no change at all.
+    #[test]
+    fn a_usage_only_repair_is_visible_in_the_summary() {
+        let mut ws = Workspace::load(&fixture_epub()).unwrap();
+        let report = repair(&mut ws, Goal::Valid, Policy::AskEach, &mut ApproveAll).unwrap();
+        let s = Summary::of(&report);
+
+        assert!(
+            report
+                .applied()
+                .any(|f| f.fix_id == "fix.non_preferred_media_type"),
+            "the usage-severity fixer did not run, so this test proves nothing"
+        );
+        assert!(
+            s.usages_after < s.usages_before,
+            "a cleared usage finding left the summary unchanged"
+        );
+    }
+
+    /// The stability key is an assertion about **this** crate, so it moves when
+    /// epubsana implements a convention release and never when the dependency
+    /// does. Pinned so a dependency bump cannot quietly carry it.
+    #[test]
+    fn the_convention_key_is_our_own() {
+        assert_eq!(CONVENTION, "0.5");
+    }
 }

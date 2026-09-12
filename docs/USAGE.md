@@ -96,14 +96,14 @@ CLI, the in-browser WASM demo, and library consumers such as epublift):
 4. **Confirm** — you decide, per fix, whether to apply it. Nothing mutates
    without your approval (subject to the [policy](#cli-reference) you choose).
 5. **Report** — the run ends with a record of what became of every proposed fix
-   (applied, skipped, or — in a dry run — merely proposed), the fatal and error
-   counts before vs. after, and whether the goal was met.
+   (applied, skipped, or — in a dry run — merely proposed), the finding counts
+   at every severity before vs. after, and whether the goal was met.
 
 ---
 
 ## CLI reference
 
-epubsana conforms to the **[veripublica CLI convention v0.4](https://github.com/veripublica/conventions/blob/main/CLI.md)**,
+epubsana conforms to the **[veripublica CLI convention v0.5](https://github.com/veripublica/conventions/blob/main/CLI.md)**,
 so its flags, output naming, and exit codes match the other veripublica tools.
 
 ```
@@ -515,7 +515,7 @@ reads both:
 {
   "tool": "epubsana",
   "tool_version": "0.3.1",
-  "convention": "0.4",
+  "convention": "0.5",
   "status": "problems",
   "inputs": [
     {
@@ -525,7 +525,10 @@ reads both:
       "summary": {
         "fatals_before": 774, "fatals_after": 0,
         "errors_before": 5, "errors_after": 4,
-        "applied": 2, "skipped": 0, "goal": "valid"
+        "warnings_before": 1, "warnings_after": 1,
+        "infos_before": 0, "infos_after": 0,
+        "usages_before": 3, "usages_after": 2,
+        "applied": 2, "skipped": 0, "proposed": 0, "goal": "valid"
       },
       "items": [
         {
@@ -546,6 +549,17 @@ reads both:
   ]
 }
 ```
+
+The `summary` reports **every member of a set it has a concept of**, including
+zero. That is why `proposed` sits beside `applied` and `skipped`, and why all
+five severities appear in both tenses rather than only the two the verdict is
+computed from — some fixes clear a `usage` or `warning` finding and move the
+error line not at all. A consumer may rely on
+`applied + skipped + proposed == items.length`.
+
+(`reverted` is deliberately absent rather than zero: this build cannot revert a
+fix, so it has no concept of the value, and `0` would claim no revert happened
+where the truth is that none could.)
 
 Two fields carry epubsana's half of the contract:
 

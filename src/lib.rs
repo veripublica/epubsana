@@ -253,6 +253,25 @@ pub struct ChangeReport {
     pub fatals_after: usize,
     pub errors_before: usize,
     pub errors_after: usize,
+    /// The three severities below `error`, in both tenses.
+    ///
+    /// They are here because the counts a repairer reports are a **closed set
+    /// the tool has a concept of**, and reporting two of its five members makes
+    /// the document say less than it knows (conventions #30, rule 1, read the
+    /// wider way on this project's own catch). It is not a hypothetical gap:
+    /// three fixers here dispatch on `usage`/`warning` findings, so a run can
+    /// clear real work and leave `errors_before`/`errors_after` unmoved — the
+    /// value metric is *user burden reduced*, and the error line is a verdict
+    /// metric, not a value one.
+    ///
+    /// Cheap by construction: [`repair`] already re-validates to compute the
+    /// error and fatal deltas, and used to drop every other count on the floor.
+    pub warnings_before: usize,
+    pub warnings_after: usize,
+    pub infos_before: usize,
+    pub infos_after: usize,
+    pub usages_before: usize,
+    pub usages_after: usize,
     /// The bar this run was measured against.
     pub goal: Goal,
     /// Whether the run's [`Goal`] was met by the re-validated result — the
@@ -267,6 +286,14 @@ impl ChangeReport {
 
     pub fn skipped(&self) -> impl Iterator<Item = &ReportedFix> {
         self.with_outcome(Outcome::Skipped)
+    }
+
+    /// Planned, shown, and neither applied nor declined — every fix of a
+    /// `--dry-run`, and the sibling `applied`/`skipped` were missing. Without
+    /// it a summary answers "how many fixes were there" with zero while the
+    /// items list two.
+    pub fn proposed(&self) -> impl Iterator<Item = &ReportedFix> {
+        self.with_outcome(Outcome::Proposed)
     }
 
     fn with_outcome(&self, outcome: Outcome) -> impl Iterator<Item = &ReportedFix> {
@@ -293,6 +320,8 @@ pub fn repair(
 ) -> Result<ChangeReport, Error> {
     let before = ws.detect()?;
     let (fatals_before, errors_before) = (before.fatals(), before.errors());
+    let (warnings_before, infos_before, usages_before) =
+        (before.warnings(), before.infos(), before.usages());
 
     let proposals = fixers::plan(&before, ws, goal);
     let mut fixes = Vec::new();
@@ -333,6 +362,12 @@ pub fn repair(
         fatals_after: after.fatals(),
         errors_before,
         errors_after: after.errors(),
+        warnings_before,
+        warnings_after: after.warnings(),
+        infos_before,
+        infos_after: after.infos(),
+        usages_before,
+        usages_after: after.usages(),
         goal,
         goal_met: goal.is_met(&after),
     })

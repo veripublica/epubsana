@@ -110,8 +110,22 @@ pub struct Summary {
     pub fatals_after: usize,
     pub errors_before: usize,
     pub errors_after: usize,
+    pub warnings_before: usize,
+    pub warnings_after: usize,
+    pub infos_before: usize,
+    pub infos_after: usize,
+    pub usages_before: usize,
+    pub usages_after: usize,
     pub applied: usize,
     pub skipped: usize,
+    /// Planned and neither applied nor declined — in this binding, every fix
+    /// the page has not approved yet. Counted because `outcome` is a closed set
+    /// and a summary that reports two of its three members disagrees with its
+    /// own `items` (conventions #30, rule 1).
+    ///
+    /// `applied + skipped + proposed == items.len()` holds here too, with
+    /// `skipped` always zero.
+    pub proposed: usize,
     /// The bar this result was measured against: `"valid"` or `"openable"`.
     pub goal: String,
 }
@@ -183,6 +197,8 @@ pub struct Session {
     fatals_before: usize,
     errors_before: usize,
     warnings_before: usize,
+    infos_before: usize,
+    usages_before: usize,
 }
 
 /// The envelope fields of a planned fix that the JS-facing [`Fix`] does not
@@ -221,6 +237,8 @@ impl Session {
             fatals_before: report.fatals(),
             errors_before: report.errors(),
             warnings_before: report.warnings(),
+            infos_before: report.infos(),
+            usages_before: report.usages(),
         })
     }
 
@@ -322,8 +340,15 @@ impl Session {
                 fatals_after: after.fatals(),
                 errors_before: self.errors_before,
                 errors_after: after.errors(),
+                warnings_before: self.warnings_before,
+                warnings_after: after.warnings(),
+                infos_before: self.infos_before,
+                infos_after: after.infos(),
+                usages_before: self.usages_before,
+                usages_after: after.usages(),
                 applied,
                 skipped: 0, // the browser never declines: an unapplied fix stays proposed
+                proposed: self.fixes.iter().filter(|f| f.is_some()).count(),
                 goal: goal.as_str().to_string(),
             },
             items,

@@ -10,7 +10,34 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`--format json`'s `summary` reports every counter it has a concept of.**
+  Seven fields appear: `proposed`, and `warnings_before`/`warnings_after`,
+  `infos_before`/`infos_after`, `usages_before`/`usages_after`.
+
+  Under `--dry-run` the summary used to say `applied: 0, skipped: 0` while every
+  item carried `"outcome": "proposed"` — so the summary and the items disagreed
+  about the size of the run, and a consumer asking the summary how many fixes
+  there were got zero while two sat in `items`. Every number was true and the
+  document misled. The identity a consumer may now rely on is
+  `applied + skipped + proposed == items.len()`.
+
+  The severity counters are the same defect one field over. Three fixers here
+  dispatch on `usage` or `warning` findings, so a run can clear real work while
+  `errors_before`/`errors_after` do not move at all — and the summary described
+  that as no change whatsoever. `reverted` stays absent rather than zero: a build
+  that cannot revert has no concept of the value, and `0` would claim no revert
+  happened where the truth is that none could.
+
+  The wasm binding's `Summary` gains the same seven fields, its `skipped`
+  remaining zero because the browser never declines.
+
 ### Changed
+
+- **The envelope claims convention `0.5`.** The stability key is an assertion
+  about this crate, not about its detector: it moves when epubsana implements a
+  convention release, and the seven counters above are that release.
 
 - **`fix.non_preferred_media_type` takes the replacement from the finding
   instead of from a table of its own.** epubveri has named the preferred media
