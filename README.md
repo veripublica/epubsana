@@ -13,7 +13,7 @@ changed**. It never guesses, and it preserves everything it doesn't touch.
 ## Status
 
 Early but working. The core contract (`Workspace` → detect → propose → confirm →
-apply → report) is solid, with thirty-six fixers so far:
+apply → report) is solid, with thirty-seven fixers so far:
 
 - **`RSC-016`** — undeclared HTML entities (`&nbsp;`, `&mdash;`, …) → the exact
   character each denotes.
@@ -118,6 +118,14 @@ apply → report) is solid, with thirty-six fixers so far:
   when the name matches nothing or several entries, when the fragment isn't in
   the target (that would trade one error for a broken link), and for external
   URLs or junk.
+- **`RSC-012` / a fragment that moved** — a link whose `#fragment` is real but
+  now lives in another document, because an editor split the file at a page
+  break and left a footnote link and its return link pointing into the wrong
+  half → the path of the document that defines the anchor is written in front of
+  the fragment. Where the anchor turns out to be in the referring document
+  itself, the link becomes a plain same-document `#fragment`. Declines an anchor
+  defined in several documents or in none, and a target outside the reading
+  order.
 - **`OPF-030` / `RSC-005` — a package identifier that resolves to nothing** —
   `unique-identifier` naming an id no `<dc:identifier>` carries, or naming one
   that's empty → the declared id is attached to the book's single real

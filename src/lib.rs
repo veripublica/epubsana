@@ -32,7 +32,7 @@ use epubveri::report::{Report, Severity};
 /// The crate version, carrying git build metadata (`+<short-hash>[.dirty]`) when
 /// built from a checkout — the one string the CLI's `-V`, the json envelope's
 /// `tool_version` and the wasm binding's `version()` all print (veripublica
-/// conventions v0.4, CLI.md §3.1). A build with no git (e.g. a crates.io
+/// conventions v0.5, CLI.md §3.1). A build with no git (e.g. a crates.io
 /// tarball) falls back silently to the plain SemVer, set by `build.rs`.
 pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), env!("EPUBSANA_BUILD"));
 
@@ -50,7 +50,7 @@ pub enum Tier {
 }
 
 /// What happened to a proposed fix — the shared item field the machine envelope
-/// requires on every `fix` (FORMATS.md §1.3, conventions v0.4, issue #25).
+/// requires on every `fix` (FORMATS.md §1.3, conventions v0.5, issue #25).
 ///
 /// A confirm-each-step repairer mixes these within one ordinary run, which is
 /// exactly why the fact is per-item and not a property of the run.
