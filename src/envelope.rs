@@ -1,6 +1,6 @@
 //! epubsana's `--format json` — the veripublica machine envelope, built on
 //! **epubveri's reference types** ([`epubveri::envelope`], FORMATS.md
-//! convention v0.5).
+//! convention v0.6).
 //!
 //! The skeleton is not epubsana's: `Envelope`/`Input`/`Item` come from epubveri,
 //! generic over the two slots FORMATS.md §2 leaves to each tool — the `summary`
@@ -30,12 +30,12 @@ use crate::{ChangeReport, ReportedFix, Tier};
 /// the dependency cannot be mistaken for adopting a convention release, and
 /// epubveri now claims `"0.5"`.
 ///
-/// **`"0.5"` since the release that shipped [`Summary`]'s seven missing
-/// counters** — `proposed`, and the three severities below `error` in both
-/// tenses. The key moves when this crate implements a convention release, never
+/// **`"0.6"` since 0.17.0, which emits `reverted`** (conventions v0.6.0, #31) —
+/// the release that added per-fix rollback. It was `"0.5"` from the release that
+/// shipped [`Summary`]'s seven missing counters. The key moves when this crate implements a convention release, never
 /// when the dependency does: it is an assertion about ourselves (FORMATS.md
 /// §1.1, settled by conventions on 2026-09-10).
-const CONVENTION: &str = "0.5";
+const CONVENTION: &str = "0.6";
 
 /// epubsana's `Outcome` in the envelope's vocabulary.
 ///
@@ -51,15 +51,7 @@ impl From<crate::Outcome> for epubveri::envelope::Outcome {
             crate::Outcome::Applied => epubveri::envelope::Outcome::Applied,
             crate::Outcome::Skipped => epubveri::envelope::Outcome::Skipped,
             crate::Outcome::Proposed => epubveri::envelope::Outcome::Proposed,
-            // conventions #31 accepted `reverted` and has not shipped its text;
-            // epubveri's type gains the member when it does. Until then the CLI
-            // refuses a json run that reverted anything *before writing the
-            // book* (`main.rs`), so this arm cannot be reached from it. Mapping
-            // to `Skipped` would tell the user they declined a fix they
-            // approved — the exact falsehood #31 exists to remove.
-            crate::Outcome::Reverted => unreachable!(
-                "a reverted fix cannot be expressed until the envelope's Outcome has `reverted`"
-            ),
+            crate::Outcome::Reverted => epubveri::envelope::Outcome::Reverted,
         }
     }
 }
@@ -451,6 +443,66 @@ pub(crate) mod tests {
     /// does. Pinned so a dependency bump cannot quietly carry it.
     #[test]
     fn the_convention_key_is_our_own() {
-        assert_eq!(CONVENTION, "0.5");
+        assert_eq!(CONVENTION, "0.6");
+    }
+
+    /// Every outcome the envelope can carry is one epubsana can produce.
+    ///
+    /// Our `From` is wildcard-free, so a member added on *our* side fails to
+    /// compile until it is mapped. This covers the other direction: a member
+    /// added to the convention reaches us through `epubveri::envelope::Outcome`
+    /// and compiles silently. `ALL` is the tripwire epubveri ships for exactly
+    /// this (0.17.0); a fifth value needs a decision here, not a new list entry.
+    #[test]
+    fn we_can_emit_every_outcome_the_envelope_defines() {
+        use epubveri::envelope::Outcome as Theirs;
+        let ours = [
+            crate::Outcome::Applied,
+            crate::Outcome::Skipped,
+            crate::Outcome::Proposed,
+            crate::Outcome::Reverted,
+        ];
+        for t in Theirs::ALL {
+            assert!(
+                ours.iter().any(|o| Theirs::from(*o) == *t),
+                "the envelope defines {t:?} and epubsana never emits it"
+            );
+        }
+    }
+
+    /// A reverted fix reaches the json as `"reverted"`, not as `"skipped"`,
+    /// and the summary still accounts for every item. Driven through a real
+    /// revert — a fix injected to damage the book — because the shelf never
+    /// produces one, so nothing else would exercise this path.
+    #[test]
+    fn a_reverted_fix_is_reported_as_reverted_in_the_envelope() {
+        let mut ws = Workspace::load(&fixture_epub()).unwrap();
+        let report = crate::repair_with(
+            &mut ws,
+            Goal::Valid,
+            Policy::AskEach,
+            &mut ApproveAll,
+            &crate::tests::good_bad_good,
+        )
+        .unwrap();
+        let env = envelope(input("in.epub".into(), None, &report), false);
+        let json: serde_json::Value = serde_json::to_value(&env).unwrap();
+        let input = &json["inputs"][0];
+        let outcomes: Vec<&str> = input["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["outcome"].as_str().unwrap())
+            .collect();
+        assert_eq!(outcomes, ["applied", "reverted", "applied"]);
+        let s = &input["summary"];
+        assert_eq!(s["reverted"], 1);
+        assert_eq!(
+            ["applied", "skipped", "proposed", "reverted"]
+                .iter()
+                .map(|k| s[k].as_u64().unwrap())
+                .sum::<u64>(),
+            outcomes.len() as u64
+        );
     }
 }

@@ -32,7 +32,7 @@ use epubveri::report::{Report, Severity};
 /// The crate version, carrying git build metadata (`+<short-hash>[.dirty]`) when
 /// built from a checkout — the one string the CLI's `-V`, the json envelope's
 /// `tool_version` and the wasm binding's `version()` all print (veripublica
-/// conventions v0.5, CLI.md §3.1). A build with no git (e.g. a crates.io
+/// conventions v0.6, CLI.md §3.1). A build with no git (e.g. a crates.io
 /// tarball) falls back silently to the plain SemVer, set by `build.rs`.
 pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), env!("EPUBSANA_BUILD"));
 
@@ -50,7 +50,7 @@ pub enum Tier {
 }
 
 /// What happened to a proposed fix — the shared item field the machine envelope
-/// requires on every `fix` (FORMATS.md §1.3, conventions v0.5, issue #25).
+/// requires on every `fix` (FORMATS.md §1.3, conventions v0.6, issues #25 and #31).
 ///
 /// A confirm-each-step repairer mixes these within one ordinary run, which is
 /// exactly why the fact is per-item and not a property of the run.
@@ -564,7 +564,7 @@ fn tally_at<'a>(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::io::{Cursor, Write};
     use zip::write::SimpleFileOptions;
@@ -666,7 +666,7 @@ mod tests {
     /// sits in the middle so the bisection has to find it rather than fall on
     /// an end, and the one after it proves a revert does not take its
     /// neighbours with it — the replay re-applies them.
-    fn good_bad_good(_: &Report, _: &Workspace, _: Goal) -> Vec<ProposedFix> {
+    pub(crate) fn good_bad_good(_: &Report, _: &Workspace, _: Goal) -> Vec<ProposedFix> {
         vec![
             fix("good.mimetype", "mimetype", |ws| ws.repackage_mimetype()),
             fix(

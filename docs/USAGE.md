@@ -95,15 +95,19 @@ CLI, the in-browser WASM demo, and library consumers such as epublift):
    exact edits. Findings epubsana can't safely fix are left alone.
 4. **Confirm** — you decide, per fix, whether to apply it. Nothing mutates
    without your approval (subject to the [policy](#cli-reference) you choose).
-5. **Report** — the run ends with a record of what became of every proposed fix
-   (applied, skipped, or — in a dry run — merely proposed), the finding counts
+5. **Check** — after the approved fixes are applied, the book is validated
+   again. If any kind of finding now occurs more often than before, epubsana
+   finds the fix responsible, undoes it and keeps the rest (see
+   [Reverted fixes](#reverted-fixes)).
+6. **Report** — the run ends with a record of what became of every proposed fix
+   (applied, skipped, reverted, or — in a dry run — merely proposed), the finding counts
    at every severity before vs. after, and whether the goal was met.
 
 ---
 
 ## CLI reference
 
-epubsana conforms to the **[veripublica CLI convention v0.5](https://github.com/veripublica/conventions/blob/main/CLI.md)**,
+epubsana conforms to the **[veripublica CLI convention v0.6](https://github.com/veripublica/conventions/blob/main/CLI.md)**,
 so its flags, output naming, and exit codes match the other veripublica tools.
 
 ```
@@ -205,6 +209,7 @@ untouched; the repaired copy is `book_fixed.epub`.
 | `WOULD APPLY` | Only appears under `--dry-run`. Nothing happened. |
 | `APPLIED` | This fix was made in the output file. |
 | `SKIPPED` | This fix was proposed and *not* made — you didn't select it, or you answered `n`. |
+| `REVERTED` | You approved this fix and epubsana made it, then undid it because it made the book worse. It is *not* in the output file. |
 
 #### Ways to name a fix
 
@@ -465,7 +470,36 @@ goal 'valid': NOT MET
 ```
 
 - Each fix line says what became of it: **APPLIED**, **SKIPPED** (you declined),
-  or **WOULD APPLY** (a `--dry-run`). The indented lines are its concrete edits.
+  **REVERTED** (you approved it, and epubsana undid it — see below), or
+  **WOULD APPLY** (a `--dry-run`). The indented lines are its concrete edits.
+
+#### Reverted fixes
+
+A fix is checked, not trusted. After the approved fixes are applied, epubveri
+validates the book again, and if any kind of finding (at any severity) now
+occurs more often than before, epubsana works out which fix caused it, undoes
+that one, keeps the others, and checks again. The undone fix is reported as
+`REVERTED` with the finding that rose. For example (an illustration of the
+format; this particular fix now declines on EPUB 2 books instead):
+
+```
+[3] REVERTED Declare the "remote-resources" property in the manifest item for OEBPS/chapter-2.xhtml
+    undone: applying it added a RSC-005 (opf.package.schema_violation) finding
+```
+
+It is never reported as `SKIPPED`: you did not decline it. The finding it was
+meant to repair stays unrepaired, and stays in the report.
+
+Two limits, stated plainly:
+
+- A fix that makes an unreadable document readable (by clearing an undeclared
+  entity, say) is **not** undone for the findings that then appear. They were
+  in the book all along; epubveri simply could not see into the document
+  before. A later fix that makes the same finding more frequent still is. The
+  cost is that a problem such a fix genuinely introduced would be accepted with
+  them.
+- The check uses the same validator that proposed the fix, so a defect
+  epubveri does not recognise cannot trigger it.
 - **N fatal(s), N error(s) → …** is epubveri's own count before repair vs. after
   — the book is re-validated at the end, so this is an independent check, not a
   claim.
@@ -528,7 +562,8 @@ reads both:
         "warnings_before": 1, "warnings_after": 1,
         "infos_before": 0, "infos_after": 0,
         "usages_before": 3, "usages_after": 2,
-        "applied": 2, "skipped": 0, "proposed": 0, "goal": "valid"
+        "applied": 2, "skipped": 0, "proposed": 0, "reverted": 0,
+        "goal": "valid"
       },
       "items": [
         {
@@ -551,19 +586,17 @@ reads both:
 ```
 
 The `summary` reports **every member of a set it has a concept of**, including
-zero. That is why `proposed` sits beside `applied` and `skipped`, and why all
+zero. That is why `proposed` and `reverted` sit beside `applied` and `skipped`, and why all
 five severities appear in both tenses rather than only the two the verdict is
 computed from — some fixes clear a `usage` or `warning` finding and move the
 error line not at all. A consumer may rely on
-`applied + skipped + proposed == items.length`.
-
-(`reverted` is deliberately absent rather than zero: this build cannot revert a
-fix, so it has no concept of the value, and `0` would claim no revert happened
-where the truth is that none could.)
+`applied + skipped + proposed + reverted == items.length`.
 
 Two fields carry epubsana's half of the contract:
 
-- **`outcome`** — `applied`, `skipped`, or `proposed` — is on **every** fix item.
+- **`outcome`** — `applied`, `skipped`, `proposed`, or `reverted` — is on
+  **every** fix item. `reverted` (conventions v0.6) means epubsana applied the
+  fix and undid it because it made the book worse; you did not decline it.
   A confirm-each-step run routinely applies one fix and declines the next; a
   report that cannot say which is not a report of what changed. Under
   `--dry-run` every item is `"proposed"` (and `dry_run: true` is a summary of
@@ -667,7 +700,8 @@ These invariants hold for every fixer:
   it rather than risk the content.
 - **Independently re-validated.** After applying fixes, the whole book is
   re-checked with epubveri for the before → after counts — the tool proves its
-  own result rather than asserting it.
+  own result rather than asserting it — and a fix that made any finding more
+  frequent is undone and reported as [reverted](#reverted-fixes).
 - **The original isn't modified in place.** Repairs are written to a separate
   output file (by default `<input-stem>_fixed.epub`; overridden only if you
   point `-o` at another path), and an existing file there is never silently

@@ -32,10 +32,13 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
     are clicked and does not undo them yet.
   - On a 474-book test library no fix is reverted and the result is
     unchanged.
-- `Outcome::Reverted`, `ChangeReport::reverted()` and
-  `ReportedFix::reverted_for` (the finding that rose); the json summary gains a
+- **In `--format json`, such a fix carries `"outcome": "reverted"`**, the fourth
+  outcome value added by veripublica conventions v0.6, and the summary gains a
   `reverted` count, so `applied + skipped + proposed + reverted` equals the
-  number of items.
+  number of items. Plugins that switch on `outcome` should handle the new
+  value.
+- `Outcome::Reverted`, `ChangeReport::reverted()` and
+  `ReportedFix::reverted_for` (the finding that rose) in the library.
 - **`Workspace` keeps an undo history.** `Workspace::checkpoint()` marks a
   position and `Workspace::seek()` moves back to it (or forward again); after
   seeking back, the workspace writes out exactly the bytes it would have written
@@ -43,6 +46,12 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
 ### Changed
 
+- **epubveri floor raised to 0.17**, which adds the `reverted` outcome to the
+  shared envelope types. Nothing else about detection changed: on the 474-book
+  test library the result is identical to 0.16.0. Because epubveri's types are
+  part of epubsana's public API, this makes the release a minor.
+- **The json envelope's `convention` key is now `"0.6"`**, and `--help` says
+  "Conforms to veripublica conventions v0.6".
 - `Error` gains a `Nondeterministic` variant: if re-planning after a revert
   does not reproduce the plan the caller approved, the run stops with nothing
   applied.

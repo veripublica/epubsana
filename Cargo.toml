@@ -177,6 +177,16 @@ members = ["epubsana-wasm"]
 #   and 50 renames, so a `params` answer that failed to arrive would have deleted
 #   every one of them.
 #
+#   **0.17 (2026-09-23) is a CAPABILITY floor, and a compile-time one.** It
+#   adds `envelope::Outcome::Reverted` (conventions v0.6.0, #31), which our
+#   `From<crate::Outcome>` maps per-fix rollback (#7) onto. Below it the
+#   envelope has no way to say a fix was undone, and the only honest options
+#   were refusing the json run or not reverting; 0.17 removes both. Nothing
+#   else in the envelope, `rule`, `location`, `params`, `violation_kind` or
+#   `is_xml_blank` changed (epubveri's note), and `Outcome` stays exhaustive
+#   until 1.0. Pre-tested against the branch commit `ad05f82` before it was
+#   released.
+#
 #   **0.16 (2026-09-22) is a TRACKING floor, not a correctness one.** It spans
 #   0.15.0 (epubcheck 5.4.0 parity), 0.15.1, 0.15.2 and 0.16.0 (`aria-*` value
 #   spaces). No source change; the only break upstream names
@@ -204,7 +214,7 @@ members = ["epubsana-wasm"]
 #
 # For local co-development of epubveri, add an uncommitted override:
 #   [patch.crates-io] epubveri = { path = "../epubveri" }
-epubveri = "0.16"
+epubveri = "0.17"
 # Pure-Rust only (no C deps), same philosophy as epubveri: zip's "deflate"
 # feature uses zlib-rs (Rust) on the 8.x line; bzip2/zstd (C) stay disabled.
 # Aligned to epubveri's zip major — the family shares one zip version because

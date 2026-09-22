@@ -13,7 +13,9 @@ changed**. It never guesses, and it preserves everything it doesn't touch.
 ## Status
 
 Early but working. The core contract (`Workspace` → detect → propose → confirm →
-apply → report) is solid, with thirty-seven fixers so far:
+apply → check → report) is solid. The check re-validates the book after
+applying, and a fix that made any finding more frequent is undone and reported
+as reverted. Thirty-seven fixers so far:
 
 - **`RSC-016`** — undeclared HTML entities (`&nbsp;`, `&mdash;`, …) → the exact
   character each denotes.
@@ -217,7 +219,9 @@ Every frontend (this CLI, the [in-browser WASM demo](https://veripublica.github.
 [epublift](https://github.com/ePubLift/epublift) integration) shares one core
 contract so behavior never diverges: fixes are proposed as data, the caller
 decides per fix (`Confirmer`), and the run ends with a `ChangeReport`. Nothing
-mutates without an approved fix.
+mutates without an approved fix. One difference today: the in-browser demo
+applies fixes one at a time as you click them and does not yet undo a fix that
+made the book worse, which the CLI and library do.
 
 ## License
 

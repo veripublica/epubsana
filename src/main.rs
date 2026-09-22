@@ -1,4 +1,4 @@
-//! epubsana's CLI, following the **veripublica CLI convention v0.5**
+//! epubsana's CLI, following the **veripublica CLI convention v0.6**
 //! (<https://github.com/veripublica/conventions>).
 //!
 //! epubsana is a *transformer*: it takes **exactly one** input, writes a
@@ -80,7 +80,7 @@ EXIT CODES:
         path that is the input, an existing output file without -f, an
         unanswerable prompt, or an I/O failure.
 
-Conforms to veripublica conventions v0.5.";
+Conforms to veripublica conventions v0.6.";
 
 /// The outcome of parsing `argv` — decided entirely before any work is done.
 #[derive(Debug, PartialEq)]
@@ -450,20 +450,6 @@ fn execute(run: &Run) -> Result<ExitCode, String> {
                 report.fixes.len()
             ));
         }
-    }
-
-    // conventions #31 has not shipped `reverted`, so the envelope cannot say
-    // what happened to a fix this run undid — and saying `skipped` would tell
-    // the user they declined something they approved. Refuse before writing,
-    // for the same reason the selector check above does. Temporary: it goes
-    // when epubveri's envelope Outcome gains the member.
-    if json && report.reverted().next().is_some() {
-        return Err(format!(
-            "{} fix(es) were undone because they introduced a new finding, and this \
-             build's json output cannot yet express that. Nothing was written; \
-             re-run without --format json to see the report.",
-            report.reverted().count()
-        ));
     }
 
     // Write only when something was actually applied — a run whose every fix was
