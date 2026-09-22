@@ -23,7 +23,7 @@ members = ["epubsana-wasm"]
 # into an error) and the `rule`/`params` sub-codes epubsana's fixers dispatch on
 # both arrived on the 0.5 line, the conventions-v0.4 one.
 #
-# **The floor is 0.13.2.** Most raises have been *correctness* floors, made for the
+# **The floor is 0.16.** Most raises have been *correctness* floors, made for the
 # same reason each time: below them, a detector false positive makes some fixer
 # here repair a book that was not broken. The last two are different classes —
 # 0.9.26 is completeness and 0.10.0 is capability — and each says which it is.
@@ -177,6 +177,23 @@ members = ["epubsana-wasm"]
 #   and 50 renames, so a `params` answer that failed to arrive would have deleted
 #   every one of them.
 #
+#   **0.16 (2026-09-22) is a TRACKING floor, not a correctness one.** It spans
+#   0.15.0 (epubcheck 5.4.0 parity), 0.15.1, 0.15.2 and 0.16.0 (`aria-*` value
+#   spaces). No source change; the only break upstream names
+#   (`rng::datatype::Datatype` gained `Float`) is outside our surface. The new
+#   ARIA findings arrive as `InvalidAttributeValue` with `params[0] =
+#   "aria-…"`, and both fixers on that kind narrow on `params[0]` (`lang`/
+#   `xml:lang`, `id`), so they decline them — correctly, since an invalid ARIA
+#   value has no inferable replacement. Zero shelf books carry one.
+#
+#   Measured across the boundary on the 474-book shelf: the whole-shelf plan
+#   digest is byte-identical (2,407 lines), per-fixer counts identical, 73 fully
+#   valid, zero regressions at any severity. What moved is the detector's
+#   view alone: errors 40,615 → 15,728 becomes 40,614 → 15,727 (one `RSC-014`
+#   downgraded to usage), and all findings gain +383 before *and* +383 after —
+#   new usage findings (`OBS-001` ×7 keys, `HTM-062`, `RSC-036`) that we neither
+#   repair nor author.
+#
 # Tracking policy, agreed with epubveri 2026-08-05: **track loosely** — a caret on
 # the current minor, re-measure when a minor lands, don't chase patches. For an
 # irreversible repairer, a newer detector only matters when the rules we consume move, and
@@ -187,7 +204,7 @@ members = ["epubsana-wasm"]
 #
 # For local co-development of epubveri, add an uncommitted override:
 #   [patch.crates-io] epubveri = { path = "../epubveri" }
-epubveri = "0.14"
+epubveri = "0.16"
 # Pure-Rust only (no C deps), same philosophy as epubveri: zip's "deflate"
 # feature uses zlib-rs (Rust) on the 8.x line; bzip2/zstd (C) stay disabled.
 # Aligned to epubveri's zip major — the family shares one zip version because

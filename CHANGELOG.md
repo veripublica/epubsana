@@ -8,6 +8,25 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [Unreleased]
+
+### Changed
+
+- **epubveri floor raised to 0.16** (from 0.14), bringing epubcheck 5.4.0
+  parity (0.15.x) and `aria-*` attribute value checks (0.16.0). No source
+  change and no change to what epubsana proposes: on a 474-book test library
+  the plan is identical before and after, and no repair introduces a finding.
+  - Users running with usage messages (`-u`) will see new epubveri findings
+    that epubsana does not repair — chiefly `OBS-001` for features EPUB 3.4
+    marks as outdated (an NCX or `<guide>` in an EPUB 3 book, `-epub-` CSS
+    prefixes). They are usage-level and change no verdict.
+  - New invalid `aria-*` values are reported but deliberately not repaired: a
+    wrong `aria-hidden` value might have meant either of two opposites, and
+    removing the attribute exposes content the author hid from assistive
+    technology.
+  - Because epubveri's types are part of epubsana's public API, this floor
+    change makes the next release a minor.
+
 ## [0.15.0] - 2026-09-12
 
 ### Added
