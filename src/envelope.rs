@@ -51,6 +51,15 @@ impl From<crate::Outcome> for epubveri::envelope::Outcome {
             crate::Outcome::Applied => epubveri::envelope::Outcome::Applied,
             crate::Outcome::Skipped => epubveri::envelope::Outcome::Skipped,
             crate::Outcome::Proposed => epubveri::envelope::Outcome::Proposed,
+            // conventions #31 accepted `reverted` and has not shipped its text;
+            // epubveri's type gains the member when it does. Until then the CLI
+            // refuses a json run that reverted anything *before writing the
+            // book* (`main.rs`), so this arm cannot be reached from it. Mapping
+            // to `Skipped` would tell the user they declined a fix they
+            // approved — the exact falsehood #31 exists to remove.
+            crate::Outcome::Reverted => unreachable!(
+                "a reverted fix cannot be expressed until the envelope's Outcome has `reverted`"
+            ),
         }
     }
 }
@@ -185,15 +194,15 @@ pub struct Summary {
     /// `applied: 0, skipped: 0` while every item carried `"outcome":
     /// "proposed"`, so the summary and the items disagreed about the size of
     /// the run and every number in the document was true.
-    ///
-    /// The identity a consumer may rely on:
-    /// `applied + skipped + proposed == items.len()`.
-    ///
-    /// `reverted` is deliberately absent rather than zero: a build that cannot
-    /// revert has no concept of the value, and emitting `0` would claim no
-    /// revert happened where the truth is that none could (conventions #31,
-    /// held against epubsana#7).
     pub proposed: usize,
+    /// Approved and applied, then undone because applying it produced a new
+    /// finding (conventions #31, epubsana#7). The identity a consumer may rely
+    /// on is therefore `applied + skipped + proposed + reverted == items.len()`.
+    ///
+    /// It was deliberately absent, not zero, while no build could revert: `0`
+    /// would have claimed no revert happened where the truth was that none
+    /// could. It is reported now because the concept exists.
+    pub reverted: usize,
     /// The bar this run was measured against: `valid` (the default — no error-
     /// and no fatal-severity findings remain) or `openable` (no fatals remain).
     /// Carried so `status: "ok"` is never read without it (CLI.md §6; a shared
@@ -217,6 +226,7 @@ impl Summary {
             applied: report.applied().count(),
             skipped: report.skipped().count(),
             proposed: report.proposed().count(),
+            reverted: report.reverted().count(),
             goal: report.goal.as_str(),
         }
     }
@@ -267,7 +277,7 @@ pub struct ChangeItem {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::{Confirmer, Decision, Goal, Policy, ProposedFix, Workspace, repair};
     use std::io::{Cursor, Write};
@@ -282,7 +292,7 @@ mod tests {
     /// it at all, which is exactly the work a summary reporting only fatals and
     /// errors describes as nothing. A fixture with errors alone would let every
     /// assertion below pass while the new counters stayed dead.
-    fn fixture_epub() -> Vec<u8> {
+    pub(crate) fn fixture_epub() -> Vec<u8> {
         const OPF: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="bookid">
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
@@ -369,7 +379,7 @@ mod tests {
             let (s, items) = summary_of(policy, confirmer);
             assert!(items > 0, "the fixture must plan something to count");
             assert_eq!(
-                s.applied + s.skipped + s.proposed,
+                s.applied + s.skipped + s.proposed + s.reverted,
                 items,
                 "summary and items disagree about the size of the run"
             );

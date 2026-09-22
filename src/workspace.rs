@@ -39,6 +39,10 @@ use zip::{CompressionMethod, ZipArchive, ZipWriter};
 pub enum Error {
     Zip(zip::result::ZipError),
     Io(std::io::Error),
+    /// Re-planning after a revert did not reproduce the plan the caller was
+    /// shown. [`crate::repair`] stops with nothing applied rather than apply a
+    /// plan nobody approved.
+    Nondeterministic(String),
 }
 
 impl std::fmt::Display for Error {
@@ -46,6 +50,7 @@ impl std::fmt::Display for Error {
         match self {
             Error::Zip(e) => write!(f, "zip error: {e}"),
             Error::Io(e) => write!(f, "io error: {e}"),
+            Error::Nondeterministic(e) => write!(f, "{e}"),
         }
     }
 }

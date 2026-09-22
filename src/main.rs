@@ -452,6 +452,20 @@ fn execute(run: &Run) -> Result<ExitCode, String> {
         }
     }
 
+    // conventions #31 has not shipped `reverted`, so the envelope cannot say
+    // what happened to a fix this run undid — and saying `skipped` would tell
+    // the user they declined something they approved. Refuse before writing,
+    // for the same reason the selector check above does. Temporary: it goes
+    // when epubveri's envelope Outcome gains the member.
+    if json && report.reverted().next().is_some() {
+        return Err(format!(
+            "{} fix(es) were undone because they introduced a new finding, and this \
+             build's json output cannot yet express that. Nothing was written; \
+             re-run without --format json to see the report.",
+            report.reverted().count()
+        ));
+    }
+
     // Write only when something was actually applied — a run whose every fix was
     // declined has nothing to write, and leaves no file behind to explain. Under
     // --dry-run nothing is written at all; `output` then names the path that
@@ -502,9 +516,16 @@ fn print_report(report: &ChangeReport, written: Option<&str>, run: &Run) {
                 Outcome::Applied => "APPLIED",
                 Outcome::Skipped => "SKIPPED",
                 Outcome::Proposed => "WOULD APPLY",
+                Outcome::Reverted => "REVERTED",
             },
             f.title
         );
+        if let Some((id, rule)) = f.reverted_for {
+            println!(
+                "    undone: applying it added a {id}{} finding",
+                rule.map(|r| format!(" ({r})")).unwrap_or_default()
+            );
+        }
         if run.verbose {
             println!("    why: {}", f.rationale);
         }

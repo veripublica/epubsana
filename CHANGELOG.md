@@ -8,6 +8,45 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [Unreleased]
+
+### Added
+
+- **A fix that makes the book worse is now undone during the run**
+  ([#7](https://github.com/veripublica/epubsana/issues/7)). After applying the
+  approved fixes, epubsana re-validates the book; if any kind of finding now
+  occurs more often than before (at any severity), it finds the fix responsible,
+  undoes it, keeps every other fix, and reports that fix as **reverted**. The
+  caller approved it and the tool overruled, so it is never reported as
+  skipped. The finding it was meant to repair stays unrepaired.
+  - A fix that makes an unreadable document readable (for example, by
+    clearing an undeclared entity) is not undone for the findings that then
+    appear: they were already in the book, the validator simply could not see
+    them, and they can surface in other documents too (a broken link into the
+    one that now opens). A later fix that raises the same kind of finding
+    further is still undone. The trade-off: a problem such a fix genuinely
+    introduced would be accepted along with them.
+  - This catches only defects epubveri recognises; re-validation uses the same
+    detector that approved the fix.
+  - The in-browser demo (`epubsana-wasm`) applies fixes one at a time as they
+    are clicked and does not undo them yet.
+  - On a 474-book test library no fix is reverted and the result is
+    unchanged.
+- `Outcome::Reverted`, `ChangeReport::reverted()` and
+  `ReportedFix::reverted_for` (the finding that rose); the json summary gains a
+  `reverted` count, so `applied + skipped + proposed + reverted` equals the
+  number of items.
+- **`Workspace` keeps an undo history.** `Workspace::checkpoint()` marks a
+  position and `Workspace::seek()` moves back to it (or forward again); after
+  seeking back, the workspace writes out exactly the bytes it would have written
+  at the checkpoint.
+
+### Changed
+
+- `Error` gains a `Nondeterministic` variant: if re-planning after a revert
+  does not reproduce the plan the caller approved, the run stops with nothing
+  applied.
+
 ## [0.16.0] - 2026-09-22
 
 ### Changed
