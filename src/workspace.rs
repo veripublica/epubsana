@@ -74,6 +74,40 @@ pub struct Workspace {
     /// Set by an *approved* fix (never by the writer) to put `mimetype` back
     /// where OCF wants it. See [`Workspace::repackage_mimetype`].
     repackage_mimetype: bool,
+    /// Every mutation since load, oldest first, and how far along it we are.
+    /// See [`Workspace::checkpoint`].
+    journal: Vec<Record>,
+    cursor: usize,
+}
+
+/// A position in a [`Workspace`]'s history, taken by [`Workspace::checkpoint`]
+/// and returned to by [`Workspace::seek`].
+///
+/// Only meaningful for the workspace that issued it. Writing after seeking
+/// backwards discards every later position, exactly as typing after an undo
+/// does in an editor, so a checkpoint from that discarded branch is refused
+/// rather than silently reinterpreted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Checkpoint(usize);
+
+/// One mutation, held so it can be undone and redone.
+///
+/// Each record keeps **the other version** of what it touched — the prior
+/// state while the mutation is applied, the mutated state while it is undone —
+/// and moving across it in either direction is one swap. Nothing is cloned:
+/// the bytes a write replaced move into the journal instead of being dropped.
+#[derive(Debug)]
+enum Record {
+    Entry {
+        name: String,
+        /// `None` means the entry does not exist on this side of the record:
+        /// before the write that added it, or after undoing that write.
+        other: Option<Vec<u8>>,
+        other_dirty: bool,
+    },
+    Repackage {
+        other: bool,
+    },
 }
 
 impl Workspace {
@@ -103,6 +137,8 @@ impl Workspace {
             entries,
             dirty: BTreeSet::new(),
             repackage_mimetype: false,
+            journal: Vec::new(),
+            cursor: 0,
         })
     }
 
@@ -115,7 +151,8 @@ impl Workspace {
     /// true, so the *only* way packaging changes is for someone to ask here.
     /// Content is untouched — `mimetype`'s own bytes included.
     pub fn repackage_mimetype(&mut self) {
-        self.repackage_mimetype = true;
+        let prior = std::mem::replace(&mut self.repackage_mimetype, true);
+        self.record(Record::Repackage { other: prior });
     }
 
     /// A container entry decoded as UTF-8 (lossy), or `None` if absent.
@@ -135,11 +172,110 @@ impl Workspace {
     /// This marks the entry dirty: it is the *only* way an entry stops being
     /// raw-copied on the way out.
     pub fn set_bytes(&mut self, name: &str, data: Vec<u8>) {
-        if !self.entries.contains_key(name) {
+        let prior = self.entries.insert(name.to_string(), data);
+        if prior.is_none() {
             self.order.push(name.to_string());
         }
-        self.entries.insert(name.to_string(), data);
-        self.dirty.insert(name.to_string());
+        let prior_dirty = !self.dirty.insert(name.to_string());
+        self.record(Record::Entry {
+            name: name.to_string(),
+            other: prior,
+            other_dirty: prior_dirty,
+        });
+    }
+
+    /// The current position in this workspace's history.
+    ///
+    /// Every mutation — [`Workspace::set_bytes`], [`Workspace::set_text`],
+    /// [`Workspace::repackage_mimetype`] — is journalled, so a fix applied after
+    /// a checkpoint can be undone by [`Workspace::seek`]ing back to it, and
+    /// redone by seeking forward again. The guarantee is the one issue #7 asks
+    /// for: **after seeking back, the workspace serializes byte-identically to
+    /// what it serialized at the checkpoint.** It holds because the writer's
+    /// output depends only on the entries, their order, the dirty set and the
+    /// packaging flag, and a seek restores all four.
+    ///
+    /// Journalling is unconditional and costs no copy: the bytes a write
+    /// replaces are moved into the journal rather than dropped. What it does
+    /// cost is that superseded versions stay alive until the workspace does.
+    pub fn checkpoint(&self) -> Checkpoint {
+        Checkpoint(self.cursor)
+    }
+
+    /// Move the workspace to `to`, undoing or redoing every mutation between
+    /// here and there.
+    ///
+    /// # Panics
+    ///
+    /// If `to` lies beyond the end of the journal — a checkpoint from another
+    /// workspace, or from a branch discarded by writing after a backward seek.
+    /// That is a caller bug, and guessing which state was meant is not an
+    /// option for a tool that promises never to mutate without approval.
+    pub fn seek(&mut self, to: Checkpoint) {
+        assert!(
+            to.0 <= self.journal.len(),
+            "checkpoint {} is not in this workspace's history (length {})",
+            to.0,
+            self.journal.len()
+        );
+        while self.cursor > to.0 {
+            self.cursor -= 1;
+            self.swap(self.cursor);
+        }
+        while self.cursor < to.0 {
+            self.swap(self.cursor);
+            self.cursor += 1;
+        }
+    }
+
+    /// Append a mutation that has just been made, discarding any redo branch.
+    fn record(&mut self, r: Record) {
+        self.journal.truncate(self.cursor);
+        self.journal.push(r);
+        self.cursor += 1;
+    }
+
+    /// Cross record `i` in whichever direction it has not yet been crossed.
+    /// The operation is its own inverse, which is what lets one function serve
+    /// both undo and redo.
+    fn swap(&mut self, i: usize) {
+        match &mut self.journal[i] {
+            Record::Repackage { other } => {
+                std::mem::swap(other, &mut self.repackage_mimetype);
+            }
+            Record::Entry {
+                name,
+                other,
+                other_dirty,
+            } => {
+                let incoming = other.take();
+                let arrives = incoming.is_some();
+                let current = match incoming {
+                    Some(data) => self.entries.insert(name.clone(), data),
+                    None => self.entries.remove(name),
+                };
+                // An entry appears or disappears only by the write that added
+                // it, and records are crossed strictly in reverse on the way
+                // back, so the name is always last in `order` when it goes.
+                match (current.is_some(), arrives) {
+                    (false, false) => unreachable!("a journalled entry exists on one side"),
+                    (true, false) => {
+                        let last = self.order.pop();
+                        debug_assert_eq!(last.as_deref(), Some(name.as_str()));
+                    }
+                    (false, true) => self.order.push(name.clone()),
+                    (true, true) => {}
+                }
+                *other = current;
+                let current_dirty = self.dirty.contains(name.as_str());
+                if *other_dirty {
+                    self.dirty.insert(name.clone());
+                } else {
+                    self.dirty.remove(name.as_str());
+                }
+                *other_dirty = current_dirty;
+            }
+        }
     }
 
     /// Entry names, in container order.
@@ -368,5 +504,101 @@ mod tests {
         assert_eq!(b.len(), a.len() + 1);
         assert_eq!(&b[..a.len()], &a[..]);
         assert_eq!(b.last().unwrap().0, "new.html");
+    }
+
+    /// The acceptance criterion of issue #7, stated as a test: after a
+    /// speculative change is undone, the workspace serializes byte-identically
+    /// to before it. Every mutator is exercised — a rewrite (which also flips
+    /// an entry from raw-copied to re-encoded), an added entry (which also
+    /// grows `order`) and the packaging flag — and so is writing one entry twice.
+    #[test]
+    fn seeking_back_serializes_byte_identically() {
+        let mut ws = Workspace::load(&awkward_epub()).unwrap();
+        let start = ws.checkpoint();
+        let pristine = ws.serialize().unwrap();
+
+        ws.set_text("text.html", "<html>one</html>".into());
+        ws.set_text("META-INF/container.xml", "<container v=\"2\"/>".into());
+        let middle = ws.checkpoint();
+        let at_middle = ws.serialize().unwrap();
+
+        ws.set_text("text.html", "<html>two</html>".into());
+        ws.set_text("new.html", "<html/>".into());
+        ws.repackage_mimetype();
+        assert_ne!(ws.serialize().unwrap(), at_middle);
+
+        ws.seek(middle);
+        assert_eq!(ws.serialize().unwrap(), at_middle);
+        assert_eq!(ws.get_text("text.html").unwrap(), "<html>one</html>");
+        assert!(ws.get_text("new.html").is_none());
+        assert!(!ws.names().any(|n| n == "new.html"));
+
+        ws.seek(start);
+        assert_eq!(ws.serialize().unwrap(), pristine);
+    }
+
+    /// Redo is what makes a bisection possible without re-planning: a fix's
+    /// `apply` is `FnOnce`, so once undone it cannot be run again, and the
+    /// journal has to be able to put its effect back by itself.
+    #[test]
+    fn seeking_forward_restores_what_was_undone() {
+        let mut ws = Workspace::load(&awkward_epub()).unwrap();
+        let start = ws.checkpoint();
+        ws.set_text("text.html", "<html>edited</html>".into());
+        ws.set_text("new.html", "<html/>".into());
+        ws.repackage_mimetype();
+        let end = ws.checkpoint();
+        let at_end = ws.serialize().unwrap();
+
+        ws.seek(start);
+        ws.seek(end);
+        assert_eq!(ws.serialize().unwrap(), at_end);
+        assert_eq!(ws.names().last().unwrap(), "new.html");
+    }
+
+    /// Undoing a write must also undo the dirty mark, or the entry would be
+    /// re-encoded on the way out: same content, different compressed bytes,
+    /// and the preservation guarantee quietly broken by the undo itself.
+    #[test]
+    ///
+    /// The fixture's entry carries its own timestamp on purpose. `awkward_epub`
+    /// uses the writer's defaults, so a re-encoded copy of it comes out
+    /// byte-identical to the raw one and this test passed with the dirty mark
+    /// left in place — found by mutating the guard, not by reading the test.
+    fn an_undone_rewrite_is_raw_copied_again() {
+        let mut orig = Vec::new();
+        {
+            let mut zip = ZipWriter::new(Cursor::new(&mut orig));
+            let stamped = SimpleFileOptions::default().last_modified_time(
+                zip::DateTime::from_date_and_time(2011, 3, 14, 15, 9, 26).unwrap(),
+            );
+            zip.start_file("text.html", stamped).unwrap();
+            zip.write_all(b"<html><body>hello</body></html>").unwrap();
+            zip.finish().unwrap();
+        }
+        let mut ws = Workspace::load(&orig).unwrap();
+        let start = ws.checkpoint();
+        ws.set_text("text.html", "<html>x</html>".into());
+        ws.seek(start);
+        assert_eq!(
+            ws.serialize().unwrap(),
+            Workspace::load(&orig).unwrap().serialize().unwrap()
+        );
+    }
+
+    /// Writing after a backward seek discards the redo branch, as an editor
+    /// does. A checkpoint into that branch no longer names any state, and
+    /// seeking to it is refused rather than guessed at.
+    #[test]
+    #[should_panic(expected = "not in this workspace's history")]
+    fn a_checkpoint_on_a_discarded_branch_is_refused() {
+        let mut ws = Workspace::load(&awkward_epub()).unwrap();
+        let start = ws.checkpoint();
+        ws.set_text("text.html", "<html>a</html>".into());
+        ws.set_text("text.html", "<html>b</html>".into());
+        let lost = ws.checkpoint();
+        ws.seek(start);
+        ws.set_text("text.html", "<html>c</html>".into());
+        ws.seek(lost);
     }
 }
