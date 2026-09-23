@@ -13,6 +13,8 @@
 //! Exit codes: `0` = the run's goal was met, `1` = it was not, `2` = the tool
 //! could not run.
 
+#![forbid(unsafe_code)]
+
 use std::collections::BTreeSet;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};

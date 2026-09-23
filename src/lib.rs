@@ -20,6 +20,11 @@
 //! surgical and content-preserving; and a fix is only ever proposed when a safe
 //! one exists — we never guess.
 
+// No unsafe code exists in this crate, and a repairer that parses hostile
+// input has no reason to grow any: this makes that a compile error rather
+// than a convention.
+#![forbid(unsafe_code)]
+
 pub mod entities;
 pub mod envelope;
 pub mod fixers;
