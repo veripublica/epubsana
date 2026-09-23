@@ -25,7 +25,7 @@
 //! ```
 
 use serde::Serialize;
-use tsify_next::Tsify;
+use tsify::Tsify;
 use wasm_bindgen::prelude::*;
 
 use epubsana::{Goal, Outcome, ProposedFix, Tier, Workspace, fixers};

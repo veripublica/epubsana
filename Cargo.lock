@@ -46,15 +46,15 @@ version = "0.17.0"
 dependencies = [
  "epubsana",
  "serde",
- "tsify-next",
+ "tsify",
  "wasm-bindgen",
 ]
 
 [[package]]
 name = "epubveri"
-version = "0.17.0"
+version = "0.17.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "654d3ff3d090f698d3f26004f9afdf74ffc855b65b17fd56243cfcfd3b913ddf"
+checksum = "6b667221406237588cf475520bfaa47a49766483f43d44e12112072d83d2c355"
 dependencies = [
  "roxmltree",
  "serde",
@@ -327,24 +327,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
-name = "tsify-next"
+name = "tsify"
 version = "0.5.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d0f2208feeb5f7a6edb15a2389c14cd42480ef6417318316bb866da5806a61d"
+checksum = "8ec5505497c87f1c050b4392d3f11b49a04537fcb9dc0da57bc0af168a6331f2"
 dependencies = [
  "gloo-utils",
  "serde",
  "serde-wasm-bindgen",
  "serde_json",
- "tsify-next-macros",
+ "tsify-macros",
  "wasm-bindgen",
 ]
 
 [[package]]
-name = "tsify-next-macros"
+name = "tsify-macros"
 version = "0.5.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f81253930d0d388a3ab8fa4ae56da9973ab171ef833d1be2e9080fc3ce502bd6"
+checksum = "9fc2c44dc9fe4baf55b88e032621b7a11b215a1f0a7de8d0aa04367207d915bc"
 dependencies = [
  "proc-macro2",
  "quote",

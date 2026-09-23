@@ -22,6 +22,16 @@ crate-type = ["cdylib", "rlib"]
 epubsana = { path = ".." }
 wasm-bindgen = "0.2"
 serde = { version = "1", features = ["derive"] }
-# tsify-next derives both serde (de)serialization and a real TypeScript .d.ts
+# tsify derives both serde (de)serialization and a real TypeScript .d.ts
 # for the returned types, and pulls in serde-wasm-bindgen transitively.
-tsify-next = { version = "0.5", features = ["js"] }
+#
+# This was `tsify-next` until 2026-09-23, when a RustSec audit flagged it:
+# RUSTSEC-2025-0048 marks the fork unmaintained and advises upstream `tsify`,
+# which resumed. Same version number, feature and attribute, so the move is the
+# import path and this line. epubveri made the same move on 2026-08-03.
+#
+# Held at 0.5.6 in `Cargo.lock`, as epubveri holds it: 0.5.7 deprecates the
+# `#[tsify(into_wasm_abi)]` every returned type here uses. Pin BOTH halves when
+# moving it (`cargo update -p tsify --precise …`, then `-p tsify-macros`), since
+# the macro is what emits the deprecated reference.
+tsify = { version = "0.5", features = ["js"] }
