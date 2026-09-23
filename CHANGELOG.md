@@ -8,6 +8,59 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [Unreleased]
+
+### Security
+
+- **A hostile document can no longer exhaust memory or crash epubsana.** Some
+  fixers parse container documents themselves, including documents epubveri has
+  already refused. One of them reads every content document for its table of
+  contents labels. A 1.8 KB EPUB whose entities expanded to gigabytes used 5 GB,
+  and one with 500,000 nested elements aborted the process on a stack overflow.
+  Every parse is now checked with `epubveri::xmlguard::check` first, and a
+  refused document is left alone. That check limits nesting depth, entity
+  expansion, attributes per element and elements per document. On the 474-book
+  test shelf no real document is refused, and every proposed fix is unchanged.
+- **A zip bomb can no longer exhaust memory.** epubsana held every entry of the
+  container in memory before epubveri saw the book, with no limit, so a 1 MB
+  EPUB of compressed zeros used 1.1 GB. A book with an entry that inflates past
+  64 MiB, or that inflates past 256 MiB in total, is now refused whole with a
+  message naming the limit. It is never loaded in part, because a fixer that
+  looks for references across the book would read a missing entry as "nothing
+  refers to it". The largest entry on the test shelf is 21.8 MB and the largest
+  book 86.5 MB. Reported as the existing `Error::Io` (kind `InvalidData`), so
+  no API change. The limits are public as `workspace::MAX_ENTRY_BYTES` and
+  `MAX_BOOK_BYTES`.
+- **The library and the CLI forbid `unsafe` code.** There was none; a repairer
+  that parses hostile input has no reason to grow any, and now it cannot
+  without a compile error. (The WASM crate is excluded: `wasm-bindgen` generates
+  unsafe code of its own.)
+- **Release binaries now carry `SHA256SUMS.txt` and a signed build provenance
+  attestation**, checkable with `gh attestation verify`. `SECURITY.md` says how
+  to verify a download and how to report a vulnerability privately.
+- **The release pipeline is pinned.** Every GitHub Action in every workflow now
+  runs a fixed commit rather than a moving tag or branch, and the dependency
+  lockfile is audited against the RustSec database on every push and weekly.
+- **A mutation fuzzer runs in CI.** Two defective books are corrupted 3,000
+  times each and repaired with every fix approved; any panic fails the build.
+  Across 12,000 books it found nothing. A byte-slicing bug put into a fixer on
+  purpose is found within 600 books, so a quiet run means something.
+- The WASM bindings moved from `tsify-next`, which RustSec lists as unmaintained
+  (RUSTSEC-2025-0048), to `tsify`. The generated JavaScript and TypeScript are
+  byte-identical.
+
+### Changed
+
+- The minimum epubveri is now 0.17.4. 0.17.3 is the first release carrying
+  all four of those limits, and 0.17.4 changes only epubveri's README.
+- **Install instructions now lead with the pre-built binaries** attached to every
+  release. On Windows, `cargo install` needs Microsoft's linker (*Build Tools for
+  Visual Studio*) and otherwise stops with ``linker `link.exe` not found``. The
+  README and `docs/USAGE.md` now say so, and recommend `cargo install --locked`.
+- The README named conventions v0.4; the CLI has conformed to v0.6 since 0.17.0.
+  The WASM package's README no longer claims behaviour identical to the CLI: the
+  browser does not yet undo a fix that made the book worse.
+
 ## [0.17.0] - 2026-09-23
 
 ### Added

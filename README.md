@@ -176,13 +176,32 @@ confirm-each-step workflow, the fixer catalogue, exit codes, and library usage.
 
 ## Install
 
+**Just want to repair a book?** No install at all: repair it right in your
+browser, with no upload, your file never leaves the page:
+**https://veripublica.github.io/epubsana/**
+
+**The CLI, without installing Rust.** Pre-built binaries are attached to every
+[GitHub Release](https://github.com/veripublica/epubsana/releases/latest), for
+macOS (Intel + Apple Silicon), Windows (x64 + ARM) and Linux (x64 + ARM, each
+as a fully static `musl` build that runs on any distribution, plus a
+dynamically-linked `gnu` variant). Download the archive for your platform,
+unpack it, and run the `epubsana` binary directly. No toolchain needed.
+
+**From crates.io or npm**, if you have the toolchain:
+
 ```sh
-cargo install epubsana                  # the CLI (crates.io)
+cargo install --locked epubsana         # the CLI
 npm install @veripublica/epubsana-wasm  # WASM bindings for the browser
 ```
 
-Or repair a book right in your browser — no install, no upload, your file never
-leaves the page: **https://veripublica.github.io/epubsana/**
+`--locked` builds with the exact dependency versions this release was tested
+against. **On Windows, Rust also needs Microsoft's linker**, which comes with
+[Build Tools for Visual
+Studio](https://visualstudio.microsoft.com/visual-cpp-build-tools/) when you
+tick *Desktop development with C++*. Without it every build, `cargo install
+epubsana` included, stops with ``linker `link.exe` not found``. VS Code is a
+different product and does not provide it. The pre-built Windows binary above
+needs none of this.
 
 ## Usage
 
@@ -201,7 +220,7 @@ epubsana -i book.epub --format json --dry-run
 ```
 
 The CLI conforms to the [veripublica conventions
-v0.4](https://github.com/veripublica/conventions) (`-i`/`-o`/`-f`,
+v0.6](https://github.com/veripublica/conventions) (`-i`/`-o`/`-f`,
 `<input-stem>_fixed.epub` output, `--format json`, exit `0`/`1`/`2`), so it
 behaves like the other veripublica tools. Full guide:
 **[docs/USAGE.md](docs/USAGE.md)**.

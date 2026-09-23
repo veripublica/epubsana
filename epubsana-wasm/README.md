@@ -5,8 +5,10 @@ pure-Rust EPUB repairer. Repair an `.epub` **entirely in the browser** (or any J
 runtime): no server round-trip, no native dependencies. **The bytes never
 leave the page** — a real privacy guarantee for unpublished manuscripts.
 
-It reuses the exact core epubsana uses on the command line, so the behaviour is
-identical: it proposes safe fixes, you approve them, and it reports what changed.
+It reuses the exact core epubsana uses on the command line, so it proposes the
+same fixes, you approve them, and it reports what changed. One difference today:
+it applies each fix as you approve it and does not yet undo a fix that made the
+book worse, which the CLI and the Rust library do.
 
 ## Install
 

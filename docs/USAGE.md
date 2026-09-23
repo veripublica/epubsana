@@ -36,11 +36,28 @@ guesses, and it preserves — byte-for-byte — everything it doesn't touch.
 
 epubsana is pure Rust with no C dependencies.
 
-**The CLI** — from [crates.io](https://crates.io/crates/epubsana):
+**The CLI, pre-built.** Every [GitHub
+Release](https://github.com/veripublica/epubsana/releases/latest) carries a
+binary for macOS (Intel + Apple Silicon), Windows (x64 + ARM) and Linux (x64 +
+ARM; static `musl` and dynamic `gnu`). Unpack the archive for your platform and
+run `epubsana`. No Rust toolchain is needed.
+
+**The CLI from [crates.io](https://crates.io/crates/epubsana)**, if you have
+[Rust installed](https://www.rust-lang.org/tools/install):
 
 ```sh
-cargo install epubsana
+cargo install --locked epubsana
 ```
+
+`--locked` uses the exact dependency versions the release was tested with;
+without it, cargo picks the newest compatible ones.
+
+> **On Windows**, Rust needs Microsoft's linker, which comes with [Build Tools
+> for Visual Studio](https://visualstudio.microsoft.com/visual-cpp-build-tools/)
+> when you tick *Desktop development with C++*. Without it, `cargo install`
+> stops with ``linker `link.exe` not found`` (for every Rust program, not only
+> this one). VS Code is a different product and does not provide it. The
+> pre-built Windows binary needs none of this.
 
 **In the browser** — no install at all: repair an EPUB with the
 [in-browser demo](https://veripublica.github.io/epubsana/) (your file never
@@ -702,6 +719,15 @@ These invariants hold for every fixer:
   re-checked with epubveri for the before → after counts — the tool proves its
   own result rather than asserting it — and a fix that made any finding more
   frequent is undone and reported as [reverted](#reverted-fixes).
+- **Hostile input is refused, not parsed.** A book with an entry that inflates
+  past 64 MiB, or past 256 MiB in total, is refused whole before anything else
+  happens (the largest book on our test shelf inflates to 86.5 MB). Before
+  epubsana parses any document itself, it applies epubveri's resource limits:
+  nesting depth, entity expansion, attributes per element and elements per
+  document. A document past any of them is left untouched, and no fix in it is
+  proposed. A small file crafted to exhaust memory or overflow the stack
+  therefore cannot take the run down with it. To report a security problem, see
+  [SECURITY.md](../SECURITY.md).
 - **The original isn't modified in place.** Repairs are written to a separate
   output file (by default `<input-stem>_fixed.epub`; overridden only if you
   point `-o` at another path), and an existing file there is never silently
