@@ -1315,7 +1315,16 @@ struct MetaEdit {
 /// and many XHTML documents declare and which roxmltree's default parser
 /// rejects. Every structural fixer parses through this so it sees exactly the
 /// documents epubveri did.
+///
+/// Every parse is first put to `epubveri::xmlguard::check`, and a refused text
+/// is declined (`None`). Refusing a document in `validate_bytes` does not stop
+/// us: `toc_labels` parses every content document in the container, and
+/// `PreparedDoc` parses a string the detector never saw. Without the guard a
+/// 1.8 KB entity expansion cost 5 GB, and 500,000 nested elements overflowed
+/// roxmltree's stack and aborted the process. It is epubveri's scan, taken
+/// rather than copied: 0.17.1's own version could be walked past nine ways.
 fn parse_xml(text: &str) -> Option<roxmltree::Document<'_>> {
+    epubveri::xmlguard::check(text).ok()?;
     let opts = roxmltree::ParsingOptions {
         allow_dtd: true,
         ..Default::default()
@@ -6525,6 +6534,75 @@ mod tests {
         );
         // And the result is a well-formed EPUB 2 doc again (parses with the DTD entities declared).
         assert!(prepare_content_doc(&out).parse().is_some());
+    }
+
+    fn nested(depth: usize) -> String {
+        format!(
+            "<html>{}{}</html>",
+            "<div>".repeat(depth - 1),
+            "</div>".repeat(depth - 1)
+        )
+    }
+
+    /// Each of `xmlguard`'s four limits, one shape apiece, sized so that a
+    /// missing guard makes the assertion fail rather than abort the test binary.
+    #[test]
+    fn parse_xml_declines_what_xmlguard_refuses() {
+        // An unoptimised roxmltree overflows a 2 MiB test thread at ~150 levels
+        // (measured; release builds hold ~2,000), and both depth cases really
+        // parse when the guard is absent — so the body gets its own stack.
+        std::thread::Builder::new()
+            .stack_size(16 << 20)
+            .spawn(guard_shapes)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn guard_shapes() {
+        use epubveri::xmlguard::{MAX_ATTRIBUTES, MAX_XML_DEPTH};
+        assert!(parse_xml(&nested(MAX_XML_DEPTH)).is_some(), "at the limit");
+        assert!(parse_xml(&nested(MAX_XML_DEPTH + 1)).is_none(), "too deep");
+
+        let big = "x".repeat(70_000);
+        let expansive = format!(
+            "<!DOCTYPE r [<!ENTITY a \"{big}\">]><r>{}</r>",
+            "&a;".repeat(1_000)
+        );
+        assert!(parse_xml(&expansive).is_none(), "70 MB of expansion");
+
+        let attrs: String = (0..=MAX_ATTRIBUTES)
+            .map(|i| format!(" a{i}=\"\""))
+            .collect();
+        assert!(
+            parse_xml(&format!("<r><p{attrs}/></r>")).is_none(),
+            "attributes"
+        );
+
+        let elements = format!(
+            "<!DOCTYPE r [<!ENTITY b \"{}\">]><r>{}</r>",
+            "<b/>".repeat(1_000),
+            "&b;".repeat(1_001)
+        );
+        assert!(parse_xml(&elements).is_none(), "a million elements");
+    }
+
+    /// The route the holes were reached by: `toc_labels` parses every content
+    /// document, including one the detector refused. The hostile one is skipped
+    /// and the rest of the book is still read.
+    #[test]
+    fn toc_labels_skips_a_document_the_guard_refuses() {
+        let nav = "<html xmlns=\"http://www.w3.org/1999/xhtml\"><body><nav>\
+                   <ol><li><a href=\"d.xhtml\">Chapter D</a></li></ol></nav></body></html>";
+        let ws = container(&[
+            ("OEBPS/nav.xhtml", nav),
+            ("OEBPS/c.xhtml", &nested(100_000)),
+        ]);
+        let labels = toc_labels(&ws);
+        assert_eq!(
+            labels.get("OEBPS/d.xhtml").map(String::as_str),
+            Some("Chapter D")
+        );
     }
 
     #[test]

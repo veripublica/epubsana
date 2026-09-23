@@ -177,6 +177,18 @@ members = ["epubsana-wasm"]
 #   and 50 renames, so a `params` answer that failed to arrive would have deleted
 #   every one of them.
 #
+#   **0.17.4 (2026-09-23) is a SECURITY floor, and a compile-time one.** We
+#   call `epubveri::xmlguard::check` before every roxmltree parse, because our
+#   fixers parse text the detector refused or never saw (`toc_labels` walks
+#   every content document; `PreparedDoc` rewrites before parsing). Without it
+#   a 1.8 KB entity expansion cost 5 GB and 500,000 nested elements aborted the
+#   process on a stack overflow, both measured on 0.17.0 + epubveri 0.17.1.
+#   0.17.2 introduced the guard; 0.17.3 is the first with all four limits
+#   (depth, expansion, attributes per element, elements per document). Taken
+#   rather than copied: 0.17.1's own scan could be walked past nine ways.
+#   The floor names 0.17.4, the current release, though its code is identical
+#   to 0.17.3 (a README-only release): the floor should name what was tested.
+#
 #   **0.17 (2026-09-23) is a CAPABILITY floor, and a compile-time one.** It
 #   adds `envelope::Outcome::Reverted` (conventions v0.6.0, #31), which our
 #   `From<crate::Outcome>` maps per-fix rollback (#7) onto. Below it the
@@ -214,7 +226,7 @@ members = ["epubsana-wasm"]
 #
 # For local co-development of epubveri, add an uncommitted override:
 #   [patch.crates-io] epubveri = { path = "../epubveri" }
-epubveri = "0.17"
+epubveri = "0.17.4"
 # Pure-Rust only (no C deps), same philosophy as epubveri: zip's "deflate"
 # feature uses zlib-rs (Rust) on the 8.x line; bzip2/zstd (C) stay disabled.
 # Aligned to epubveri's zip major — the family shares one zip version because

@@ -66,6 +66,32 @@ impl From<std::io::Error> for Error {
     }
 }
 
+/// The most one container entry may inflate to. [`Workspace::load`] holds every
+/// entry in memory, before epubveri has seen the book, so without a cap a 1 MB
+/// zip of zeros cost 1.1 GB. The same value as epubveri's own per-entry cap;
+/// the largest entry on the 474-book test shelf is 21.8 MB.
+pub const MAX_ENTRY_BYTES: u64 = 64 * 1024 * 1024;
+
+/// The most a whole container may inflate to, summed over its entries. The
+/// largest book on the test shelf inflates to 86.5 MB.
+pub const MAX_BOOK_BYTES: u64 = 256 * 1024 * 1024;
+
+/// A book past either cap is refused whole, never loaded in part: a fixer that
+/// scans every entry for a reference would read a skipped one as "nothing
+/// refers to it", which is the unsafe answer. Reported as an `Io` error of kind
+/// `InvalidData`, so no new `Error` variant is needed.
+fn too_large(msg: String) -> Error {
+    Error::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, msg))
+}
+
+fn size(bytes: u64) -> String {
+    if bytes.is_multiple_of(1 << 20) {
+        format!("{} MiB", bytes >> 20)
+    } else {
+        format!("{bytes}-byte")
+    }
+}
+
 /// A mutable EPUB container: entry names in original order + their bytes.
 pub struct Workspace {
     /// The bytes we were loaded from. Kept so untouched entries can be copied
@@ -122,9 +148,14 @@ impl Workspace {
     /// they are retained in `original` and reappear untouched in
     /// [`Workspace::serialize`].
     pub fn load(bytes: &[u8]) -> Result<Workspace, Error> {
+        Self::load_capped(bytes, MAX_ENTRY_BYTES, MAX_BOOK_BYTES)
+    }
+
+    fn load_capped(bytes: &[u8], max_entry: u64, max_book: u64) -> Result<Workspace, Error> {
         let mut zip = ZipArchive::new(Cursor::new(bytes.to_vec()))?;
         let mut order = Vec::new();
         let mut entries = HashMap::new();
+        let mut total: u64 = 0;
         for i in 0..zip.len() {
             let mut f = zip.by_index(i)?;
             if f.is_dir() {
@@ -132,7 +163,24 @@ impl Workspace {
             }
             let name = f.name().to_string();
             let mut data = Vec::new();
-            f.read_to_end(&mut data)?;
+            // Read one byte past the cap, so an entry whose header understates
+            // its size is still caught by what it actually inflates to.
+            (&mut f)
+                .take(max_entry.saturating_add(1))
+                .read_to_end(&mut data)?;
+            if data.len() as u64 > max_entry {
+                return Err(too_large(format!(
+                    "entry {name} inflates past the {} limit",
+                    size(max_entry)
+                )));
+            }
+            total += data.len() as u64;
+            if total > max_book {
+                return Err(too_large(format!(
+                    "the book inflates past the {} limit",
+                    size(max_book)
+                )));
+            }
             order.push(name.clone());
             entries.insert(name, data);
         }
@@ -392,6 +440,21 @@ mod tests {
             zip.finish().unwrap();
         }
         buf
+    }
+
+    fn refused(r: Result<Workspace, Error>) -> bool {
+        matches!(r, Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::InvalidData)
+    }
+
+    /// `awkward_epub`'s largest entry inflates to 43 bytes and the three sum
+    /// to 75, so each cap is tested one byte either side of what it admits.
+    #[test]
+    fn a_book_past_either_size_cap_is_refused_whole() {
+        let epub = awkward_epub();
+        assert!(Workspace::load_capped(&epub, 43, u64::MAX).is_ok());
+        assert!(refused(Workspace::load_capped(&epub, 42, u64::MAX)));
+        assert!(Workspace::load_capped(&epub, u64::MAX, 75).is_ok());
+        assert!(refused(Workspace::load_capped(&epub, u64::MAX, 74)));
     }
 
     fn describe(bytes: &[u8]) -> Vec<(String, CompressionMethod, u64, u64)> {
