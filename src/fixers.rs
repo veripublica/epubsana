@@ -6545,21 +6545,13 @@ mod tests {
     }
 
     /// Each of `xmlguard`'s four limits, one shape apiece, sized so that a
-    /// missing guard makes the assertion fail rather than abort the test binary.
+    /// missing guard makes an assertion fail rather than abort the test binary.
+    /// The at-the-limit case really parses 256 levels on the default 2 MiB test
+    /// thread, which an unoptimised roxmltree cannot (it aborts at 125,
+    /// measured by epubveri); the `[profile.dev.package.roxmltree]` line in
+    /// Cargo.toml is what lets it.
     #[test]
     fn parse_xml_declines_what_xmlguard_refuses() {
-        // An unoptimised roxmltree overflows a 2 MiB test thread at ~150 levels
-        // (measured; release builds hold ~2,000), and both depth cases really
-        // parse when the guard is absent — so the body gets its own stack.
-        std::thread::Builder::new()
-            .stack_size(16 << 20)
-            .spawn(guard_shapes)
-            .unwrap()
-            .join()
-            .unwrap();
-    }
-
-    fn guard_shapes() {
         use epubveri::xmlguard::{MAX_ATTRIBUTES, MAX_XML_DEPTH};
         assert!(parse_xml(&nested(MAX_XML_DEPTH)).is_some(), "at the limit");
         assert!(parse_xml(&nested(MAX_XML_DEPTH + 1)).is_none(), "too deep");

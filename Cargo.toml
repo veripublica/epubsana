@@ -248,3 +248,13 @@ serde_json = "1"
 
 [profile.release]
 opt-level = 2
+
+# roxmltree's parser recurses once per nesting level. Unoptimised, it aborts
+# a 2 MiB thread (the `cargo test` default) at 125 levels, below the 256
+# `epubveri::xmlguard` admits, so a debug build could be crashed by a document
+# the guard accepts. Optimising this one crate is enough: it then parses 800.
+# Measured by epubveri (2026-09-23) after we reported the debug-build gap.
+# Cargo ignores a dependency's profile settings, so this has to live in the
+# root manifest of whoever builds; it does not reach crates that depend on us.
+[profile.dev.package.roxmltree]
+opt-level = 1
