@@ -18,10 +18,10 @@ on:
         description: "Existing tag/release to attach binaries to (e.g. v0.1.0)"
         required: true
 
-# GITHUB_TOKEN defaults to read-only; softprops/action-gh-release needs write
-# access to attach files to an existing release.
+# Read-only by default. Only the `release` job, which attaches files and signs
+# the attestation, is granted more.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -53,7 +53,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - name: Check out
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       # The static-musl targets link with musl-gcc; every other target uses the
       # runner's default toolchain as-is.
@@ -88,7 +88,7 @@ jobs:
           Compress-Archive -Path $stage -DestinationPath "$stage.zip"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: epubsana-${{ matrix.target }}
           path: |
@@ -96,13 +96,73 @@ jobs:
             epubsana-${{ matrix.target }}.zip
           if-no-files-found: ignore
 
+  # Everything that writes to the release happens here, once, after all eight
+  # builds: the checksum list and the provenance attestation must cover every
+  # archive, and a per-target job cannot see the others'.
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      # Both are for the provenance attestation below: `id-token` to get the
+      # OIDC token it signs with, `attestations` to record the result.
+      id-token: write
+      attestations: write
+    steps:
+      - name: Check out
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: dist
+          merge-multiple: true
+
+      # `if-no-files-found: ignore` above means a packaging step that silently
+      # produced nothing still reports success, so `needs: build` cannot catch
+      # it. Assert the count before anything is written: eight targets, six
+      # tarballs and two zips.
+      - name: Check every target produced an archive
+        shell: bash
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          ls -l
+          n=$(ls -1 epubsana-*.tar.gz epubsana-*.zip 2>/dev/null | wc -l | tr -d ' ')
+          if [ "$n" -ne 8 ]; then
+            echo "expected 8 archives, found $n" >&2
+            exit 1
+          fi
+
+      # The plain, offline half of "is this what the build produced":
+      # `sha256sum -c` needs no tooling and no network. It sits next to the
+      # archives, so anyone able to replace one could replace the other; the
+      # attestation below is the half without that weakness.
+      - name: Write SHA256SUMS.txt
+        shell: bash
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          sha256sum epubsana-*.tar.gz epubsana-*.zip > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      # Signed build provenance: which commit, workflow and runner produced
+      # each archive, verifiable with `gh attestation verify`. The binary is
+      # the artefact people run, so it should not be the one without it.
+      # Only the archives are subjects; signing SHA256SUMS.txt would sign a
+      # list of hashes rather than the things themselves.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/epubsana-*.tar.gz
+            dist/epubsana-*.zip
+
       # Populate the GitHub Release body from this version's CHANGELOG.md
       # section, so the release notes are never filled in by hand — which is the
       # step that gets forgotten (epubveri's v0.5.0/0.5.1/0.5.2 shipped with
       # blank release pages while their CHANGELOG entries existed; see
-      # veripublica/epubveri, "ci: auto-fill GitHub Release notes"). Every matrix
-      # job writes the same file and sets the same body — idempotent. `bash` is
-      # available on all runners, Windows included.
+      # veripublica/epubveri, "ci: auto-fill GitHub Release notes").
       - name: Extract release notes from CHANGELOG
         shell: bash
         run: |
@@ -124,11 +184,10 @@ jobs:
           echo "----- extracted release notes -----"
           cat RELEASE_NOTES.md
 
+      # One writer, one call, every archive and the checksum list.
       - name: Attach to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
           body_path: RELEASE_NOTES.md
-          files: |
-            epubsana-${{ matrix.target }}.tar.gz
-            epubsana-${{ matrix.target }}.zip
+          files: dist/*

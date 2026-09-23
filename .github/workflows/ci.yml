@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       # ubuntu-latest ships stable Rust + rustfmt; we only add the wasm target
       # for the smoke builds below. All deps (epubveri, zip, roxmltree, and the
@@ -82,3 +82,39 @@ jobs:
 
       - name: Build epubsana-wasm for wasm32
         run: cargo build -p epubsana-wasm --target wasm32-unknown-unknown --locked
+
+  # The mutation fuzzer (examples/fuzz.rs): two defective books corrupted
+  # 3,000 times each, every result repaired with every fix approved, and any
+  # panic fails the job. Deterministic per seed, so red here reproduces
+  # locally with the same `--seed`. Proven able to fail: a byte-slicing bug
+  # put into a fixer is found by seed 1 at book 564 and by seed 2 at book 538.
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Fuzz (seeds 1 and 2)
+        run: |
+          cargo run --release --locked --example fuzz -- --seed 1 --books 3000
+          cargo run --release --locked --example fuzz -- --seed 2 --books 3000
+
+  # RustSec audit of Cargo.lock. Its own job because its verdict depends on the
+  # advisory database, not on our commit: it can turn red with nothing here
+  # changing, and a separate red X names that cause. audit.yml runs the same
+  # check weekly, for the weeks nothing is pushed.
+  audit:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write
+    steps:
+      - name: Check out
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      # `v2` upstream is a branch, not a tag, so this pins the commit v2.0.0
+      # names (checked 2026-09-23 with git ls-remote).
+      - name: Audit dependencies
+        uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
