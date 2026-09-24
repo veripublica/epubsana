@@ -13,7 +13,7 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 ### Changed
 
 - **Built against epubveri 0.17.5**, which validates about 2.5 times faster
-  with the same reports. The required version is unchanged (`0.17`), so this
+  with the same reports. The required version is unchanged (`0.17.4`), so this
   only moves the version the published binaries are built with. Every fix
   proposed across the 474-book test shelf is identical under both versions.
 
