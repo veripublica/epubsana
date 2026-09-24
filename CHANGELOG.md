@@ -8,6 +8,15 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Built against epubveri 0.17.5**, which validates about 2.5 times faster
+  with the same reports. The required version is unchanged (`0.17`), so this
+  only moves the version the published binaries are built with. Every fix
+  proposed across the 474-book test shelf is identical under both versions.
+
 ## [0.17.1] - 2026-09-23
 
 ### Security
