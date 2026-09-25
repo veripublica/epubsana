@@ -177,6 +177,18 @@ members = ["epubsana-wasm"]
 #   and 50 renames, so a `params` answer that failed to arrive would have deleted
 #   every one of them.
 #
+#   **0.18.0 (2026-09-25) is a TRACKING floor.** A minor, so the caret on 0.17
+#   stops before it and the edit is forced. No source change and no API change
+#   upstream. It adds 71 rule keys (EDUPUB, Dictionaries, Indexes, collections,
+#   ARIA roles, non-space RSC-020 under their own keys, so the space fixers never
+#   receive them) and removes four false positives, none of which we dispatch
+#   on. The one that touches us: `opf.package.opf_itemref_resolves` now fires
+#   beside OPF-049 on the same itemref, so `fix.spine_dangling_itemref` clears
+#   two findings where it cleared one. Measured on the 474-book shelf, both arms'
+#   linkage checked: plan digest, `regression_audit` and the full `rule_census`
+#   are all byte-identical. None of the new rules has a population here, so this
+#   is a null about the shelf, not about the rules.
+#
 #   **0.17.4 (2026-09-23) is a SECURITY floor, and a compile-time one.** We
 #   call `epubveri::xmlguard::check` before every roxmltree parse, because our
 #   fixers parse text the detector refused or never saw (`toc_labels` walks
@@ -226,7 +238,7 @@ members = ["epubsana-wasm"]
 #
 # For local co-development of epubveri, add an uncommitted override:
 #   [patch.crates-io] epubveri = { path = "../epubveri" }
-epubveri = "0.17.4"
+epubveri = "0.18.0"
 # Pure-Rust only (no C deps), same philosophy as epubveri: zip's "deflate"
 # feature uses zlib-rs (Rust) on the 8.x line; bzip2/zstd (C) stay disabled.
 # Aligned to epubveri's zip major — the family shares one zip version because

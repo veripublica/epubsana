@@ -8,6 +8,16 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Requires epubveri 0.18**, which checks EDUPUB, Dictionaries, Indexes,
+  collections and ARIA roles as epubcheck does, and stops reporting four
+  findings epubcheck never reported. No fixer changed. Every fix proposed
+  across the 474-book test shelf is identical under both versions, and none of
+  the new rules fires on any book in it.
+
 ## [0.17.2] - 2026-09-24
 
 ### Changed
