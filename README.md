@@ -252,9 +252,9 @@ Every frontend (this CLI, the [in-browser WASM demo](https://veripublica.github.
 [epublift](https://github.com/ePubLift/epublift) integration) shares one core
 contract so behavior never diverges: fixes are proposed as data, the caller
 decides per fix (`Confirmer`), and the run ends with a `ChangeReport`. Nothing
-mutates without an approved fix. One difference today: the in-browser demo
-applies fixes one at a time as you click them and does not yet undo a fix that
-made the book worse, which the CLI and library do.
+mutates without an approved fix. The in-browser demo runs the same repair
+function as the CLI, including undoing a fix that made the book worse, so the
+same book with the same approvals comes back byte for byte the same from both.
 
 ## License
 

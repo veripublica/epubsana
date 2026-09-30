@@ -27,6 +27,8 @@
       .actionbar { display: flex; gap: .75rem; align-items: center; flex-wrap: wrap; margin: 1rem 0 1.25rem; }
       .fix { border: 1px solid var(--border); border-radius: 10px; padding: .8rem 1rem; margin: .6rem 0; background: var(--card); }
       .fix.applied { opacity: .72; }
+      .fix.reverted { border-color: var(--warn); }
+      .fix-head input[type=checkbox] { width: 1.05rem; height: 1.05rem; margin: 0; }
       .fix-head { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
       /* The tier badge — how much judgement a fix needs. epubsana's own axis,
          and deliberately not a severity: a safe fix can clear a fatal. */
@@ -38,6 +40,14 @@
       .preview { margin: .4rem 0 0; padding-left: 1.1rem; font-size: .83rem; color: var(--muted); }
       .preview li { margin: .1rem 0; }
       .applied-tag { color: var(--ok); font-weight: 700; white-space: nowrap; }
+      .reverted-tag { color: var(--warn); font-weight: 700; white-space: nowrap; }
+      .skipped-tag { color: var(--muted); font-weight: 700; white-space: nowrap; }
+      .undone { color: var(--warn); font-size: .85rem; margin: .4rem 0 0; }
+      .note { color: var(--muted); font-size: .88rem; margin: .5rem 0 0; }
+      /* demo.css gives .verdict `display: inline-flex`, which beats the
+         `hidden` attribute, so a verdict once shown could never be hidden and
+         the previous book's result stayed on screen after loading another. */
+      .verdict[hidden] { display: none; }
       .goal-pick { display: flex; align-items: center; gap: .5rem; margin-left: auto; font-size: .85rem; color: var(--muted); }
     </style>
   </head>
@@ -85,10 +95,10 @@
       <section id="result" hidden>
         <p class="counts" id="counts"></p>
         <div class="verdict" id="verdict" hidden></div>
+        <p class="note" id="note" hidden></p>
 
         <div class="actionbar">
-          <button class="primary" id="autosafe" type="button">Apply all safe fixes</button>
-          <button id="recheck" type="button" disabled>Re-check with epubveri</button>
+          <button class="primary" id="repair" type="button">Repair with the ticked fixes</button>
           <button id="download" type="button" disabled>Download repaired .epub</button>
           <span class="goal-pick">
             <label for="goal">Goal</label>
@@ -126,15 +136,20 @@
       const resultEl = document.getElementById("result");
       const countsEl = document.getElementById("counts");
       const verdictEl = document.getElementById("verdict");
+      const noteEl = document.getElementById("note");
       const fixesEl = document.getElementById("fixes");
-      const autosafeEl = document.getElementById("autosafe");
-      const recheckEl = document.getElementById("recheck");
+      const repairEl = document.getElementById("repair");
       const downloadEl = document.getElementById("download");
       const goalEl = document.getElementById("goal");
 
       let ready = false;
       let session = null;
       let sourceName = "book.epub";
+      // Which fixes are ticked, by 0-based index. The page only collects the
+      // choice; the repair itself, including undoing a fix that made the book
+      // worse, is the same core function the command line runs.
+      let ticked = new Set();
+      let repaired = false;
 
       init()
         .then(() => {
@@ -159,7 +174,11 @@
           return;
         }
         statusEl.textContent = `Opened ${file.name}.`;
+        // Safe fixes start ticked; a fix that needs a decision waits for one.
+        ticked = new Set(session.plan().fixes.filter((f) => f.tier === "AutoSafe").map((f) => f.index));
+        repaired = false;
         verdictEl.hidden = true;
+        noteEl.hidden = true;
         render();
       }
 
@@ -169,15 +188,13 @@
         const plan = session.plan();
         resultEl.hidden = false;
 
-        const applied = plan.fixes.filter((f) => f.outcome === "applied").length;
         countsEl.textContent =
           `${plan.fatals_before} fatal, ${plan.errors_before} error, ` +
           `${plan.warnings_before} warning before repair · ` +
-          `${plan.fixes.length} fixable · ${applied} applied`;
+          `${plan.fixes.length} fixable · ${ticked.size} ticked`;
 
-        autosafeEl.disabled = !plan.fixes.some((f) => f.tier === "AutoSafe" && f.outcome !== "applied");
-        recheckEl.disabled = applied === 0;
-        downloadEl.disabled = applied === 0;
+        repairEl.disabled = plan.fixes.length === 0;
+        downloadEl.disabled = !repaired;
 
         fixesEl.textContent = "";
         if (plan.fixes.length === 0) {
@@ -191,12 +208,21 @@
       }
 
       function renderFix(f) {
-        const applied = f.outcome === "applied";
         const card = document.createElement("div");
-        card.className = "fix" + (applied ? " applied" : "");
+        card.className = "fix" + (f.outcome === "applied" ? " applied" : "") + (f.outcome === "reverted" ? " reverted" : "");
 
         const head = document.createElement("div");
         head.className = "fix-head";
+
+        const box = document.createElement("input");
+        box.type = "checkbox";
+        box.checked = ticked.has(f.index);
+        box.title = "Approve this fix";
+        box.addEventListener("change", () => {
+          if (box.checked) ticked.add(f.index);
+          else ticked.delete(f.index);
+          render();
+        });
 
         // Two independent facts, side by side: how much judgement the fix needs
         // (the tier badge) and how bad the defect it clears is (the severity,
@@ -217,25 +243,29 @@
         title.className = "title";
         title.textContent = f.title;
 
-        head.append(badge, sev, id, title);
+        head.append(box, badge, sev, id, title);
 
-        if (applied) {
+        const tags = {
+          applied: ["applied-tag", "✓ applied"],
+          reverted: ["reverted-tag", "↺ reverted"],
+          skipped: ["skipped-tag", "skipped"],
+        };
+        if (tags[f.outcome]) {
           const tag = document.createElement("span");
-          tag.className = "applied-tag";
-          tag.textContent = "✓ applied";
+          tag.className = tags[f.outcome][0];
+          tag.textContent = tags[f.outcome][1];
           head.appendChild(tag);
-        } else {
-          const btn = document.createElement("button");
-          btn.textContent = "Approve";
-          btn.addEventListener("click", () => {
-            session.apply(f.index);
-            verdictEl.hidden = true;
-            render();
-          });
-          head.appendChild(btn);
         }
         card.appendChild(head);
 
+        if (f.reverted_for) {
+          const u = document.createElement("div");
+          u.className = "undone";
+          u.textContent =
+            `Undone: applying it added a ${f.reverted_for} finding. ` +
+            "You approved it; epubsana overruled you, and it is not in the download.";
+          card.appendChild(u);
+        }
         if (f.rationale) {
           const r = document.createElement("div");
           r.className = "rationale";
@@ -257,30 +287,45 @@
         return card;
       }
 
-      // The honest half: re-run epubveri over the repaired bytes and report what
-      // it says, not what epubsana hoped. Re-zips and re-validates the whole
-      // book, so it runs on demand — not on every approval.
-      function recheck() {
-        const r = session.report(goalEl.value);
+      // The honest half: epubveri's verdict on the repaired bytes, not what
+      // epubsana hoped.
+      function showVerdict(r) {
         const s = r.summary;
         verdictEl.hidden = false;
         verdictEl.className = "verdict " + (r.status === "ok" ? "valid" : "invalid");
         verdictEl.textContent =
           `goal '${s.goal}': ${r.status === "ok" ? "MET" : "NOT MET"} — ` +
           `fatal ${s.fatals_before} → ${s.fatals_after}, ` +
-          `error ${s.errors_before} → ${s.errors_after}`;
+          `error ${s.errors_before} → ${s.errors_after}` +
+          (s.reverted ? ` · ${s.reverted} fix(es) reverted` : "");
+
+        const n = session.revealed();
+        noteEl.hidden = n === 0;
+        noteEl.textContent =
+          `${n} finding${n === 1 ? "" : "s"} (counting every severity) appeared that ` +
+          `${n === 1 ? "was" : "were"} always in the book. A fix let epubveri check part of ` +
+          "the book it could not check before, so they were not in this plan. Download the " +
+          "result and repair it again to fix the ones epubsana can; the rest need an editor.";
       }
 
-      autosafeEl.addEventListener("click", () => {
-        const n = session.apply_auto_safe();
-        statusEl.textContent = `Applied ${n} safe fix(es).`;
-        render();
-        recheck();
+      repairEl.addEventListener("click", () => {
+        statusEl.textContent = "Repairing and checking…";
+        // Let the status paint before the synchronous repair blocks the page.
+        setTimeout(() => {
+          try {
+            const r = session.repair(Uint32Array.from(ticked), goalEl.value);
+            repaired = true;
+            statusEl.textContent = `Applied ${r.summary.applied}, reverted ${r.summary.reverted}, skipped ${r.summary.skipped}.`;
+            render();
+            showVerdict(r);
+          } catch (e) {
+            statusEl.textContent = "Repair failed: " + e;
+          }
+        }, 0);
       });
 
-      recheckEl.addEventListener("click", recheck);
       goalEl.addEventListener("change", () => {
-        if (!verdictEl.hidden) recheck();
+        if (repaired) showVerdict(session.report(goalEl.value));
       });
 
       downloadEl.addEventListener("click", () => {

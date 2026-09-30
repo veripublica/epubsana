@@ -35,3 +35,7 @@ serde = { version = "1", features = ["derive"] }
 # moving it (`cargo update -p tsify --precise …`, then `-p tsify-macros`), since
 # the macro is what emits the deprecated reference.
 tsify = { version = "0.5", features = ["js"] }
+
+[dev-dependencies]
+# Only to build fixture EPUBs in the tests; the same zip the core uses.
+zip = { version = "8.6", default-features = false, features = ["deflate"] }

@@ -8,6 +8,32 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [Unreleased]
+
+### Changed
+
+- **The browser version now repairs exactly as the command line does.** It
+  collects the fixes you approve and runs the same repair function, so a fix
+  that makes the book worse is undone and shown as reverted, and a fix you did
+  not approve is shown as skipped. The same book with the same approvals now
+  comes back byte for byte identical from the browser and from the CLI. Until
+  now the browser applied each fix the moment it was approved and never checked
+  the result. Asked for by epublift, whose web repair will run on it.
+- **Breaking, `@veripublica/epubsana-wasm`:** `Session.apply(index)` and
+  `Session.apply_auto_safe()` are removed. `Session.repair(approved, goal)`
+  replaces them. It takes the approved fix indices and returns the report.
+  `Session.revealed()` returns how many findings a fix let the validator see
+  for the first time. The summary gains `reverted`, a fix gains
+  `reverted_for`, and `outcome` can now be `"skipped"` and `"reverted"`.
+- The demo page is rebuilt around this: tick the fixes, press Repair, and each
+  fix shows what became of it.
+
+### Fixed
+
+- **Demo:** after one book had been checked, its verdict stayed on screen when
+  another book was loaded. The shared stylesheet gave the verdict a `display`
+  value that overrode the `hidden` attribute.
+
 ## [0.19.0] - 2026-09-30
 
 ### Added
