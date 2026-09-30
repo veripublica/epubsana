@@ -509,12 +509,23 @@ meant to repair stays unrepaired, and stays in the report.
 
 Two limits, stated plainly:
 
-- A fix that makes an unreadable document readable (by clearing an undeclared
-  entity, say) is **not** undone for the findings that then appear. They were
-  in the book all along; epubveri simply could not see into the document
-  before. A later fix that makes the same finding more frequent still is. The
+- A fix that lets epubveri see what it could not see before is **not** undone
+  for the findings that then appear. There are two such fixes: one makes an
+  unreadable document readable (by clearing an undeclared entity, say), and
+  the other corrects a package `version` no validator recognises, which had
+  stopped validation altogether. The findings were in the book all along. A
+  later fix that makes the same finding more frequent still is undone. The
   cost is that a problem such a fix genuinely introduced would be accepted with
-  them.
+  them. When this happens the report ends with a note like this one:
+
+  ```
+  note: 45 findings (counting every severity) appeared that were always in the book. [...]
+  ```
+
+  So the error count can go **up** after a repair, and that is not damage. Those
+  findings were not in the plan this run made, because the plan was made before
+  they could be seen. Run epubsana again on the output to repair the ones it
+  can. Fix the rest in an editor.
 - The check uses the same validator that proposed the fix, so a defect
   epubveri does not recognise cannot trigger it.
 - **N fatal(s), N error(s) → …** is epubveri's own count before repair vs. after
@@ -666,6 +677,7 @@ safe, and when epubsana declines, see the **[fix catalogue](./FIXERS.md)**.
 | `RSC-005` | `opf.package.schema_violation` | AutoSafe | Deletes an EPUB 3 attribute sitting on an EPUB 2 package document — but only after verifying, in that book, that it says nothing the book does not already say: a `properties="cover-image"` whose cover is also declared by `<meta name="cover">` on that same item, or a `page-progression-direction="ltr"`, which is the default everywhere. Any other `properties` token, a cover with no legacy declaration, or an `rtl` reading direction carries real information EPUB 2 cannot express, and is left alone. |
 | `RSC-005` | `htm.epub2_dom.nested_anchor` | ConfirmNeeded | An `<a>` cannot contain another `<a>`. Where the outer one carries no `href` it is not a link but an **anchor target** — the legacy way of naming a position — so it is unwrapped and its `id` moves to its single child, and the fragment still resolves at the same place on the page. An outer anchor that is a real link, or that carries any attribute besides `id`, is left alone. |
 | `RSC-007` | `opf.content_document.reference_missing_resource` | ConfirmNeeded | A link whose path no longer resolves but whose target is still in the book under the same name — a book restructured after it was written (`../Text/notes.xhtml#a8` where the file now sits beside the referring document). The path is repointed at the one container entry carrying that name, relative to the referring document, and the fragment is carried across. Declines when the name matches nothing or several entries, when the fragment is not in the chosen target (that would trade one error for a broken link), and for external URLs, scheme-less hostnames and placeholder junk. |
+| `OPF-001` | `opf.package.unrecognized_version` | ConfirmNeeded | The package declares a `version` that is not an EPUB version (on real books, `1.0`), so no validator has ever checked the book: epubveri and epubcheck both stop at this one finding. When the package is in the EPUB namespace and declares an NCX and no navigation document, only EPUB 2 fits, and the version is set to `2.0`. The book is then checked for the first time and may show defects that were always in it; see [Reverted fixes](#reverted-fixes). Declines a package outside the EPUB namespace (an OEB 1.x package is a different format), one with a navigation document, and one with no NCX. |
 | `OPF-030` / `RSC-005` | `opf.package.unique_identifier_unresolved`, `opf.package.opf_identifier_not_empty` | ConfirmNeeded | The package says which identifier is canonical and that declaration lands on nothing usable — either no `<dc:identifier>` carries the named id, or the one that does is empty. The declared id is attached to the book's **single** real identifier and any leftover empty element is dropped; the NCX `dtb:uid` is synced in the same edit, since this repair is what first makes that comparison possible. Nothing is invented: the value was already in the book and the id already in the package. Declines when the book carries two candidate identifiers — choosing between a UUID and an ISBN is an editorial decision — or none at all. |
 | `OPF-054` | *(none)* | ConfirmNeeded | Drops a `<dc:date>` with no content: it states no date, and `dc:date` is optional. A malformed but non-empty date (`March 2019`) carries a date the author wrote and is left exactly as it is — deciding which characters are stray would be a guess. Note `OPF-054` is EPUB 2 only; on EPUB 3 the same condition is a warning that never moves the validity line. |
 | `OPF-072` | `opf.metadata.empty_element` | ConfirmNeeded | Drops an empty **optional** Dublin Core element (`dc:coverage`, `dc:source`, `dc:rights`, `dc:relation`, `dc:subject`, `dc:description`) from an EPUB 2 package: it states nothing, and its absence is valid. Never drops `dc:title`, `dc:identifier` or `dc:language` — deleting an empty *required* element would trade "empty" for "missing" — leaves `dc:date` to the fixer above, and declines an element a `<meta refines="#id">` points at, so no refinement is orphaned. **Usage severity: this clears report noise, not a validity failure.** |

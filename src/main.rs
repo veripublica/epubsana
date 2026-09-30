@@ -527,6 +527,21 @@ fn print_report(report: &ChangeReport, written: Option<&str>, run: &Run) {
         counts(report.fatals_before, report.errors_before, 0),
         counts(report.fatals_after, report.errors_after, 0),
     );
+    if report.revealed > 0 {
+        // Said plainly, because the numbers above can rise and the reader
+        // must not take that for damage: a fix let the detector see part of
+        // the book it could not see before, and what it found was always there.
+        println!(
+            "note: {n} finding{s} (counting every severity) appeared that {were} always in \
+             the book. A fix let epubveri check part of the book it could not check before, so {they} {were} \
+             not in this run's plan. Run epubsana again on the output to repair the ones \
+             it can; the rest need an editor.",
+            n = report.revealed,
+            s = if report.revealed == 1 { "" } else { "s" },
+            were = if report.revealed == 1 { "was" } else { "were" },
+            they = if report.revealed == 1 { "it" } else { "they" },
+        );
+    }
     if let Some(path) = written {
         println!(
             "{} {path}",

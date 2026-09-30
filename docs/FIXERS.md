@@ -55,6 +55,7 @@ grows one carefully-argued entry at a time.
 | `RSC-005` | `opf.content_document.duplicate_id` | ConfirmNeeded | Two or more elements in one document share an `id` | [Keep the first, rename the later ones](#rsc-005--a-duplicate-id-in-a-content-document) |
 | `RSC-007` | `opf.content_document.reference_missing_resource` | ConfirmNeeded | A link's path is stale, but the file it names is still in the book | [Repoint the path, carry the fragment across](#rsc-007--a-reference-whose-path-is-wrong-but-whose-target-is-in-the-book) |
 | `RSC-007` | `css.font_face.missing_target` | ConfirmNeeded | A `@font-face` sources a font file the book does not contain | [Drop the whole rule; decline one with a second source](#rsc-007--a-font-face-whose-font-file-is-not-in-the-book) |
+| `OPF-001` | `opf.package.unrecognized_version` | ConfirmNeeded | The package declares a `version` that is not an EPUB version, so the book has never been validated | [Set it to `2.0` when only EPUB 2 fits](#opf-001--a-package-version-that-is-not-an-epub-version) |
 | `OPF-030` / `RSC-005` | `opf.package.unique_identifier_unresolved`, `opf.package.opf_identifier_not_empty` | ConfirmNeeded | The package's declared unique identifier resolves to nothing usable | [Attach the declared id to the book's one real identifier](#opf-030--rsc-005--the-packages-declared-identifier-points-at-nothing-usable) |
 | `RSC-005` | `htm.epub2_dom.nested_anchor` | ConfirmNeeded | An `<a>` with only an `id` wraps a real link | [Unwrap it, moving the `id` to the child](#rsc-005--an-anchor-target-wrapped-around-a-link) |
 | `RSC-005` | `navdoc.ol.empty` | ConfirmNeeded | An optional `<nav>` in the navigation document holds an `<ol>` with no `<li>` | [Delete the whole `<nav>`](#rsc-005--an-optional-nav-whose-list-is-empty) |
@@ -1764,6 +1765,51 @@ fragment present in the target**, so on this corpus the two agree every time.
 **Measured.** 36 findings across 8 books, of which **24 in 3 books** are the
 repairable shape and clear completely; the other 12 are declined by the rules
 above. Both whole-shelf instruments report nothing introduced.
+
+---
+
+## OPF-001 — a package version that is not an EPUB version
+
+**Finding.** `opf.package.unrecognized_version`. `params[0]` is the declared
+version. On real books it is `1.0`, written by InDesign and kept by Sigil.
+
+**This finding hides every other one.** epubveri, like epubcheck, chooses its
+checks by the package version and runs none for a version it does not know. A
+book with `version="1.0"` therefore reports this one error and nothing else.
+"One error" here means "never checked", not "nearly valid".
+
+**Fix** (`fix.package_version`, ConfirmNeeded). Set the attribute to `2.0`,
+keeping the quote character the file used. Nothing else in the package changes.
+
+**Why 2.0 is not a guess.** The package is in the EPUB namespace
+(`http://www.idpf.org/2007/opf`), which only EPUB 2 and EPUB 3 use; OEB 1.x
+had its own. EPUB 3 requires a navigation document, and the manifest declares
+none, but it does declare an NCX. Only EPUB 2.0 is consistent with what the
+book itself says.
+
+**What happens next, and why it is not a regression.** The next validation is
+the book's first, and it can find defects that were always there. On the test
+shelf one book went from 1 error to 29. `repair()` does not undo this fix for
+them: a fix that lets the detector see what it could not see before is treated
+like a fix that clears a fatal, and what appears is accepted as revealed. A
+later fix that raises the same finding further is still undone. The run ends
+with a note saying how many findings appeared and suggesting a second run; the
+fix's own title says the book will be checked for the first time.
+
+**When it declines.**
+
+- A package outside the EPUB namespace. An OEB 1.x package is a different
+  format, and epubcheck's own fixture for one expects this finding and nothing
+  else.
+- A manifest item with the `nav` property. EPUB 3 is then possible, and the
+  version is a choice.
+- No NCX item. Nothing in the book says which version it was written for.
+- A `version` in the file that is not the one reported.
+
+**Measured.** 544 books, epubveri 0.19.1: six books carry the finding, and all
+six are proposed. After the fix, and a second run on the output, four of them
+are valid. The other two keep an empty `<dc:identifier>`, which only the
+author can fill.
 
 ---
 

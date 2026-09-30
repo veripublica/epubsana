@@ -99,6 +99,7 @@ pub fn plan(report: &Report, ws: &Workspace, _goal: Goal) -> Vec<ProposedFix> {
     fixes.extend(ncx_src_wrong_path(report, ws));
     fixes.extend(fragment_wrong_path(report, ws));
     fixes.extend(package_identifier(report, ws));
+    fixes.extend(package_version(report, ws));
     fixes.extend(nested_anchors(report, ws));
     fixes.extend(epub3_attrs_in_epub2_package(report, ws));
     fixes.extend(empty_dc_date(report, ws));
@@ -173,6 +174,7 @@ pub fn handled_rules() -> &'static [&'static str] {
         "opf.package.opf_identifier_not_empty",
         "opf.package.schema_violation",
         "opf.package.unique_identifier_unresolved",
+        "opf.package.unrecognized_version",
         "opf.spine.duplicate_itemref",
         "opf.spine.itemref_idref_not_in_manifest",
     ]
@@ -4944,6 +4946,136 @@ fn quoted_attr_span(text: &str, value: &str) -> Option<Range<usize>> {
     None
 }
 
+/// `OPF-001` / `opf.package.unrecognized_version`: the `<package>` declares a
+/// `version` that is neither `2.x` nor `3.x` — on the shelf, `1.0` on six books
+/// from InDesign and Sigil.
+///
+/// **This is the one finding that hides all the others.** epubveri, like
+/// epubcheck, chooses its checks by version and runs none for an unknown one,
+/// so such a book reports `OPF-001` and nothing else: "one error" means "never
+/// checked". The repair writes `version="2.0"`, and the next validation is the
+/// book's first. What it finds was always there, which is why [`crate::repair`]
+/// accepts it as revealed rather than reverting this fix (Baris, 2026-09-30).
+///
+/// **Why 2.0 is not a guess.** The package is in the 2007 OPF namespace, which
+/// only EPUB 2 and EPUB 3 use (OEB 1.x had its own); EPUB 3 requires a
+/// navigation document and the manifest declares none, while it does declare an
+/// NCX. Only 2.0 is consistent with the book's own structure.
+///
+/// **Declines:** a package outside the 2007 namespace (an OEB 1.x package is a
+/// different format, and epubcheck's own fixture for one expects exactly this
+/// finding and nothing else); a manifest item with the `nav` property, or no NCX
+/// item (then 3.0 is possible, or neither fits, and the version is a choice); a
+/// `version` in the file that is not the one reported.
+///
+/// Measured (`v1_probe.rs`, 544 books, epubveri 0.19.1): six books, all six
+/// proposed. After this fix and a second run, four are valid; two keep an empty
+/// identifier that only an editor can fill.
+fn package_version(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    let mut targets: BTreeMap<String, String> = BTreeMap::new();
+    for m in &report.messages {
+        if m.rule != Some("opf.package.unrecognized_version") {
+            continue;
+        }
+        let (Some(opf), Some(v)) = (m.location.as_deref(), m.params.first()) else {
+            continue;
+        };
+        targets.insert(opf.to_string(), v.clone());
+    }
+
+    let mut fixes = Vec::new();
+    for (opf, declared) in targets {
+        let Some(text) = ws.get_text(&opf) else {
+            continue;
+        };
+        if plan_version_edit(&text, &declared).is_none() {
+            continue;
+        }
+        let declared_for_apply = declared.clone();
+        let opf_for_apply = opf.clone();
+
+        fixes.push(ProposedFix {
+            fix_id: "fix.package_version",
+            addresses_id: "OPF-001".to_string(),
+            addresses_rule: Some("opf.package.unrecognized_version"),
+            addresses_severity: addressed_severity(
+                report,
+                "OPF-001",
+                Some("opf.package.unrecognized_version"),
+            ),
+            tier: Tier::ConfirmNeeded,
+            title: format!(
+                "Set the package version from \"{declared}\" to \"2.0\" in {opf} \
+                 (the book will be checked for the first time)"
+            ),
+            rationale: format!(
+                "\"{declared}\" is not an EPUB version, so no validator has ever checked this book: \
+                 epubveri and epubcheck both stop at this one finding. The package uses the EPUB \
+                 namespace and declares an NCX and no navigation document, which only EPUB 2.0 \
+                 is consistent with. After this change the book is checked for the first time, \
+                 and it may show defects that were always in it. Run epubsana again on the \
+                 output to repair the ones it can; the rest are for an editor."
+            ),
+            preview: vec![Change {
+                path: opf.clone(),
+                note: format!("version=\"{declared}\" → version=\"2.0\""),
+            }],
+            apply_fn: Box::new(move |ws: &mut Workspace| {
+                if let Some(text) = ws.get_text(&opf_for_apply)
+                    && let Some(edit) = plan_version_edit(&text, &declared_for_apply)
+                {
+                    ws.set_text(&opf_for_apply, apply_edits(&text, vec![edit]));
+                }
+            }),
+        });
+    }
+    fixes
+}
+
+/// The edit that sets `version="2.0"` on this package, or `None` (decline) when
+/// the package is not unambiguously EPUB 2 — see [`package_version`]. Computed
+/// again at apply time, because an earlier fix may have moved the bytes.
+fn plan_version_edit(text: &str, declared: &str) -> Option<MetaEdit> {
+    const OPF_NS: &str = "http://www.idpf.org/2007/opf";
+    let doc = parse_xml(text)?;
+    let pkg = doc.root_element();
+    if pkg.tag_name().name() != "package" || pkg.tag_name().namespace() != Some(OPF_NS) {
+        return None; // not a 2007 package — OEB 1.x is a different format
+    }
+    let attr = pkg
+        .attributes()
+        .find(|a| a.namespace().is_none() && a.name() == "version")?;
+    if attr.value() != declared {
+        return None; // the file is not what was reported
+    }
+    let items: Vec<_> = pkg
+        .children()
+        .filter(|n| n.is_element() && n.tag_name().name() == "manifest")
+        .flat_map(|m| m.children())
+        .filter(|n| n.is_element() && n.tag_name().name() == "item")
+        .collect();
+    let has_ncx = items
+        .iter()
+        .any(|i| i.attr_no_ns("media-type") == Some("application/x-dtbncx+xml"));
+    let has_nav = items.iter().any(|i| {
+        i.attr_no_ns("properties")
+            .is_some_and(|p| p.split_ascii_whitespace().any(|t| t == "nav"))
+    });
+    if !has_ncx || has_nav {
+        return None; // not unambiguously EPUB 2
+    }
+    let range = attr.range();
+    let quote = text[range.clone()]
+        .chars()
+        .rev()
+        .find(|c| *c == '"' || *c == '\'')
+        .unwrap_or('"');
+    Some(MetaEdit {
+        range,
+        replacement: format!("version={quote}2.0{quote}"),
+    })
+}
+
 /// `OPF-030` / `RSC-005`: the package declares which identifier is canonical and
 /// that declaration lands on nothing usable — either no `<dc:identifier>` carries
 /// the named id (`opf.package.unique_identifier_unresolved`), or the one that
@@ -7497,6 +7629,94 @@ mod tests {
         // The finding named only `properties`, so the spine attribute is not
         // touched even though it would qualify.
         assert_eq!(droppable(&opf, &["properties"]), vec!["properties"]);
+    }
+
+    // ---- fix.package_version ----------------------------------------
+
+    /// An OPF with `version` and `items` substituted, in the 2007 namespace
+    /// unless `ns` says otherwise.
+    fn version_ws(ns: &str, version_attr: &str, items: &str) -> Workspace {
+        let opf = format!(
+            r#"<?xml version="1.0" encoding="utf-8"?><package xmlns="{ns}" {version_attr} unique-identifier="i"><metadata/><manifest>{items}</manifest><spine/></package>"#
+        );
+        container(&[("content.opf", &opf)])
+    }
+
+    const NCX_ITEM: &str =
+        r#"<item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>"#;
+    const OPF_2007: &str = "http://www.idpf.org/2007/opf";
+
+    fn version_report(v: &str) -> Report {
+        let mut r = Report::default();
+        let mut m = fixture("OPF-001", "opf.package.unrecognized_version");
+        m.location = Some("content.opf".to_string());
+        m.params = vec![v.to_string()];
+        r.messages.push(m);
+        r
+    }
+
+    /// The shelf's shape: EPUB namespace, an NCX, no nav — only 2.0 fits. The
+    /// XML declaration's own `version="1.0"` is not the package's and stays.
+    #[test]
+    fn an_epub2_shaped_package_gets_version_2_0() {
+        let mut ws = version_ws(OPF_2007, r#"version="1.0""#, NCX_ITEM);
+        let fixes = package_version(&version_report("1.0"), &ws);
+        assert_eq!(fixes.len(), 1);
+        fixes.into_iter().next().unwrap().apply(&mut ws);
+        let out = ws.get_text("content.opf").unwrap();
+        assert!(out.starts_with(r#"<?xml version="1.0""#), "got: {out}");
+        assert!(out.contains(r#"<package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="i">"#), "got: {out}");
+    }
+
+    /// The quote character the file used is kept.
+    #[test]
+    fn a_single_quoted_version_stays_single_quoted() {
+        let mut ws = version_ws(OPF_2007, "version='1.0'", NCX_ITEM);
+        let fix = package_version(&version_report("1.0"), &ws)
+            .into_iter()
+            .next()
+            .unwrap();
+        fix.apply(&mut ws);
+        assert!(
+            ws.get_text("content.opf")
+                .unwrap()
+                .contains("version='2.0'")
+        );
+    }
+
+    /// A navigation document makes 3.0 possible, so the version is a choice.
+    #[test]
+    fn a_package_with_a_nav_is_declined() {
+        let items = format!(
+            r#"{NCX_ITEM}<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>"#
+        );
+        let ws = version_ws(OPF_2007, r#"version="1.0""#, &items);
+        assert!(package_version(&version_report("1.0"), &ws).is_empty());
+    }
+
+    /// No NCX: nothing in the book says which version it was written for.
+    #[test]
+    fn a_package_without_an_ncx_is_declined() {
+        let ws = version_ws(OPF_2007, r#"version="1.0""#, "");
+        assert!(package_version(&version_report("1.0"), &ws).is_empty());
+    }
+
+    /// An OEB 1.x package is a different format, not a mislabelled EPUB.
+    #[test]
+    fn a_package_outside_the_epub_namespace_is_declined() {
+        let ws = version_ws(
+            "http://openebook.org/namespaces/oeb-package/1.0/",
+            r#"version="1.0""#,
+            NCX_ITEM,
+        );
+        assert!(package_version(&version_report("1.0"), &ws).is_empty());
+    }
+
+    /// The file must hold the version the finding reported.
+    #[test]
+    fn a_version_other_than_the_reported_one_is_declined() {
+        let ws = version_ws(OPF_2007, r#"version="1.1""#, NCX_ITEM);
+        assert!(package_version(&version_report("1.0"), &ws).is_empty());
     }
 
     // ---- fix.adept_meta_value ---------------------------------------

@@ -286,6 +286,15 @@ pub struct ChangeReport {
     pub infos_after: usize,
     pub usages_before: usize,
     pub usages_after: usize,
+    /// How many findings the run accepted as **revealed** rather than
+    /// authored: findings that were always in the book, which the detector
+    /// could only see once a fix let it in. See [`repair`].
+    ///
+    /// They were not in the report the plan was made from, so no fixer was
+    /// asked about them. Running again on the output plans against them — which
+    /// is the one thing a caller should do with a non-zero value, and why the
+    /// CLI says so.
+    pub revealed: usize,
     /// The bar this run was measured against.
     pub goal: Goal,
     /// Whether the run's [`Goal`] was met by the re-validated result — the
@@ -357,6 +366,15 @@ impl ChangeReport {
 ///   fatal-clearing fix genuinely authors, anywhere in the book, is accepted
 ///   too. Today only the two entity fixers clear fatals, and both only replace
 ///   entity references with characters.
+/// - **So is a fix that lets validation start** (Baris, 2026-09-30). A package
+///   whose `version` epubveri does not recognise draws `OPF-001` and **nothing
+///   else** — the detector, like epubcheck, picks its checks by version and
+///   runs none. Correcting the version validates the book for the first time,
+///   and everything that appears was always there. It is the fatal rule with a
+///   second cause: the test is that the count of findings meaning *the detector
+///   could not look* (an unrecognised package version, plus every fatal) fell
+///   under the fix. Same price, same narrowness: only `fix.package_version`
+///   clears one, and it rewrites one attribute value.
 /// - **Replaying re-plans.** [`ProposedFix::apply`] consumes the fix, so after a
 ///   revert the workspace returns to where the run started and the same
 ///   detection is planned again. Planning is deterministic (see
@@ -455,6 +473,7 @@ fn repair_with(
         // Rebuilt on every replay: an accepted rise was measured against a set
         // of applied fixes that a revert has since changed.
         let mut baseline = Tally::of(&before);
+        let mut revealed = 0;
         let last = applied.len();
         while let Some(key) = baseline.first_risen(&seen[&last]) {
             // Invariant: `lo` fixes do not raise `key` past the baseline, `hi` do.
@@ -467,11 +486,12 @@ fn repair_with(
                     lo = mid;
                 }
             }
-            let fatals_under = tally_at(ws, &marks, &mut seen, hi - 1)?.fatals;
+            let blind_under = tally_at(ws, &marks, &mut seen, hi - 1)?.blind;
             let at_hi = tally_at(ws, &marks, &mut seen, hi)?;
-            if at_hi.fatals < fatals_under {
+            if at_hi.blind < blind_under {
                 // Revealed, not authored: accept this much of the rise.
                 let n = at_hi.count(&key);
+                revealed += n - baseline.count(&key);
                 baseline.counts.insert(key, n);
                 continue;
             }
@@ -482,8 +502,9 @@ fn repair_with(
             continue 'replay;
         }
         ws.seek(marks[last]);
-        break after;
+        break (after, revealed);
     };
+    let (after, revealed) = after;
 
     Ok(ChangeReport {
         fixes,
@@ -497,6 +518,7 @@ fn repair_with(
         infos_after: after.infos(),
         usages_before,
         usages_after: after.usages(),
+        revealed,
         goal,
         goal_met: goal.is_met(&after),
         before,
@@ -520,11 +542,21 @@ fn same_plan(plan: &[ProposedFix], shown: &[ReportedFix]) -> bool {
 
 type Key = (&'static str, Option<&'static str>);
 
-/// Findings counted by `(id, rule)`, plus the fatal count the revealed-rise
-/// rule compares. See [`repair`].
+/// Rules whose finding means the detector **stopped looking**, not that it
+/// found a defect in what it looked at. Clearing one validates the book for
+/// the first time, so what appears afterwards is revealed. See [`repair`].
+///
+/// A fatal is the other way in (the document could not be read at all) and is
+/// counted beside these, not listed here, because it is a severity rather than
+/// a rule.
+const BLINDING_RULES: &[&str] = &["opf.package.unrecognized_version"];
+
+/// Findings counted by `(id, rule)`, plus the count of findings meaning the
+/// detector could not look — every fatal and every [`BLINDING_RULES`] finding —
+/// which the revealed-rise rule compares. See [`repair`].
 struct Tally {
     counts: std::collections::BTreeMap<Key, usize>,
-    fatals: usize,
+    blind: usize,
 }
 
 impl Tally {
@@ -533,9 +565,14 @@ impl Tally {
         for m in &r.messages {
             *counts.entry((m.id, m.rule)).or_insert(0) += 1;
         }
+        let stopped = r
+            .messages
+            .iter()
+            .filter(|m| m.rule.is_some_and(|rule| BLINDING_RULES.contains(&rule)))
+            .count();
         Tally {
             counts,
-            fatals: r.fatals(),
+            blind: r.fatals() + stopped,
         }
     }
 
@@ -810,6 +847,118 @@ pub(crate) mod tests {
             ws.get_text("content.opf").unwrap().contains("font/ttf"),
             "the workspace was left at an intermediate state"
         );
+    }
+
+    /// An unrecognised package `version` stops validation outright: the
+    /// detector reports `OPF-001` and nothing else, so the `<blink/>` in the
+    /// chapter is invisible. Correcting the version lets validation start, and
+    /// the `<blink/>` it then finds was always in the book — the fatal rule's
+    /// second cause (Baris, 2026-09-30).
+    #[test]
+    fn a_finding_revealed_by_letting_validation_start_does_not_revert_the_fix() {
+        let mut ws = Workspace::load(&fixture_epub()).unwrap();
+        let opf = ws.get_text("content.opf").unwrap();
+        ws.set_text(
+            "content.opf",
+            opf.replacen(
+                r#"version="3.0" unique-identifier"#,
+                r#"version="1.0" unique-identifier"#,
+                1,
+            ),
+        );
+        let t = ws.get_text("c1.xhtml").unwrap();
+        ws.set_text(
+            "c1.xhtml",
+            t.replace("<p>Hello</p>", "<p>Hello</p><blink/>"),
+        );
+        let r0 = ws.detect().unwrap();
+        let ws0 = ws.serialize().unwrap();
+        assert!(
+            r0.messages
+                .iter()
+                .any(|m| m.rule == Some("opf.package.unrecognized_version"))
+                && !r0
+                    .messages
+                    .iter()
+                    .any(|m| m.location.as_deref() == Some("c1.xhtml")),
+            "fixture must hide the chapter behind OPF-001, or this proves nothing: {:?}",
+            r0.messages
+        );
+
+        let plan = |_: &Report, _: &Workspace, _: Goal| {
+            vec![
+                fix(
+                    "fix.version",
+                    "content.opf",
+                    rewrite(
+                        "content.opf",
+                        r#"version="1.0" unique-identifier"#,
+                        r#"version="3.0" unique-identifier"#,
+                    ),
+                ),
+                fix(
+                    "bad.blink",
+                    "c1.xhtml",
+                    rewrite("c1.xhtml", "<p>Hello</p>", "<p>Hello</p><blink/>"),
+                ),
+            ]
+        };
+        let r = repair_with(
+            &mut ws,
+            Goal::Valid,
+            Policy::AskEach,
+            &mut ApproveAll,
+            &plan,
+        )
+        .unwrap();
+        let outcomes: Vec<_> = r.fixes.iter().map(|f| (f.fix_id, f.outcome)).collect();
+        assert_eq!(
+            outcomes,
+            [
+                ("fix.version", Outcome::Applied),
+                // accepting what was revealed does not blind the run to a
+                // later fix raising the same key
+                ("bad.blink", Outcome::Reverted),
+            ]
+        );
+        // Everything validation finds once it starts, counted without the
+        // bisection: the version-only state against the starting one.
+        let mut only = Workspace::load(&ws0).unwrap();
+        rewrite(
+            "content.opf",
+            r#"version="1.0" unique-identifier"#,
+            r#"version="3.0" unique-identifier"#,
+        )(&mut only);
+        let (t0, t1) = (Tally::of(&r0), Tally::of(&only.detect().unwrap()));
+        let expected: usize = t1
+            .counts
+            .iter()
+            .map(|(k, n)| n.saturating_sub(t0.count(k)))
+            .sum();
+        assert!(
+            expected >= 1,
+            "nothing was revealed, so this proves nothing"
+        );
+        assert_eq!(r.revealed, expected);
+        assert_eq!(
+            ws.get_text("c1.xhtml").unwrap().matches("<blink/>").count(),
+            1
+        );
+    }
+
+    /// Nothing revealed, nothing counted: an ordinary run reports zero.
+    #[test]
+    fn an_ordinary_run_reveals_nothing() {
+        let mut ws = Workspace::load(&fixture_epub()).unwrap();
+        let r = repair_with(
+            &mut ws,
+            Goal::Valid,
+            Policy::AskEach,
+            &mut ApproveAll,
+            &good_bad_good,
+        )
+        .unwrap();
+        assert_eq!(r.revealed, 0);
     }
 
     /// The shape epubveri found (2026-09-22): the revealed finding is not in

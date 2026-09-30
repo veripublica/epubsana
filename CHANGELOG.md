@@ -18,9 +18,24 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
   `content`, which keeps the identifier exactly as it was. All affected files in
   a book are one proposal. On the 544-book test shelf it applies to 11 books
   and introduces no new finding.
+- **`fix.package_version`**: sets a package `version` that is not an EPUB
+  version (on real books, `1.0`) to `2.0`, when the package is in the EPUB
+  namespace and declares an NCX and no navigation document. A book with such a
+  version has never been validated: epubveri and epubcheck both stop at that
+  one finding. After the fix it is checked for the first time, and it may show
+  defects that were always in it. On the test shelf six books carry it; after
+  the fix and a second run, four of them are valid.
+- `ChangeReport::revealed`: how many findings a run accepted as revealed rather
+  than authored. When it is non-zero, the CLI ends its report with a note that
+  the findings were always in the book and that a second run can repair some of
+  them.
 
 ### Changed
 
+- **A fix that lets validation start is not undone for what it reveals.** This
+  was already the rule for a fix that clears a fatal. It now also covers a fix
+  that clears an unrecognised package version, after which the book is
+  validated for the first time.
 - **Requires epubveri 0.19.1**, which counts and places link findings as
   epubcheck does, and no longer reports a missing navigation target twice when
   the manifest already declares it. No fixer changed. Every fix proposed across
