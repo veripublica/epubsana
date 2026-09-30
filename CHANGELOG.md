@@ -8,6 +8,15 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Requires epubveri 0.19.1**, which counts and places link findings as
+  epubcheck does, and no longer reports a missing navigation target twice when
+  the manifest already declares it. No fixer changed. Every fix proposed across
+  the 544-book test shelf is identical under both versions.
+
 ## [0.18.0] - 2026-09-25
 
 ### Changed

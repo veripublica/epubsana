@@ -177,6 +177,23 @@ members = ["epubsana-wasm"]
 #   and 50 renames, so a `params` answer that failed to arrive would have deleted
 #   every one of them.
 #
+#   **0.19.1 (2026-09-30) is a TRACKING floor.** A minor, so the caret on 0.18
+#   stops before it. No source change, no API change upstream; 0.19.1 over
+#   0.19.0 is a speed fix (per-link positions were quadratic) with identical
+#   output, which is why the floor skips 0.19.0. Two rules we consume moved in
+#   0.19.0, both toward epubcheck: `opf.ncx.content_src_missing_resource` no
+#   longer fires for a target the manifest declares but the container lacks
+#   (RSC-001 on the item is the one finding), so `fix.ncx_src_wrong_path` loses
+#   that shape; and `opf.content_document.dangling_fragment` now fires for a
+#   `#fragment` into such a document, which `fix.fragment_wrong_path` would see
+#   as a new shape. Measured on the 544-book shelf, both arms' linkage checked:
+#   the plan digest is byte-identical, neither rule's count moved, and
+#   `regression_audit` differs by one usage finding before *and* after
+#   (OPF-003, 43,876 → 18,123 becomes 43,877 → 18,124). The census moved
+#   elsewhere (RSC-010 61 → 67, once per link now), so the null is not vacuous.
+#   The new advisory key (ADV-014) fires only under `Options.advisory`, which we
+#   do not set.
+#
 #   **0.18.0 (2026-09-25) is a TRACKING floor.** A minor, so the caret on 0.17
 #   stops before it and the edit is forced. No source change and no API change
 #   upstream. It adds 71 rule keys (EDUPUB, Dictionaries, Indexes, collections,
@@ -238,7 +255,7 @@ members = ["epubsana-wasm"]
 #
 # For local co-development of epubveri, add an uncommitted override:
 #   [patch.crates-io] epubveri = { path = "../epubveri" }
-epubveri = "0.18.0"
+epubveri = "0.19.1"
 # Pure-Rust only (no C deps), same philosophy as epubveri: zip's "deflate"
 # feature uses zlib-rs (Rust) on the 8.x line; bzip2/zstd (C) stay disabled.
 # Aligned to epubveri's zip major — the family shares one zip version because
