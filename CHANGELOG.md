@@ -10,6 +10,15 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`fix.adept_meta_value`**: repairs the `<meta name="Adept.resource"
+  value="…">` that Adobe's DRM tooling writes into every chapter. `<meta>` has
+  no `value` attribute, so each one is an error. The attribute is renamed to
+  `content`, which keeps the identifier exactly as it was. All affected files in
+  a book are one proposal. On the 544-book test shelf it applies to 11 books
+  and introduces no new finding.
+
 ### Changed
 
 - **Requires epubveri 0.19.1**, which counts and places link findings as

@@ -48,6 +48,7 @@ grows one carefully-argued entry at a time.
 | `RSC-012` | `opf.guide.reference_fragment_not_defined` | ConfirmNeeded | A `<guide>` reference's `#fragment` resolves to no `id` in a target that does exist | [Drop the fragment, keep the document](#rsc-007--rsc-017--rsc-012--guide-references) |
 | `RSC-012` | `opf.content_document.dangling_fragment` | ConfirmNeeded | A link's `#fragment` is real but now lives in another document — an editor split the file | [Write the path in front of the fragment](#rsc-012--a-fragment-that-is-real-but-has-moved-to-another-document) |
 | `RSC-005` | `htm.obsolete_attribute` (`params[0] == "name"`) | AutoSafe | A legacy `<a name>` anchor duplicating the element's own `id` | [Drop the `name` attribute](#rsc-005--a-legacy-name-attribute-on-a) |
+| `RSC-005` | `opf.content_document.schema_violation` (`params[0] == "value"` on an ADEPT `<meta>`) | AutoSafe | Adobe DRM left `<meta name="Adept.resource" value="…">`, and `<meta>` has no `value` | [Rename `value` to `content`](#rsc-005--an-adobe-adept-meta-carrying-value) |
 | `RSC-005` | `opf.content_document.schema_violation` (empty `lang`/`xml:lang`) | ConfirmNeeded | An empty language tag, which EPUB 2's grammar does not allow | [Delete the attribute](#rsc-005--an-empty-lang--xmllang) |
 | `RSC-005` | `opf.content_document.schema_violation` (`params[0] == "id"`) | ConfirmNeeded | An `id` that is not a valid XML NCName (on the shelf: it starts with a digit) | [Rename it, moving every reference with it](#rsc-005--an-id-that-is-not-a-valid-ncname-the-first-cross-file-fixer) |
 | `RSC-005` | `opf.package.schema_violation` | AutoSafe | An EPUB 3 attribute on an EPUB 2 package document | [Delete it, once verified it says nothing the book does not](#rsc-005--an-epub-3-attribute-on-an-epub-2-package-document) |
@@ -1081,6 +1082,46 @@ than a divergence to be careful of. **One book is thin evidence**: it establishe
 that the shape exists and that the repair is right for it, not that the shape is
 representative. The declines above are what make that acceptable — an unfamiliar
 shape is left alone rather than guessed at.
+
+---
+
+## RSC-005 — an Adobe ADEPT `<meta>` carrying `value`
+
+**Finding.** `opf.content_document.schema_violation`, kind
+`attribute_not_allowed`, `params[0] == "value"`, with an `element_path` ending
+in `/h:head[1]/h:meta[k]/@value`. On real books it is always the same element,
+written into every chapter by Adobe's DRM tooling:
+
+```html
+<meta name="Adept.resource" value="urn:uuid:…"/>
+```
+
+`<meta>` has no `value` attribute in XHTML 1.1 or in HTML. A named `<meta>`
+carries its value in `content`.
+
+**Fix** (`fix.adept_meta_value`, AutoSafe). Rename the attribute: `value="…"`
+becomes `content="…"`. The name and the identifier are kept byte for byte, and
+nothing else in the document changes. Every affected file in the book goes into
+one proposal, because the decision is the same in each.
+
+**Why it's safe.** Only the five bytes of the attribute's name change. Deleting
+the element would also clear the finding, but it would throw the identifier
+away; the rename keeps everything the book says. The fixer acts only on the
+elements epubveri reported: each candidate's own path must be one a finding
+names, so the fixer cannot act where the detector found nothing.
+
+**When it declines.**
+
+- A `<meta>` with any other `name`. Its `value` belongs to someone else's
+  vocabulary, and nothing here says what it should become.
+- A `<meta>` that already has `content`. There are then two values, and which
+  one is right is a choice.
+- A `<meta>` whose path no finding names, and a document that does not parse.
+
+**Measured.** 544 books, epubveri 0.19.1: 445 findings in 11 books, one
+proposal per book, all 445 cleared, and no new finding at any severity. The
+rename and the deletion were both tried, and both cleared every finding; only
+the rename keeps the identifier.
 
 ---
 

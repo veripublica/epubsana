@@ -82,6 +82,7 @@ pub fn plan(report: &Report, ws: &Workspace, _goal: Goal) -> Vec<ProposedFix> {
     fixes.extend(empty_titles(report, ws));
     fixes.extend(bare_text_in_body(report, ws));
     fixes.extend(anchor_name_attrs(report, ws));
+    fixes.extend(adept_meta_value(report, ws));
     fixes.extend(empty_lang_attrs(report, ws));
     fixes.extend(lang_xmllang_mismatch(report, ws));
     fixes.extend(doctype_html5(report, ws));
@@ -2332,6 +2333,189 @@ fn plan_anchor_name_drops(text: &str) -> Option<Vec<Range<usize>>> {
         ));
     }
     Some(spans)
+}
+
+/// `RSC-005` / `opf.content_document.schema_violation`, kind
+/// `attribute_not_allowed`, `params[0] == "value"`, on an Adobe ADEPT
+/// `<meta name="Adept.resource" value="urn:uuid:…"/>` in a content document's
+/// `<head>`.
+///
+/// Adobe's DRM tooling writes one into every chapter, with the identifier in
+/// `value` — an attribute `<meta>` has never had in XHTML 1.1 or HTML. The
+/// repair **renames `value` to `content`**, the attribute that carries a named
+/// `<meta>`'s value, and touches nothing else: the name and the identifier
+/// survive byte for byte. Deleting the element would clear the finding equally
+/// well and loses the identifier, so it was measured and rejected
+/// (`adept_version_trial.rs`, 544 books, epubveri 0.19.1: 11 books, 445
+/// findings, both edits cleared all of them and authored nothing at any
+/// severity; only the rename keeps the data).
+///
+/// **Acts only on the elements epubveri reported.** Each finding's
+/// `element_path` names its node (`/h:html[1]/h:head[1]/h:meta[3]/@value`), and
+/// a candidate is renamed only when its own path is in that set — so this
+/// fixer cannot outlive a finding upstream stops making, which is the failure a
+/// file-dispatched fixer is prone to.
+///
+/// **Declines:** any other `name` (only ADEPT's is known here; another is
+/// someone else's vocabulary), and a `<meta>` that already carries `content`
+/// (two values, and which one is right is a choice).
+fn adept_meta_value(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    // document -> the reported element paths, `/@value` stripped
+    let mut by_doc: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for m in &report.messages {
+        if !is_schema_violation(
+            m,
+            "opf.content_document.schema_violation",
+            ViolationKind::AttributeNotAllowed,
+        ) || m.params.first().map(String::as_str) != Some("value")
+        {
+            continue;
+        }
+        let (Some(doc), Some(np)) = (m.location.as_deref(), m.element_path.as_ref()) else {
+            continue;
+        };
+        let Some(element) = np.path.strip_suffix("/@value") else {
+            continue;
+        };
+        by_doc
+            .entry(doc.to_string())
+            .or_default()
+            .insert(element.to_string());
+    }
+
+    // One proposal for the whole book: the edit is identical in every chapter,
+    // and asking once per file would put 71 confirmations in front of one book
+    // on the shelf for a single decision.
+    let mut docs: Vec<(String, BTreeSet<String>, usize)> = Vec::new();
+    for (doc, reported) in by_doc {
+        let Some(text) = ws.get_text(&doc) else {
+            continue;
+        };
+        let Some(spans) = plan_adept_renames(&text, &reported) else {
+            continue; // won't parse — decline
+        };
+        if !spans.is_empty() {
+            docs.push((doc, reported, spans.len()));
+        }
+    }
+    if docs.is_empty() {
+        return Vec::new();
+    }
+
+    let n: usize = docs.iter().map(|(_, _, k)| k).sum();
+    let files = docs.len();
+    let preview: Vec<Change> = docs
+        .iter()
+        .take(6)
+        .map(|(doc, _, k)| Change {
+            path: doc.clone(),
+            note: format!(
+                "rename value= to content= on {k} <meta name=\"Adept.resource\"> element{}",
+                if *k == 1 { "" } else { "s" }
+            ),
+        })
+        .collect();
+    let docs_for_apply: Vec<(String, BTreeSet<String>)> =
+        docs.into_iter().map(|(d, r, _)| (d, r)).collect();
+
+    vec![ProposedFix {
+        fix_id: "fix.adept_meta_value",
+        addresses_id: "RSC-005".to_string(),
+        addresses_rule: Some("opf.content_document.schema_violation"),
+        addresses_severity: addressed_severity(
+            report,
+            "RSC-005",
+            Some("opf.content_document.schema_violation"),
+        ),
+        tier: Tier::AutoSafe,
+        title: format!(
+            "Rename `value` to `content` on {n} Adobe ADEPT <meta> element{} in {files} file{}",
+            if n == 1 { "" } else { "s" },
+            if files == 1 { "" } else { "s" }
+        ),
+        rationale: "Adobe's DRM tooling writes `<meta name=\"Adept.resource\" value=\"…\"/>` into \
+                    each chapter. `<meta>` has no `value` attribute; a named `<meta>` carries its \
+                    value in `content`. Renaming the attribute makes the element valid and keeps \
+                    the name and the identifier exactly as they were. No text, no other element \
+                    and no other attribute is touched. A `<meta>` with any other name, or one \
+                    that already has `content`, is left alone."
+            .to_string(),
+        preview,
+        apply_fn: Box::new(move |ws: &mut Workspace| {
+            for (doc, reported) in &docs_for_apply {
+                if let Some(text) = ws.get_text(doc)
+                    && let Some(spans) = plan_adept_renames(&text, reported)
+                {
+                    let edits = spans
+                        .into_iter()
+                        .map(|range| MetaEdit {
+                            range,
+                            replacement: "content".to_string(),
+                        })
+                        .collect();
+                    ws.set_text(doc, apply_edits(&text, edits));
+                }
+            }
+        }),
+    }]
+}
+
+/// The byte ranges of the `value` attribute *names* to rename: one per
+/// `<meta name="Adept.resource">` without `content` whose element path is in
+/// `reported`. `None` (decline) if the document doesn't parse.
+fn plan_adept_renames(text: &str, reported: &BTreeSet<String>) -> Option<Vec<Range<usize>>> {
+    let prepared = prepare_content_doc(text);
+    let doc = prepared.parse()?;
+    let mut spans = Vec::new();
+    for node in doc
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "meta")
+    {
+        if node.attr_no_ns("name") != Some("Adept.resource") || node.attr_no_ns("content").is_some()
+        {
+            continue;
+        }
+        let Some(path) = xhtml_element_path(node) else {
+            continue;
+        };
+        if !reported.contains(&path) {
+            continue;
+        }
+        let Some(attr) = node
+            .attributes()
+            .find(|a| a.namespace().is_none() && a.name() == "value")
+        else {
+            continue;
+        };
+        // An attribute's range starts at its name; the exact-output test pins
+        // that, so a roxmltree change would fail a test rather than a book.
+        let r = prepared.unshift(attr.range());
+        spans.push(r.start..r.start + "value".len());
+    }
+    Some(spans)
+}
+
+/// The path epubveri writes into `element_path` for an element whose every
+/// ancestor is in the XHTML namespace: `/h:html[1]/h:head[1]/h:meta[3]`, with
+/// 1-based indices among same-named siblings. `None` for anything outside that
+/// namespace, which then matches no reported path and declines.
+fn xhtml_element_path(node: roxmltree::Node) -> Option<String> {
+    const XHTML: &str = "http://www.w3.org/1999/xhtml";
+    let mut steps = Vec::new();
+    for n in node.ancestors().filter(|n| n.is_element()) {
+        if n.tag_name().namespace() != Some(XHTML) {
+            return None;
+        }
+        let name = n.tag_name().name();
+        let index = 1 + n
+            .prev_siblings()
+            .skip(1)
+            .filter(|s| s.is_element() && s.tag_name() == n.tag_name())
+            .count();
+        steps.push(format!("/h:{name}[{index}]"));
+    }
+    steps.reverse();
+    Some(steps.concat())
 }
 
 /// Is this finding "an empty `lang` / `xml:lang`"?
@@ -7313,6 +7497,126 @@ mod tests {
         // The finding named only `properties`, so the spine attribute is not
         // touched even though it would qualify.
         assert_eq!(droppable(&opf, &["properties"]), vec!["properties"]);
+    }
+
+    // ---- fix.adept_meta_value ---------------------------------------
+
+    /// A content document whose `<head>` holds `metas` after its `<title>`.
+    fn adept_ws(metas: &str) -> Workspace {
+        let doc = format!(
+            r#"<?xml version="1.0" encoding="utf-8"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>t</title>{metas}</head><body><p>x</p></body></html>"#
+        );
+        container(&[("OEBPS/ch1.xhtml", &doc)])
+    }
+
+    /// The finding epubveri makes for `value` on the `k`th `<meta>` in `<head>`.
+    fn adept_finding(k: usize) -> epubveri::report::Message {
+        epubveri::report::Message {
+            element_path: Some(epubveri::xmlext::NodePath {
+                path: format!("/h:html[1]/h:head[1]/h:meta[{k}]/@value"),
+                namespaces: [("h".to_string(), "http://www.w3.org/1999/xhtml".to_string())]
+                    .into_iter()
+                    .collect(),
+            }),
+            ..schema(
+                ViolationKind::AttributeNotAllowed,
+                "attribute \"value\" not allowed here".to_string(),
+                vec!["value".to_string()],
+            )
+        }
+    }
+
+    fn adept_report(ks: &[usize]) -> Report {
+        let mut r = Report::default();
+        r.messages.extend(ks.iter().map(|&k| adept_finding(k)));
+        r
+    }
+
+    /// The repair: `value` becomes `content`, the name and the identifier stay
+    /// byte for byte, and the element's other bytes do not move.
+    #[test]
+    fn an_adept_meta_gets_content_instead_of_value() {
+        let mut ws = adept_ws(r#"<meta name="Adept.resource" value="urn:uuid:1234"/>"#);
+        let fixes = adept_meta_value(&adept_report(&[1]), &ws);
+        assert_eq!(fixes.len(), 1);
+        fixes.into_iter().next().unwrap().apply(&mut ws);
+        let out = ws.get_text("OEBPS/ch1.xhtml").unwrap();
+        assert!(
+            out.contains(r#"<meta name="Adept.resource" content="urn:uuid:1234"/>"#),
+            "got: {out}"
+        );
+    }
+
+    /// The node is found by its reported path, so the sibling index has to be
+    /// counted the way epubveri counts it: among same-named siblings, 1-based.
+    /// Here a non-ADEPT `<meta>` comes first and is not reported.
+    #[test]
+    fn only_the_reported_adept_meta_is_renamed() {
+        let mut ws = adept_ws(
+            r#"<meta name="Adept.resource" value="urn:uuid:a"/><meta name="Adept.resource" value="urn:uuid:b"/>"#,
+        );
+        let fixes = adept_meta_value(&adept_report(&[2]), &ws);
+        fixes.into_iter().next().unwrap().apply(&mut ws);
+        let out = ws.get_text("OEBPS/ch1.xhtml").unwrap();
+        assert!(out.contains(r#"value="urn:uuid:a""#), "got: {out}");
+        assert!(out.contains(r#"content="urn:uuid:b""#), "got: {out}");
+    }
+
+    /// Nothing reported, nothing touched — the element may be there and still
+    /// not be ours to change.
+    #[test]
+    fn an_unreported_adept_meta_is_left_alone() {
+        let ws = adept_ws(r#"<meta name="Adept.resource" value="urn:uuid:1234"/>"#);
+        assert!(adept_meta_value(&adept_report(&[]), &ws).is_empty());
+        // reported at a different position: still not this element
+        assert!(adept_meta_value(&adept_report(&[2]), &ws).is_empty());
+    }
+
+    /// Another vocabulary's `value` is not ours to reinterpret.
+    #[test]
+    fn a_meta_with_another_name_is_declined() {
+        let ws = adept_ws(r#"<meta name="something" value="x"/>"#);
+        assert!(adept_meta_value(&adept_report(&[1]), &ws).is_empty());
+    }
+
+    /// Two values on one element: which one is right is a choice.
+    #[test]
+    fn an_adept_meta_that_already_has_content_is_declined() {
+        let ws =
+            adept_ws(r#"<meta name="Adept.resource" content="urn:uuid:a" value="urn:uuid:b"/>"#);
+        assert!(adept_meta_value(&adept_report(&[1]), &ws).is_empty());
+    }
+
+    /// Every file of the book goes into one proposal, since the decision is the
+    /// same in each.
+    #[test]
+    fn adept_metas_across_files_are_one_proposal() {
+        let doc = |id: &str| {
+            format!(
+                r#"<?xml version="1.0" encoding="utf-8"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>t</title><meta name="Adept.resource" value="{id}"/></head><body/></html>"#
+            )
+        };
+        let mut ws = container(&[
+            ("OEBPS/ch1.xhtml", &doc("u1")),
+            ("OEBPS/ch2.xhtml", &doc("u2")),
+        ]);
+        let mut report = adept_report(&[1]);
+        let mut second = adept_finding(1);
+        second.location = Some("OEBPS/ch2.xhtml".to_string());
+        report.messages.push(second);
+        let fixes = adept_meta_value(&report, &ws);
+        assert_eq!(fixes.len(), 1);
+        fixes.into_iter().next().unwrap().apply(&mut ws);
+        assert!(
+            ws.get_text("OEBPS/ch1.xhtml")
+                .unwrap()
+                .contains(r#"content="u1""#)
+        );
+        assert!(
+            ws.get_text("OEBPS/ch2.xhtml")
+                .unwrap()
+                .contains(r#"content="u2""#)
+        );
     }
 
     // ---- fix.fragment_wrong_path --------------------------------------
