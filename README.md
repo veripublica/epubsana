@@ -15,7 +15,9 @@ changed**. It never guesses, and it preserves everything it doesn't touch.
 Early but working. The core contract (`Workspace` → detect → propose → confirm →
 apply → check → report) is solid. The check re-validates the book after
 applying, and a fix that made any finding more frequent is undone and reported
-as reverted. Thirty-seven fixers so far:
+as reverted — unless the fix let the validator see part of the book it could not
+see before, in which case what appears was always there and the run says so.
+Thirty-nine fixers so far:
 
 - **`RSC-016`** — undeclared HTML entities (`&nbsp;`, `&mdash;`, …) → the exact
   character each denotes.
@@ -92,6 +94,10 @@ as reverted. Thirty-seven fixers so far:
   that already carries `id="x"` → the `name` dropped. Nothing that linked to the
   anchor moves; the fragment resolves through the `id`. An anchor with no `id`, or
   a different one, is left alone.
+- **`RSC-005` / an Adobe ADEPT `<meta>`** — the `<meta name="Adept.resource"
+  value="…">` that Adobe's DRM tooling writes into every chapter → `value`
+  renamed to `content`, the attribute a named `<meta>` carries its value in. The
+  identifier is kept exactly as it was. Any other `<meta>` is left alone.
 - **`RSC-005` / empty `lang`** — an empty `lang=""` / `xml:lang=""`, which EPUB 2
   doesn't allow → deleted, so the element inherits its parent's language. A
   malformed tag is never guessed at.
@@ -135,6 +141,13 @@ as reverted. Thirty-seven fixers so far:
   what makes that comparison possible). Declines when the book has two candidate
   identifiers — choosing between a UUID and an ISBN is editorial — or none at
   all, where a repair would have to invent one.
+- **`OPF-001` / an unrecognised package version** — a `version` that is not an
+  EPUB version (on our shelf, `1.0`) stops every validator at that one finding,
+  so the book has never been checked → set to `2.0` when the package is in the
+  EPUB namespace and declares an NCX and no navigation document, which only
+  EPUB 2 fits. The book is then checked for the first time and may show defects
+  that were always in it; the run says so and suggests running again. Declines
+  anything that could also be EPUB 3, and an OEB 1.x package.
 - **`RSC-005` / a nested anchor** — `<a id="x"><sup><a href="#f">1</a></sup></a>`,
   where the outer element is an anchor *target* rather than a link → unwrapped,
   with the `id` moved to its child so the fragment still resolves in the same
@@ -153,9 +166,10 @@ as reverted. Thirty-seven fixers so far:
   declaring a superseded Core Media Type name → renamed to the current one for
   the same format (`application/vnd.ms-opentype` → `font/otf`,
   `text/javascript` → `application/javascript`, …). It renames a declaration and
-  asserts nothing new about the file. `application/font-sfnt` is declined: SFNT
-  is the container TrueType and OpenType share, so the name cannot say which the
-  file is.
+  asserts nothing new about the file. The replacement is the one epubveri
+  names; where it names none (it decides `application/font-sfnt` from the
+  file's own bytes, and names nothing when the bytes do not settle it), the item
+  is left alone.
 
 - **`RSC-007` / `css.font_face.missing_target`** — a `@font-face` rule sourcing a
   font file the book doesn't contain → the whole rule dropped. The font cannot
