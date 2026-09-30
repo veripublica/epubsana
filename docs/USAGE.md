@@ -319,7 +319,7 @@ copies every entry it did not touch through byte-for-byte — same bytes, same
 compression method, same timestamps — so an untouched file is identical, and
 `data.changes` already tells you which ones those aren't.
 
-A complete Python round tripA complete Python round trip, which is roughly what a Sigil or calibre plugin
+A complete Python round trip, which is roughly what a Sigil or calibre plugin
 does:
 
 ```python
