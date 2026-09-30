@@ -17,6 +17,16 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
   the manifest already declares it. No fixer changed. Every fix proposed across
   the 544-book test shelf is identical under both versions.
 
+### Fixed
+
+- **`fix.fragment_wrong_path` no longer repoints a link whose document is
+  missing.** epubveri 0.19 also reports a `#fragment` into a document the
+  manifest declares but the book does not contain. The fixer would have sent
+  such a link to the one other document that happens to define the same id,
+  which is a guess when the real problem is the missing file. It now leaves
+  those links alone. No book on the test shelf has this shape, so no proposal
+  changed.
+
 ## [0.18.0] - 2026-09-25
 
 ### Changed

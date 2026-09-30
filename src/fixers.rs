@@ -4426,10 +4426,22 @@ fn ncx_src_wrong_path(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
 /// spine (0 of 22 here, and written anyway — repointing at a document outside
 /// the reading order trades this finding for `hyperlink_target_not_in_spine`,
 /// and a file the manifest never declared cannot be in the spine either); the
-/// reference is not visible as a whole quoted attribute value (0 of 22).
+/// reference is not visible as a whole quoted attribute value (0 of 22); **the
+/// document the link names is not in the container** (added 2026-09-30, 0 of
+/// 544 books). epubveri 0.19.0 started reporting a fragment into a document the
+/// manifest declares and the container lacks, as epubcheck does. "The anchor
+/// moved" was measured only on targets that exist; with the target gone, an id
+/// defined once elsewhere — `note1`, `p1` — is a coincidence as often as a move,
+/// and the book's real defect is the missing file, which RSC-001 already names.
+/// One finding of that shape declines its fragment in that document entirely,
+/// since the rewrite reaches every reference to the fragment.
 fn fragment_wrong_path(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
     // referring document -> the fragments epubveri flagged in it
     let mut by_doc: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    // referring document -> the fragments whose link names a document the
+    // container does not hold; declined whole, see the doc comment
+    let mut target_absent: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let names: BTreeSet<&str> = ws.names().map(String::as_str).collect();
     for m in &report.messages {
         if m.rule != Some("opf.content_document.dangling_fragment") {
             continue;
@@ -4439,6 +4451,15 @@ fn fragment_wrong_path(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
         };
         if frag.is_empty() {
             continue;
+        }
+        // `params[1]` is read as evidence here, never searched for: it is the
+        // resolved, NFC-normalised target, so a container name that is not NFC
+        // fails this test and declines — the safe direction.
+        if m.params.get(1).is_none_or(|t| !names.contains(t.as_str())) {
+            target_absent
+                .entry(doc.to_string())
+                .or_default()
+                .insert(frag.clone());
         }
         by_doc
             .entry(doc.to_string())
@@ -4464,6 +4485,9 @@ fn fragment_wrong_path(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
         };
         let mut repoints: Vec<(String, String, String)> = Vec::new(); // (frag, from, to)
         for frag in &frags {
+            if target_absent.get(&doc).is_some_and(|a| a.contains(frag)) {
+                continue;
+            }
             let Some(home) = sole_id_home(ws, frag) else {
                 continue;
             };
@@ -7355,6 +7379,23 @@ mod tests {
         let fix = fragment_wrong_path(report, ws).into_iter().next()?;
         fix.apply(ws);
         ws.get_text(doc)
+    }
+
+    /// **The document the link names is missing from the container.** The
+    /// anchor is defined exactly once, in a spine document, so every other
+    /// guard passes: this one alone must decline it.
+    #[test]
+    fn a_link_into_a_missing_document_is_declined() {
+        let ws = frag_ws(&[
+            ("a", r##"<a href="gone.xhtml#moved">x</a>"##),
+            ("b", r##"<p id="moved">y</p>"##),
+        ]);
+        let mut report = frag_report("Text/a.xhtml", &["moved"]);
+        report.messages[0].params[1] = "Text/gone.xhtml".to_string();
+        assert!(fragment_wrong_path(&report, &ws).is_empty());
+        // and a finding with no target at all is not evidence the target exists
+        report.messages[0].params.truncate(1);
+        assert!(fragment_wrong_path(&report, &ws).is_empty());
     }
 
     fn frag_declines(ws: &Workspace, frag: &str) -> bool {

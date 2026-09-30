@@ -1924,8 +1924,19 @@ back to `#footnote1`, which stayed behind in `..._split_008.htm`.
 | the id exists somewhere in the book | nothing to repair toward; only "drop the fragment" is available, and that loses the author's target | 109 findings / 19 books |
 | the target is in the spine | epubveri 0.12/0.13 added `hyperlink_target_not_in_spine`; without this the repair could author it | 0 of 22 |
 | the reference is visible as a whole quoted attribute value | never rewrite from inside a longer string | 0 of 22 |
+| the document the link names is in the container | see below | 0 findings / 544 books (epubveri 0.19.1) |
 
-**The last two decline nothing on this shelf, and they are still written.** That
+**The missing-target guard was added on 2026-09-30, when the detector widened
+the rule.** From epubveri 0.19.0, `dangling_fragment` also fires for a fragment
+into a document the manifest declares and the container lacks, as epubcheck
+does. "The anchor moved" was measured only on targets that exist. With the
+target gone, an id defined once elsewhere (`note1`, `p1`) is as likely to be a
+coincidence as a move, and the book's real defect is the missing file, which
+`RSC-001` already reports. This check reads `params[1]` as evidence, so a
+finding without it declines too. It declines the fragment for the whole
+referring document, because the rewrite reaches every reference to it.
+
+**The last three decline nothing on this shelf, and they are still written.** That
 is the point of recording the number: a guard whose population is zero is
 carried by argument, and the argument is that each names a finding the repair
 would otherwise author. `fix.content_properties` is the standing reminder — it
