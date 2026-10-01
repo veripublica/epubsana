@@ -17,7 +17,7 @@ apply → check → report) is solid. The check re-validates the book after
 applying, and a fix that made any finding more frequent is undone and reported
 as reverted — unless the fix let the validator see part of the book it could not
 see before, in which case what appears was always there and the run says so.
-Thirty-nine fixers so far:
+Forty-one fixers so far:
 
 - **`RSC-016`** — undeclared HTML entities (`&nbsp;`, `&mdash;`, …) → the exact
   character each denotes.
@@ -45,8 +45,12 @@ Thirty-nine fixers so far:
   Ambiguity declines.
 - **`OPF-014`** — a content property a document demonstrably uses → declared on
   its manifest item.
-- **`PKG-006`** — a `mimetype` entry that isn't first in the ZIP → moved to the
-  front, stored, with no content touched at all.
+- **`PKG-014`** — an empty directory entry in the ZIP (`OEBPS/fonts/` with
+  nothing in it) → left out of the archive. Declines when that would leave
+  another directory entry empty.
+- **`PKG-006` / `PKG-005`** — a `mimetype` entry that isn't first in the ZIP, or
+  whose header carries an extra field → moved to the front, stored, with a clean
+  header and no content touched at all.
 - **`RSC-005` / non-block content in `<body>` or `<blockquote>`** — EPUB 2 text
   *and* inline elements (`<a>`, `<br>`, `<img>`, …) sitting where the grammar
   wants block content → each run wrapped whole in one `<div>`, so a line that
@@ -141,6 +145,9 @@ Thirty-nine fixers so far:
   what makes that comparison possible). Declines when the book has two candidate
   identifiers — choosing between a UUID and an ISBN is editorial — or none at
   all, where a repair would have to invent one.
+- **`RSC-005` / an empty extra `<dc:identifier>`** — an empty identifier with no
+  `id`, beside a real one → dropped. The empty identifier the package names as
+  its unique identifier is never touched.
 - **`OPF-001` / an unrecognised package version** — a `version` that is not an
   EPUB version (on our shelf, `1.0`) stops every validator at that one finding,
   so the book has never been checked → set to `2.0` when the package is in the

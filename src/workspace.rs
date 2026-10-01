@@ -19,9 +19,22 @@
 //! from the name itself. Preserving raw headers is not reachable through `zip`'s
 //! public API.
 //!
-//! Nothing here normalizes the container — not even `mimetype`. If a book's
-//! packaging violates OCF, that is a defect for epubveri to report and a fixer
-//! to *propose*, never something the writer launders on the way out. (It used
+//! **Nor does it preserve local-header extra fields, and that one matters.**
+//! The writer derives local headers without them, so every entry of a written
+//! book loses its local extra field (measured 2026-10-01: 338 entries in 10 of
+//! 544 shelf books; mostly timestamp and permission records, never entry data).
+//! One of those fields is a defect: an extra field on `mimetype` is `PKG-005`,
+//! and losing it clears that finding. That is why [`Workspace::detect`] reads
+//! the **original** bytes while nothing has been changed — before 0.22.0 it
+//! validated the writer's output instead, so `PKG-005` was invisible to every
+//! report and three shelf books whose only error it was were called valid.
+//! `fix.mimetype_packaging` now proposes the repair; when another fix writes the
+//! book and that one is declined, the extra field still goes, and the
+//! after-report says so.
+//!
+//! Otherwise nothing here normalizes the container — not even `mimetype`. If a
+//! book's packaging violates OCF, that is a defect for epubveri to report and a
+//! fixer to *propose*, never something the writer launders on the way out. (It used
 //! to: re-emitting `mimetype` first and stored repaired the OCF packaging rules
 //! — `PKG-006` and its neighbours — as a side effect of writing any output,
 //! with no fix item, no proposal and no approval. That is a silent mutation,
@@ -105,6 +118,12 @@ pub struct Workspace {
     /// Set by an *approved* fix (never by the writer) to put `mimetype` back
     /// where OCF wants it. See [`Workspace::repackage_mimetype`].
     repackage_mimetype: bool,
+    /// The archive's directory entries (names ending in `/`), in order. They
+    /// carry no content, so they are not entries here, but a fix can drop one.
+    directories: Vec<String>,
+    /// Directory entries an approved fix dropped; the writer skips them. See
+    /// [`Workspace::drop_directory`].
+    dropped_directories: BTreeSet<String>,
     /// Every mutation since load, oldest first, and how far along it we are.
     /// See [`Workspace::checkpoint`].
     journal: Vec<Record>,
@@ -139,6 +158,10 @@ enum Record {
     Repackage {
         other: bool,
     },
+    /// A directory entry dropped (or, while undone, restored).
+    DropDirectory {
+        name: String,
+    },
 }
 
 impl Workspace {
@@ -156,9 +179,11 @@ impl Workspace {
         let mut order = Vec::new();
         let mut entries = HashMap::new();
         let mut total: u64 = 0;
+        let mut directories = Vec::new();
         for i in 0..zip.len() {
             let mut f = zip.by_index(i)?;
             if f.is_dir() {
+                directories.push(f.name().to_string());
                 continue;
             }
             let name = f.name().to_string();
@@ -190,6 +215,8 @@ impl Workspace {
             entries,
             dirty: BTreeSet::new(),
             repackage_mimetype: false,
+            directories,
+            dropped_directories: BTreeSet::new(),
             journal: Vec::new(),
             cursor: 0,
         })
@@ -206,6 +233,34 @@ impl Workspace {
     pub fn repackage_mimetype(&mut self) {
         let prior = std::mem::replace(&mut self.repackage_mimetype, true);
         self.record(Record::Repackage { other: prior });
+    }
+
+    /// Leave the directory entry `name` out of the written archive — the
+    /// repair for `PKG-014`, an empty directory. A directory entry carries no
+    /// content, so this removes nothing a reader can see; it is still a change
+    /// to the packaging, so like [`Workspace::repackage_mimetype`] it is a
+    /// mutator a fix calls, never something the writer decides.
+    ///
+    /// # Panics
+    ///
+    /// If `name` is not one of [`Workspace::directories`]. A fix asking to drop
+    /// something else is a bug, and guessing what it meant is not an option.
+    pub fn drop_directory(&mut self, name: &str) {
+        assert!(
+            self.directories.iter().any(|d| d == name),
+            "{name} is not a directory entry of this archive"
+        );
+        if self.dropped_directories.insert(name.to_string()) {
+            self.record(Record::DropDirectory {
+                name: name.to_string(),
+            });
+        }
+    }
+
+    /// The archive's directory entries, in archive order — including any a fix
+    /// has dropped.
+    pub fn directories(&self) -> impl Iterator<Item = &String> {
+        self.directories.iter()
     }
 
     /// A container entry decoded as UTF-8 (lossy), or `None` if absent.
@@ -240,13 +295,14 @@ impl Workspace {
     /// The current position in this workspace's history.
     ///
     /// Every mutation — [`Workspace::set_bytes`], [`Workspace::set_text`],
-    /// [`Workspace::repackage_mimetype`] — is journalled, so a fix applied after
+    /// [`Workspace::repackage_mimetype`], [`Workspace::drop_directory`] — is
+    /// journalled, so a fix applied after
     /// a checkpoint can be undone by [`Workspace::seek`]ing back to it, and
     /// redone by seeking forward again. The guarantee is the one issue #7 asks
     /// for: **after seeking back, the workspace serializes byte-identically to
     /// what it serialized at the checkpoint.** It holds because the writer's
-    /// output depends only on the entries, their order, the dirty set and the
-    /// packaging flag, and a seek restores all four.
+    /// output depends only on the entries, their order, the dirty set, the
+    /// packaging flag and the dropped directories, and a seek restores all five.
     ///
     /// Journalling is unconditional and costs no copy: the bytes a write
     /// replaces are moved into the journal rather than dropped. What it does
@@ -295,6 +351,12 @@ impl Workspace {
         match &mut self.journal[i] {
             Record::Repackage { other } => {
                 std::mem::swap(other, &mut self.repackage_mimetype);
+            }
+            Record::DropDirectory { name } => {
+                // Its own inverse: a record exists only for a real change.
+                if !self.dropped_directories.remove(name.as_str()) {
+                    self.dropped_directories.insert(name.clone());
+                }
             }
             Record::Entry {
                 name,
@@ -346,8 +408,10 @@ impl Workspace {
     /// appended.
     ///
     /// A book nothing touched therefore serializes with every entry's data
-    /// bit-for-bit intact and its packaging — including a non-conforming
-    /// `mimetype` — exactly as it arrived.
+    /// bit-for-bit intact and its entry order and compression as they arrived —
+    /// but **without local-header extra fields**, which the writer cannot carry
+    /// (see the module docs). That is why [`Workspace::detect`] does not read
+    /// this output while the workspace is untouched.
     pub fn serialize(&self) -> Result<Vec<u8>, Error> {
         let mut buf = Vec::new();
         {
@@ -372,6 +436,9 @@ impl Workspace {
                 let name = f.name().to_string();
                 if hoisted && name == "mimetype" {
                     continue; // already written, in its rightful place
+                }
+                if f.is_dir() && self.dropped_directories.contains(&name) {
+                    continue; // an approved fix dropped this empty directory
                 }
                 if !f.is_dir() {
                     seen.insert(name.clone());
@@ -408,8 +475,27 @@ impl Workspace {
     }
 
     /// Run epubveri against the current container state.
+    ///
+    /// **While nothing has been changed, that state is the original bytes**, and
+    /// they are what is validated. The writer drops local-header extra fields
+    /// (see the module docs), so validating its output instead hid `PKG-005`
+    /// from every "before" report: three shelf books whose only error it was
+    /// were reported valid, with exit status 0, while the file on disk was not.
+    /// Once any change is made, the bytes that would be written are the state,
+    /// and those are validated.
     pub fn detect(&self) -> Result<epubveri::report::Report, Error> {
+        if self.is_untouched() {
+            return Ok(epubveri::validate_bytes(self.original.clone()));
+        }
         Ok(epubveri::validate_bytes(self.serialize()?))
+    }
+
+    /// No entry rewritten and no packaging change requested: what
+    /// [`Workspace::serialize`] would write is the book as it arrived, apart from
+    /// what the writer cannot carry. A [`Workspace::seek`] back to the start
+    /// restores this, since the journal restores the dirty set and the flag.
+    fn is_untouched(&self) -> bool {
+        self.dirty.is_empty() && !self.repackage_mimetype && self.dropped_directories.is_empty()
     }
 }
 
@@ -440,6 +526,98 @@ mod tests {
             zip.finish().unwrap();
         }
         buf
+    }
+
+    /// A book that is valid in every way the writer can see, whose `mimetype`
+    /// leads, stored, with an extra field in its local header — `PKG-005`, and
+    /// the shape of three shelf books (a 36-byte field there).
+    fn mimetype_with_extra_field() -> Vec<u8> {
+        let mut buf = Vec::new();
+        {
+            let mut zip = ZipWriter::new(Cursor::new(&mut buf));
+            let mut first = zip::write::FullFileOptions::default()
+                .compression_method(CompressionMethod::Stored);
+            first
+                .add_extra_data(0x5455, [1u8, 0, 0, 0, 0], false)
+                .unwrap();
+            zip.start_file("mimetype", first).unwrap();
+            zip.write_all(b"application/epub+zip").unwrap();
+            let stored = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+            zip.start_file("META-INF/container.xml", stored).unwrap();
+            zip.write_all(b"<container/>").unwrap();
+            zip.finish().unwrap();
+        }
+        buf
+    }
+
+    fn has_pkg005(r: &epubveri::report::Report) -> bool {
+        r.messages.iter().any(|m| m.id == "PKG-005")
+    }
+
+    /// **The bug this guards against:** `detect()` used to validate the
+    /// writer's output, which cannot carry local-header extra fields, so an
+    /// untouched book's `PKG-005` was invisible and a book whose only error it
+    /// was got called valid.
+    #[test]
+    fn an_untouched_book_is_validated_as_it_arrived() {
+        let bytes = mimetype_with_extra_field();
+        assert!(
+            has_pkg005(&epubveri::validate_bytes(bytes.clone())),
+            "the fixture must carry PKG-005, or this proves nothing"
+        );
+        let ws = Workspace::load(&bytes).unwrap();
+        assert!(has_pkg005(&ws.detect().unwrap()));
+        // The limit the fix works around, pinned so a zip upgrade that starts
+        // carrying extra fields is noticed rather than assumed.
+        assert!(!has_pkg005(&epubveri::validate_bytes(
+            ws.serialize().unwrap()
+        )));
+    }
+
+    /// Once anything changes, the bytes that would be written are validated,
+    /// and a seek back to the start makes the book untouched again.
+    #[test]
+    fn a_changed_book_is_validated_as_it_would_be_written() {
+        let mut ws = Workspace::load(&mimetype_with_extra_field()).unwrap();
+        let start = ws.checkpoint();
+        ws.set_text("META-INF/container.xml", "<container />".to_string());
+        assert!(!has_pkg005(&ws.detect().unwrap()));
+        ws.seek(start);
+        assert!(has_pkg005(&ws.detect().unwrap()));
+        ws.repackage_mimetype();
+        assert!(!has_pkg005(&ws.detect().unwrap()));
+    }
+
+    fn entry_names(bytes: &[u8]) -> Vec<String> {
+        let z = ZipArchive::new(Cursor::new(bytes.to_vec())).unwrap();
+        z.file_names().map(str::to_string).collect()
+    }
+
+    /// A dropped directory entry is left out of the written archive, nothing
+    /// else moves, and the journal can put it back.
+    #[test]
+    fn a_dropped_directory_is_left_out_and_comes_back_on_seek() {
+        let mut ws = Workspace::load(&awkward_epub()).unwrap();
+        assert_eq!(ws.directories().collect::<Vec<_>>(), ["META-INF/"]);
+        let before = ws.serialize().unwrap();
+        let start = ws.checkpoint();
+        ws.drop_directory("META-INF/");
+        assert!(!ws.is_untouched());
+        let after = entry_names(&ws.serialize().unwrap());
+        assert!(!after.contains(&"META-INF/".to_string()), "{after:?}");
+        let mut expected = entry_names(&before);
+        expected.retain(|n| n != "META-INF/");
+        assert_eq!(after, expected, "only the directory entry may go");
+        ws.seek(start);
+        assert_eq!(ws.serialize().unwrap(), before);
+        assert!(ws.is_untouched());
+    }
+
+    #[test]
+    #[should_panic(expected = "is not a directory entry")]
+    fn dropping_something_that_is_not_a_directory_is_a_bug() {
+        let mut ws = Workspace::load(&awkward_epub()).unwrap();
+        ws.drop_directory("text.html");
     }
 
     fn refused(r: Result<Workspace, Error>) -> bool {

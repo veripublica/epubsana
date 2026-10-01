@@ -104,10 +104,12 @@ pub fn plan(report: &Report, ws: &Workspace, _goal: Goal) -> Vec<ProposedFix> {
     fixes.extend(epub3_attrs_in_epub2_package(report, ws));
     fixes.extend(empty_dc_date(report, ws));
     fixes.extend(empty_metadata_element(report, ws));
+    fixes.extend(empty_extra_identifier(report, ws));
     fixes.extend(non_preferred_media_type(report, ws));
     fixes.extend(font_face_missing_target(report, ws));
     fixes.extend(navdoc_empty_navs(report, ws));
     fixes.extend(mimetype_packaging(report, ws));
+    fixes.extend(empty_directories(report, ws));
     // Future fixers append here, in a sensible confirm order — and in
     // `handled_rules()` below.
     fixes
@@ -6020,6 +6022,129 @@ fn compute_empty_metadata_edits(opf: &str) -> Option<Vec<MetaEdit>> {
     (!edits.is_empty()).then_some(edits)
 }
 
+/// `RSC-005` / `opf.package.opf_identifier_not_empty`, for an empty
+/// `<dc:identifier>` that is **not** the package's unique identifier: no `id`,
+/// so nothing can point at it, and a non-empty `<dc:identifier>` beside it.
+///
+/// [`empty_metadata_element`] never drops a `dc:identifier`, because deleting
+/// the book's only one would trade "it is empty" for "it is missing". That
+/// argument does not reach an extra one: with a real identifier left, deleting
+/// an empty, unreferenced sibling loses nothing and the requirement still holds.
+/// Found by epublift (2026-10-01) on a Calibre book carrying an empty anchor, an
+/// empty extra and two real identifiers; their old repair dropped the extra.
+///
+/// **The empty unique-identifier anchor is never touched here.** It carries the
+/// `id` the package names, and filling it, or moving the `id` to one of the real
+/// identifiers, is choosing the book's identity — [`package_identifier`]'s
+/// shape, which declines when there is more than one candidate.
+///
+/// **The findings carry neither a path nor `params`** (a Schematron assertion,
+/// located at the package document only), so they cannot name the element. The
+/// guard is a count instead: every empty `<dc:identifier>` draws one finding, so
+/// the number of findings in the file must equal the number of empty elements
+/// this fixer sees. If they differ, the detector and this fixer disagree about
+/// what is empty, and it declines. Empty means epubveri's own
+/// [`epubveri::xmlext::is_xml_blank`].
+///
+/// Measured (epubveri 0.20.0, 544 books): one book has the shape.
+fn empty_extra_identifier(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    let mut findings: BTreeMap<String, usize> = BTreeMap::new();
+    for m in &report.messages {
+        if m.rule == Some("opf.package.opf_identifier_not_empty")
+            && let Some(loc) = m.location.as_deref()
+        {
+            *findings.entry(loc.to_string()).or_default() += 1;
+        }
+    }
+
+    let mut fixes = Vec::new();
+    for (opf, reported) in findings {
+        let Some(text) = ws.get_text(&opf) else {
+            continue;
+        };
+        let Some((blank, edits)) = plan_extra_identifier_drops(&text) else {
+            continue;
+        };
+        if blank != reported || edits.is_empty() {
+            continue; // the detector and this fixer disagree, or nothing is ours
+        }
+        let n = edits.len();
+        let opf_for_apply = opf.clone();
+        fixes.push(ProposedFix {
+            fix_id: "fix.empty_extra_identifier",
+            addresses_id: "RSC-005".to_string(),
+            addresses_rule: Some("opf.package.opf_identifier_not_empty"),
+            addresses_severity: addressed_severity(
+                report,
+                "RSC-005",
+                Some("opf.package.opf_identifier_not_empty"),
+            ),
+            tier: Tier::ConfirmNeeded,
+            title: format!(
+                "Drop {n} empty extra <dc:identifier> element{} in {opf}",
+                if n == 1 { "" } else { "s" }
+            ),
+            rationale: "An empty <dc:identifier> with no id states nothing and nothing can refer \
+                 to it, and the book keeps at least one real identifier, so the requirement for \
+                 one is still met after it goes. The identifier the package names as its unique \
+                 identifier is never touched here, even when it is empty: choosing the book's \
+                 identity is the author's decision."
+                .to_string(),
+            preview: vec![Change {
+                path: opf.clone(),
+                note: format!("drop {n} empty <dc:identifier> without an id"),
+            }],
+            apply_fn: Box::new(move |ws: &mut Workspace| {
+                if let Some(text) = ws.get_text(&opf_for_apply)
+                    && let Some((_, edits)) = plan_extra_identifier_drops(&text)
+                {
+                    ws.set_text(&opf_for_apply, apply_edits(&text, edits));
+                }
+            }),
+        });
+    }
+    fixes
+}
+
+/// The number of empty `<dc:identifier>` elements in the package, and the edits
+/// dropping those of them that have no `id` — none at all unless a non-empty
+/// identifier survives. `None` (decline) if the package does not parse.
+fn plan_extra_identifier_drops(opf: &str) -> Option<(usize, Vec<MetaEdit>)> {
+    let doc = parse_xml(opf)?;
+    let metadata = doc
+        .descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "metadata")?;
+    let identifiers: Vec<_> = metadata
+        .children()
+        .filter(|n| {
+            n.is_element()
+                && n.tag_name().namespace() == Some(DC_ELEMENTS_NS)
+                && n.tag_name().name() == "identifier"
+        })
+        .collect();
+    let is_blank = |n: &roxmltree::Node| {
+        let text: String = n
+            .descendants()
+            .filter(|t| t.is_text())
+            .filter_map(|t| t.text())
+            .collect();
+        epubveri::xmlext::is_xml_blank(&text)
+    };
+    let blank = identifiers.iter().filter(|n| is_blank(n)).count();
+    if identifiers.iter().all(is_blank) {
+        return Some((blank, Vec::new())); // dropping would leave none
+    }
+    let edits = identifiers
+        .iter()
+        .filter(|n| is_blank(n) && n.attribute("id").is_none())
+        .map(|n| MetaEdit {
+            range: with_leading_whitespace(opf, n.range()),
+            replacement: String::new(),
+        })
+        .collect();
+    Some((blank, edits))
+}
+
 /// `range` extended back over the whitespace that preceded it, so dropping an
 /// element on its own line doesn't leave the blank line behind.
 fn with_leading_whitespace(text: &str, range: Range<usize>) -> Range<usize> {
@@ -6211,35 +6336,135 @@ fn plan_empty_nav_drops(text: &str) -> Option<Vec<MetaEdit>> {
 /// side effect of producing output — no proposal, no approval. The writer now
 /// preserves packaging, and this proposes the repair in the open.
 fn mimetype_packaging(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
-    if !report.messages.iter().any(|m| m.id == "PKG-006") {
+    // PKG-006 (not first) and PKG-005 (an extra field in its ZIP header) are
+    // repaired by the same edit: re-emit `mimetype` first, stored, with a header
+    // the writer derives — which carries no extra field. PKG-006 leads when both
+    // are present, since moving the entry is the larger change.
+    let id = ["PKG-006", "PKG-005"]
+        .into_iter()
+        .find(|id| report.messages.iter().any(|m| m.id == *id));
+    let Some(id) = id else {
         return Vec::new();
-    }
+    };
     // Nothing to move — and we will not invent a mimetype, since that asserts
     // what the file *is* rather than repairing how it is packaged.
     if ws.get_text("mimetype").is_none() {
         return Vec::new();
     }
+    let (title, note) = if id == "PKG-006" {
+        (
+            "Move the `mimetype` entry first in the container, stored uncompressed",
+            "move to the first entry in the ZIP and store it uncompressed (contents unchanged)",
+        )
+    } else {
+        (
+            "Rewrite the `mimetype` entry's ZIP header without its extra field",
+            "write the entry's header without the extra field (contents unchanged)",
+        )
+    };
 
     vec![ProposedFix {
         fix_id: "fix.mimetype_packaging",
-        addresses_id: "PKG-006".to_string(),
+        addresses_id: id.to_string(),
         addresses_rule: None,
-        addresses_severity: addressed_severity(report, "PKG-006", None),
+        addresses_severity: addressed_severity(report, id, None),
         tier: Tier::AutoSafe,
-        title: "Move the `mimetype` entry first in the container, stored uncompressed".to_string(),
-        rationale: "OCF requires the `mimetype` entry to be the archive's first entry and to be \
-             stored uncompressed, so a reading system can identify the file from its opening \
-             bytes. This changes no content whatsoever — not one byte of any entry, `mimetype` \
-             included — only where that entry sits and how it is compressed. Every other entry \
-             keeps its original order, bytes and compression."
+        title: title.to_string(),
+        rationale: "OCF requires the `mimetype` entry to be the archive's first entry, stored \
+             uncompressed, with no extra field in its ZIP header, so a reading system can identify \
+             the file from its opening bytes at a fixed offset. This changes no content \
+             whatsoever — not one byte of any entry, `mimetype` included — only where that entry \
+             sits, how it is compressed and what its header carries. Every other entry keeps its \
+             original order, bytes and compression."
             .to_string(),
         preview: vec![Change {
             path: "mimetype".to_string(),
-            note:
-                "move to the first entry in the ZIP and store it uncompressed (contents unchanged)"
-                    .to_string(),
+            note: note.to_string(),
         }],
         apply_fn: Box::new(move |ws: &mut Workspace| ws.repackage_mimetype()),
+    }]
+}
+
+/// `PKG-014`: a directory entry in the ZIP with nothing inside it
+/// (`OEBPS/fonts/`, `OEBPS/images/` — left behind when a tool moved the files
+/// and kept the folders). The repair leaves the entry out of the archive.
+///
+/// A directory entry carries no content and no reading system looks at one, so
+/// nothing a reader can see changes. Found by epublift (2026-10-01): three shelf
+/// books whose only findings were this and `PKG-005` were left untouched, while
+/// their old repair cleared both by re-zipping.
+///
+/// **Dispatched on the id**, since the finding has no `rule`; its location is
+/// the directory's name. Each reported name must be a directory entry of this
+/// archive with no entry at all under it — checked here, not taken on trust.
+///
+/// **Declines the whole book** if dropping the reported directories would
+/// leave another directory entry empty (`OEBPS/` holding only `OEBPS/fonts/`):
+/// that would trade one `PKG-014` for a new one the detector never reported.
+fn empty_directories(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    let reported: BTreeSet<String> = report
+        .messages
+        .iter()
+        .filter(|m| m.id == "PKG-014")
+        .filter_map(|m| m.location.clone())
+        .collect();
+    if reported.is_empty() {
+        return Vec::new();
+    }
+    let dirs: Vec<String> = ws.directories().cloned().collect();
+    let files: Vec<&String> = ws.names().collect();
+    let empty = |d: &str, gone: &BTreeSet<String>| {
+        !files.iter().any(|f| f.starts_with(d))
+            && !dirs
+                .iter()
+                .any(|o| o != d && o.starts_with(d) && !gone.contains(o))
+    };
+    let none = BTreeSet::new();
+    let drop: BTreeSet<String> = reported
+        .into_iter()
+        .filter(|d| dirs.contains(d) && empty(d, &none))
+        .collect();
+    if drop.is_empty() {
+        return Vec::new();
+    }
+    // A directory the drop would empty, which nobody reported: decline.
+    if dirs
+        .iter()
+        .any(|d| !drop.contains(d) && empty(d, &drop) && !empty(d, &none))
+    {
+        return Vec::new();
+    }
+
+    let n = drop.len();
+    let preview: Vec<Change> = drop
+        .iter()
+        .map(|d| Change {
+            path: d.clone(),
+            note: "drop the empty directory entry (it holds nothing)".to_string(),
+        })
+        .collect();
+    let drop_for_apply: Vec<String> = drop.into_iter().collect();
+    vec![ProposedFix {
+        fix_id: "fix.empty_directory",
+        addresses_id: "PKG-014".to_string(),
+        addresses_rule: None,
+        addresses_severity: addressed_severity(report, "PKG-014", None),
+        tier: Tier::AutoSafe,
+        title: format!(
+            "Drop {n} empty directory entr{} from the container",
+            if n == 1 { "y" } else { "ies" }
+        ),
+        rationale: "These ZIP directory entries have nothing inside them: the files they once \
+             held were moved or removed and the folders were left behind. A directory entry \
+             carries no content and no reading system reads one, so leaving it out changes \
+             nothing a reader can see. Every file in the book keeps its bytes, name and order."
+            .to_string(),
+        preview,
+        apply_fn: Box::new(move |ws: &mut Workspace| {
+            for d in &drop_for_apply {
+                ws.drop_directory(d);
+            }
+        }),
     }]
 }
 
@@ -7629,6 +7854,173 @@ mod tests {
         // The finding named only `properties`, so the spine attribute is not
         // touched even though it would qualify.
         assert_eq!(droppable(&opf, &["properties"]), vec!["properties"]);
+    }
+
+    // ---- fix.mimetype_packaging: PKG-005 ------------------------------
+
+    fn id_only(id: &'static str) -> Report {
+        let mut r = Report::default();
+        r.messages.push(epubveri::report::Message {
+            rule: None,
+            ..fixture(id, "unused")
+        });
+        r
+    }
+
+    /// An extra field in `mimetype`'s header is repaired by the same
+    /// re-emission that repairs its position, and is proposed on its own.
+    #[test]
+    fn a_mimetype_extra_field_is_proposed_on_its_own() {
+        let ws = container(&[("META-INF/container.xml", "<container/>")]);
+        let fixes = mimetype_packaging(&id_only("PKG-005"), &ws);
+        assert_eq!(fixes.len(), 1);
+        assert_eq!(fixes[0].addresses_id, "PKG-005");
+        assert!(fixes[0].title.contains("extra field"), "{}", fixes[0].title);
+    }
+
+    /// Both at once is one edit, addressed to the larger change.
+    #[test]
+    fn a_misplaced_mimetype_with_an_extra_field_is_one_fix() {
+        let ws = container(&[("META-INF/container.xml", "<container/>")]);
+        let mut r = id_only("PKG-005");
+        r.messages.extend(id_only("PKG-006").messages);
+        let fixes = mimetype_packaging(&r, &ws);
+        assert_eq!(fixes.len(), 1);
+        assert_eq!(fixes[0].addresses_id, "PKG-006");
+    }
+
+    // ---- fix.empty_directory -----------------------------------------
+
+    /// A container with these directory entries and these files.
+    fn with_dirs(dirs: &[&str], files: &[&str]) -> Workspace {
+        use std::io::Write;
+        let mut buf = Vec::new();
+        {
+            let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            let opts = zip::write::SimpleFileOptions::default();
+            zip.start_file("mimetype", opts).unwrap();
+            zip.write_all(b"application/epub+zip").unwrap();
+            for d in dirs {
+                zip.add_directory(*d, opts).unwrap();
+            }
+            for f in files {
+                zip.start_file(*f, opts).unwrap();
+                zip.write_all(b"x").unwrap();
+            }
+            zip.finish().unwrap();
+        }
+        Workspace::load(&buf).unwrap()
+    }
+
+    fn pkg014(dirs: &[&str]) -> Report {
+        let mut r = Report::default();
+        for d in dirs {
+            let mut m = fixture("PKG-014", "unused");
+            m.rule = None;
+            m.location = Some(d.to_string());
+            r.messages.push(m);
+        }
+        r
+    }
+
+    /// The shelf's shape: two empty folders beside a full one. Both empty
+    /// ones go in one proposal; the full one is never named.
+    #[test]
+    fn empty_directory_entries_are_dropped() {
+        let ws = with_dirs(
+            &["OEBPS/", "OEBPS/fonts/", "OEBPS/images/"],
+            &["OEBPS/c.xhtml"],
+        );
+        let fixes = empty_directories(&pkg014(&["OEBPS/fonts/", "OEBPS/images/"]), &ws);
+        assert_eq!(fixes.len(), 1);
+        let paths: Vec<_> = fixes[0].preview.iter().map(|c| c.path.as_str()).collect();
+        assert_eq!(paths, ["OEBPS/fonts/", "OEBPS/images/"]);
+    }
+
+    /// A reported name that holds something is not empty, whatever the finding
+    /// says; one that is not a directory entry at all is not ours either.
+    #[test]
+    fn a_directory_that_is_not_empty_is_left_alone() {
+        let ws = with_dirs(
+            &["OEBPS/", "OEBPS/fonts/"],
+            &["OEBPS/fonts/f.ttf", "OEBPS/c.xhtml"],
+        );
+        assert!(empty_directories(&pkg014(&["OEBPS/fonts/"]), &ws).is_empty());
+        assert!(empty_directories(&pkg014(&["OEBPS/nowhere/"]), &ws).is_empty());
+    }
+
+    /// Dropping `OEBPS/fonts/` would leave `OEBPS/` empty, a new finding nobody
+    /// reported, so the whole proposal declines.
+    #[test]
+    fn a_drop_that_would_empty_its_parent_is_declined() {
+        let ws = with_dirs(&["OEBPS/", "OEBPS/fonts/"], &["c.xhtml"]);
+        assert!(empty_directories(&pkg014(&["OEBPS/fonts/"]), &ws).is_empty());
+    }
+
+    // ---- fix.empty_extra_identifier -----------------------------------
+
+    /// `n` findings of the identifier rule, located at the package document.
+    fn ident_findings(n: usize) -> Report {
+        let mut r = Report::default();
+        for _ in 0..n {
+            let mut m = fixture("RSC-005", "opf.package.opf_identifier_not_empty");
+            m.location = Some("OEBPS/package.opf".to_string());
+            r.messages.push(m);
+        }
+        r
+    }
+
+    fn extra_ident_fix(opf: &str, findings: usize) -> Option<String> {
+        let mut ws = container(&[("OEBPS/package.opf", opf)]);
+        let fix = empty_extra_identifier(&ident_findings(findings), &ws)
+            .into_iter()
+            .next()?;
+        fix.apply(&mut ws);
+        ws.get_text("OEBPS/package.opf")
+    }
+
+    /// epublift's book: an empty anchor, an empty extra, two real identifiers.
+    /// Only the extra goes; the anchor is the book's identity and stays.
+    #[test]
+    fn an_empty_extra_identifier_is_dropped_and_the_anchor_kept() {
+        let opf = ident_package(
+            "bookid",
+            &[
+                ("bookid", ""),
+                ("", ""),
+                ("", "urn:uuid:1"),
+                ("", "9786054836680"),
+            ],
+        );
+        let out = extra_ident_fix(&opf, 2).expect("must be proposed");
+        assert_eq!(out.matches("<dc:identifier/>").count(), 0, "{out}");
+        assert!(out.contains(r#"<dc:identifier id="bookid"/>"#), "{out}");
+        assert!(out.contains("urn:uuid:1") && out.contains("9786054836680"));
+    }
+
+    /// With no real identifier left, deleting one would trade "empty" for
+    /// "missing" — the argument that keeps identifiers out of the other fixer.
+    #[test]
+    fn the_last_identifiers_are_never_dropped() {
+        let opf = ident_package("bookid", &[("bookid", ""), ("", "")]);
+        assert!(extra_ident_fix(&opf, 2).is_none());
+    }
+
+    /// One finding for two empty elements: the detector and this fixer
+    /// disagree about what is empty, so nothing is touched.
+    #[test]
+    fn a_count_mismatch_with_the_findings_declines() {
+        let opf = ident_package("bookid", &[("bookid", ""), ("", ""), ("", "urn:uuid:1")]);
+        assert!(extra_ident_fix(&opf, 1).is_none());
+        assert!(extra_ident_fix(&opf, 3).is_none());
+    }
+
+    /// An empty identifier with an id of its own can be referred to, so it is
+    /// not "nothing can point at it" and is left alone.
+    #[test]
+    fn an_empty_identifier_with_an_id_is_left_alone() {
+        let opf = ident_package("bookid", &[("bookid", "urn:uuid:1"), ("other", "")]);
+        assert!(extra_ident_fix(&opf, 1).is_none());
     }
 
     // ---- fix.package_version ----------------------------------------

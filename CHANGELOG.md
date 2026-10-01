@@ -8,6 +8,42 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **A book whose only error was in its `mimetype` header was called valid.**
+  epubsana validated the book as it would write it rather than as it is on
+  disk, and its ZIP writer drops the optional extra field from every entry's
+  header. So a `mimetype` entry carrying one (`PKG-005`) never appeared in the
+  report: three books on the test shelf were reported valid, with exit status 0,
+  while the file was not. The report before repair now checks the book exactly
+  as it arrived. Found by epublift.
+
+### Added
+
+- **`PKG-005` is now repaired** by `fix.mimetype_packaging`, the fix that
+  already moves `mimetype` to the front: the entry is written again with a
+  header that has no extra field. Its content does not change.
+- **`fix.empty_directory`** (`PKG-014`): an empty directory entry in the ZIP,
+  such as `OEBPS/fonts/` left behind with nothing in it, is left out of the
+  archive. It declines when that would leave another directory empty. Three
+  books on the test shelf.
+- **`fix.empty_extra_identifier`**: an empty `<dc:identifier>` with no `id` is
+  dropped when the book keeps a real identifier. The empty identifier the
+  package names as its unique identifier is never touched, because choosing the
+  book's identity is the author's decision. One book on the test shelf.
+
+Together these make three more books on the test shelf valid, and none of the
+three changes introduces a new finding on any book.
+
+### Changed
+
+- The docs now say plainly that the ZIP writer does not carry the optional
+  extra field in each entry's header (extended timestamps and permissions,
+  mostly). Entry contents, names, order, compression and date and time are
+  unchanged, as before.
+
 ## [0.21.0] - 2026-10-01
 
 ### Changed

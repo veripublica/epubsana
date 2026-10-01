@@ -32,7 +32,8 @@ grows one carefully-argued entry at a time.
 | `RSC-020` | `opf.manifest_item.unencoded_space_in_href` | AutoSafe | A manifest `href` contains a raw space | [Percent-encode the space as `%20`](#rsc-020--unencoded-space-in-a-manifest-href) |
 | `RSC-020` | `opf.ncx.content_src_unencoded_space` | AutoSafe | An NCX `<content src>` contains a raw space | [Percent-encode the space as `%20`](#rsc-020--unencoded-space-in-an-ncx-content-src) |
 | `OPF-014` | `opf.content_document.property_used_undeclared` | AutoSafe | A content document uses a feature its manifest item doesn't declare | [Add the token to that item's `properties`](#opf-014--undeclared-content-property) |
-| `PKG-006` | *(none)* | AutoSafe | The `mimetype` entry is not first in the ZIP, as OCF requires | [Re-emit it first and stored, touching no content](#pkg-006--mimetype-is-not-the-first-entry) |
+| `PKG-006` / `PKG-005` | *(none)* | AutoSafe | The `mimetype` entry is not first in the ZIP, or its header carries an extra field | [Re-emit it first and stored, touching no content](#pkg-006--pkg-005--the-mimetype-entrys-packaging) |
+| `PKG-014` | *(none)* | AutoSafe | A ZIP directory entry has nothing inside it | [Leave the entry out of the archive](#pkg-014--an-empty-directory-entry) |
 | `RSC-005` | `opf.content_document.schema_violation` (stray text / inline element / incomplete content, in `<body>` or `<blockquote>`) | ConfirmNeeded | EPUB 2 text or inline elements sit where the grammar requires block content | [Wrap each run in one `<div>`, leaving whitespace alone](#rsc-005--non-block-content-in-body-or-blockquote-epub-2) |
 | `RSC-001` | `opf.manifest_item.missing_resource` | ConfirmNeeded | A manifest `<item>` declares a resource the container doesn't hold | [Drop the item, and every reference that named it](#rsc-001--dangling-manifest-item) |
 | `OPF-049` | `opf.spine.itemref_idref_not_in_manifest` | ConfirmNeeded | A spine `<itemref>` names a manifest id that doesn't exist | [Drop the itemref](#opf-049--dangling-spine-itemref) |
@@ -55,6 +56,7 @@ grows one carefully-argued entry at a time.
 | `RSC-005` | `opf.content_document.duplicate_id` | ConfirmNeeded | Two or more elements in one document share an `id` | [Keep the first, rename the later ones](#rsc-005--a-duplicate-id-in-a-content-document) |
 | `RSC-007` | `opf.content_document.reference_missing_resource` | ConfirmNeeded | A link's path is stale, but the file it names is still in the book | [Repoint the path, carry the fragment across](#rsc-007--a-reference-whose-path-is-wrong-but-whose-target-is-in-the-book) |
 | `RSC-007` | `css.font_face.missing_target` | ConfirmNeeded | A `@font-face` sources a font file the book does not contain | [Drop the whole rule; decline one with a second source](#rsc-007--a-font-face-whose-font-file-is-not-in-the-book) |
+| `RSC-005` | `opf.package.opf_identifier_not_empty` (an extra one) | ConfirmNeeded | An empty `<dc:identifier>` with no `id`, beside a real one | [Drop it; never the unique-identifier anchor](#rsc-005--an-empty-extra-dcidentifier) |
 | `OPF-001` | `opf.package.unrecognized_version` | ConfirmNeeded | The package declares a `version` that is not an EPUB version, so the book has never been validated | [Set it to `2.0` when only EPUB 2 fits](#opf-001--a-package-version-that-is-not-an-epub-version) |
 | `OPF-030` / `RSC-005` | `opf.package.unique_identifier_unresolved`, `opf.package.opf_identifier_not_empty` | ConfirmNeeded | The package's declared unique identifier resolves to nothing usable | [Attach the declared id to the book's one real identifier](#opf-030--rsc-005--the-packages-declared-identifier-points-at-nothing-usable) |
 | `RSC-005` | `htm.epub2_dom.nested_anchor` | ConfirmNeeded | An `<a>` with only an `id` wraps a real link | [Unwrap it, moving the `id` to the child](#rsc-005--an-anchor-target-wrapped-around-a-link) |
@@ -362,7 +364,7 @@ treated as EPUB 2, since declining there would withdraw a repair on a guess.
 
 ---
 
-## PKG-006 — `mimetype` is not the first entry
+## PKG-006 / PKG-005 — the `mimetype` entry's packaging
 
 **Finding.** `PKG-006` (no `rule` sub-code — the code is unambiguous on its own,
 and its subject is the container itself, so there is nothing to disambiguate).
@@ -370,8 +372,22 @@ The archive has a `mimetype` entry, but it is not the first one. OCF requires th
 `mimetype` entry to come first and to be stored uncompressed, so that a reader
 can identify the file by reading its opening bytes.
 
+`PKG-005` (also no `rule`): the `mimetype` entry is first, but its ZIP header
+carries an extra field, so its contents do not sit at the fixed offset a reader
+looks at. On the test shelf it is a 36-byte field in eight books.
+
 **Fix** (`fix.mimetype_packaging`, AutoSafe). Re-emit the `mimetype` entry first
-and stored. Every other entry keeps its original order, bytes and compression.
+and stored, with a header the writer derives, which carries no extra field. One
+edit repairs both findings; when both are present the proposal names `PKG-006`.
+Every other entry keeps its original order, bytes and compression.
+
+**`PKG-005` was invisible until 0.22.0, and that was a bug, not a decline.** The
+writer cannot carry local-header extra fields, and epubsana's "before" report
+used to validate the writer's output rather than the book itself. So `PKG-005`
+never appeared, and three shelf books whose only error it was were reported
+valid, with exit status 0, while the file on disk was not. The before report now
+validates the original bytes. Found by epublift, comparing epubsana's verdicts
+with epubveri's on the original files.
 
 **Why it's safe.** This is the rare fix that changes **no content whatsoever** —
 not one byte of any entry, `mimetype` included. Only the entry's *position* in
@@ -389,6 +405,67 @@ re-emitted `mimetype` first and stored, so merely producing output repaired this
 defect with no proposal and no approval. That contradicted epubsana's first
 guarantee, so the writer now preserves packaging exactly and this fixer proposes
 the repair in the open, where you can see it and decline it.
+
+---
+
+## PKG-014 — an empty directory entry
+
+**Finding.** `PKG-014` (a warning, no `rule`). The ZIP holds a directory entry,
+such as `OEBPS/fonts/`, with nothing inside it: a tool moved or removed the files
+and left the folder behind. The finding's location is the directory's name.
+
+**Fix** (`fix.empty_directory`, AutoSafe). Leave the directory entry out of the
+written archive. One proposal per book, naming every directory it drops.
+
+**Why it's safe.** A directory entry carries no content, and no reading system
+reads one. Every file in the book keeps its bytes, name and order. The emptiness
+is checked here against the archive, not taken from the finding.
+
+**When it declines.**
+
+- A reported name that is not a directory entry, or that has anything inside it.
+- **The whole book**, if dropping the reported directories would leave another
+  directory entry empty (`OEBPS/` holding only `OEBPS/fonts/`). That would trade
+  one `PKG-014` for a new one the detector never reported.
+
+**Measured.** 544 books, epubveri 0.20.0: three books, two directories each,
+all six cleared, no new finding at any severity. Found by epublift: those three
+books' only other finding was `PKG-005`, so epubsana used to leave them alone
+entirely.
+
+---
+
+## RSC-005 — an empty extra `<dc:identifier>`
+
+**Finding.** `opf.package.opf_identifier_not_empty`: a `<dc:identifier>` is
+empty. The finding carries no path and no `params`. It is a Schematron
+assertion, located at the package document only.
+
+**Fix** (`fix.empty_extra_identifier`, ConfirmNeeded). Drop every empty
+`<dc:identifier>` that has no `id`, provided a non-empty `<dc:identifier>`
+remains in the book.
+
+**Why it's safe.** An identifier with no `id` cannot be referred to, so nothing
+points at it. With a real identifier left, the requirement for one still holds.
+The rule that keeps `dc:identifier` out of `fix.empty_metadata_element` is "do
+not trade *empty* for *missing*", and it does not reach an extra one.
+
+**When it declines.**
+
+- **It never touches the empty identifier that the package's
+  `unique-identifier` names.** Filling it, or moving its `id` to one of the real
+  identifiers, is choosing the book's identity. That is
+  `fix.package_identifier`'s shape, which declines when more than one candidate
+  exists.
+- No non-empty identifier in the book: deleting one would leave none.
+- **The count does not match.** Every empty `<dc:identifier>` draws one
+  finding, so the number of findings in the package must equal the number of
+  empty elements this fixer sees (empty means epubveri's own
+  `xmlext::is_xml_blank`). If they differ, the detector and the fixer disagree
+  about what is empty, and nothing is touched.
+
+**Measured.** One book on the shelf, from Calibre: an empty anchor, an empty
+extra and two real identifiers. Only the extra goes. Found by epublift.
 
 ---
 

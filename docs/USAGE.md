@@ -307,17 +307,22 @@ Two things follow that are worth knowing:
   so you can tell a user exactly which files a fix would touch without touching
   anything.
 
-**One exception, and it is the only one.** The packaging fix (`PKG-006`,
-`fix.mimetype_packaging`) reports `"path": "mimetype"` — but that file's *content*
-does not change. What changes is where it sits in the ZIP and whether it is
-compressed. A plugin that copies changed files back cannot reproduce that fix,
-because in an editor's terms it is not a file edit at all. If you see it, either
-re-save the container yourself or use epubsana's own output file for that book.
+**Two exceptions, both about packaging rather than files.** The packaging fix
+(`PKG-006` / `PKG-005`, `fix.mimetype_packaging`) reports `"path": "mimetype"` —
+but that file's *content* does not change. What changes is where it sits in the
+ZIP, whether it is compressed and what its header carries. And the empty
+directory fix (`PKG-014`, `fix.empty_directory`) reports the directory's name,
+such as `"path": "OEBPS/fonts/"`, which is not a file at all. A plugin that
+copies changed files back cannot reproduce either, because in an editor's terms
+neither is a file edit. If you see one, either re-save the container yourself or
+use epubsana's own output file for that book.
 
 **You do not need to diff the repaired EPUB against the original.** epubsana
 copies every entry it did not touch through byte-for-byte — same bytes, same
-compression method, same timestamps — so an untouched file is identical, and
-`data.changes` already tells you which ones those aren't.
+compression method, same date and time — so an untouched file is identical, and
+`data.changes` already tells you which ones those aren't. What the ZIP writer
+cannot carry is the optional *extra field* in each entry's header (extended
+timestamps and permissions, mostly), so those are not in the written book.
 
 A complete Python round trip, which is roughly what a Sigil or calibre plugin
 does:
@@ -655,7 +660,9 @@ safe, and when epubsana declines, see the **[fix catalogue](./FIXERS.md)**.
 | `RSC-005` | `opf.content_document.empty_title` | ConfirmNeeded | Fills an empty `<title></title>` with text **from the book itself**: the label its table of contents gives that document, or failing that the document's own first heading. Declines when the book names the document nowhere — it never invents a title, and never falls back to the book's own `dc:title`. |
 | `RSC-020` | `opf.manifest_item.unencoded_space_in_href` | AutoSafe | Percent-encodes a raw space in a manifest `href` (`ch 1.xhtml` → `ch%201.xhtml`). The file keeps its name; only the URL is spelled legally. |
 | `OPF-014` | `opf.content_document.property_used_undeclared` | AutoSafe | Adds the property a content document demonstrably uses (`scripted`, `svg`, `remote-resources`, `switch`) to its manifest item's `properties`. The document itself is not touched — the manifest is made to tell the truth about it. |
-| `PKG-006` | *(none)* | AutoSafe | Moves the `mimetype` entry to the front of the ZIP, stored uncompressed, as OCF requires. Changes no content at all — not one byte of any entry, `mimetype` included; only where it sits and how it's compressed. Declines if there is no `mimetype` entry to move. |
+| `PKG-006` / `PKG-005` | *(none)* | AutoSafe | Moves the `mimetype` entry to the front of the ZIP, stored uncompressed and with no extra field in its header, as OCF requires. Changes no content at all — not one byte of any entry, `mimetype` included; only where it sits, how it's compressed and what its header carries. Declines if there is no `mimetype` entry to move. |
+| `PKG-014` | *(none)* | AutoSafe | Leaves an empty ZIP directory entry (`OEBPS/fonts/` with nothing in it) out of the archive. A directory entry carries no content, so nothing a reader sees changes. Declines when dropping it would leave another directory entry empty. |
+| `RSC-005` | `opf.package.opf_identifier_not_empty` (an extra one) | ConfirmNeeded | Drops an empty `<dc:identifier>` that has no `id`, when the book keeps a real identifier. Never touches the empty identifier the package names as its unique identifier — choosing the book's identity is the author's decision. Declines when the number of findings does not match the number of empty identifiers it sees. |
 | `RSC-005` | `opf.content_document.schema_violation` (non-block content in `body` / `blockquote`) | ConfirmNeeded | Wraps EPUB 2 text **and inline elements** (`<a>`, `<br>`, `<img>`, …) sitting where the grammar requires block content — inside `<body>` or `<blockquote>` — in a `<div>`. Each run is wrapped whole, so a line that rendered as one block still does. Nothing is altered and the whitespace around it stays put. `<div>` rather than `<p>`: it claims nothing about what the content is, and matches the anonymous block it already renders as. Containers wanting a specific child (`<ol>` an `<li>`, `<head>` a `<title>`) are declined, as is an element XHTML 1.1 does not have at all (`<figure>`, `<section>`) — wrapping one would move its violation rather than clear it. |
 | `RSC-001` | `opf.manifest_item.missing_resource` | ConfirmNeeded | Drops a manifest `<item>` declaring a resource the container doesn't hold — **and, in the same approval, every reference that named it**: the spine `<itemref>`s it would orphan, and a legacy `<meta name="cover">` pointing at it. Nothing readable is lost, because the resource was already gone. Declines if the deletions would empty the `<spine>`. |
 | `OPF-049` | `opf.spine.itemref_idref_not_in_manifest` | ConfirmNeeded | Drops a spine `<itemref>` naming a manifest id that doesn't exist — a position no reading system can render, and one nothing in the book says how to repair. Every other entry keeps its place. Declines if it would empty the `<spine>`. |
