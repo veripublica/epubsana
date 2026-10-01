@@ -8,6 +8,16 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Requires epubveri 0.20.0**, which reports an image whose header stops
+  before its width and height (PKG-021), as epubcheck does. epubsana does not
+  repair it: the missing bytes are the picture itself. No fixer changed, and
+  every fix proposed across the 544-book test shelf is identical under both
+  versions.
+
 ## [0.20.0] - 2026-09-30
 
 ### Changed

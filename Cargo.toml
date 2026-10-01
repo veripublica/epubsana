@@ -177,6 +177,17 @@ members = ["epubsana-wasm"]
 #   and 50 renames, so a `params` answer that failed to arrive would have deleted
 #   every one of them.
 #
+#   **0.20.0 (2026-10-01) is a TRACKING floor.** A minor (a new error key, so a
+#   book can now fail where it passed), so the caret on 0.19.1 stops before it.
+#   No source change, no API change upstream. The one new key,
+#   `opf.manifest_item.image_header_unreadable` (PKG-021: an image whose header
+#   stops before its width and height), is not dispatched on: the missing bytes
+#   are the picture, and the only edits available (drop or replace the image)
+#   lose content. Measured on 544 books, linkage checked on both arms: plan
+#   digest, `regression_audit` and the full `rule_census` byte-identical — the
+#   shelf has no such image. Positive control: a JPEG with no SOF segment draws
+#   PKG-021 through `Workspace::detect` and plans nothing.
+#
 #   **0.19.1 (2026-09-30) is a TRACKING floor.** A minor, so the caret on 0.18
 #   stops before it. No source change, no API change upstream; 0.19.1 over
 #   0.19.0 is a speed fix (per-link positions were quadratic) with identical
@@ -255,7 +266,7 @@ members = ["epubsana-wasm"]
 #
 # For local co-development of epubveri, add an uncommitted override:
 #   [patch.crates-io] epubveri = { path = "../epubveri" }
-epubveri = "0.19.1"
+epubveri = "0.20.0"
 # Pure-Rust only (no C deps), same philosophy as epubveri: zip's "deflate"
 # feature uses zlib-rs (Rust) on the 8.x line; bzip2/zstd (C) stay disabled.
 # Aligned to epubveri's zip major — the family shares one zip version because
