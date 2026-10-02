@@ -83,6 +83,43 @@ jobs:
       - name: Build epubsana-wasm for wasm32
         run: cargo build -p epubsana-wasm --target wasm32-unknown-unknown --locked
 
+  # The published MSRV, actually tested. `rust-version` is a promise on
+  # crates.io: a user on that toolchain reads it as "this will build". The
+  # `check` job runs the runner's stable only, so the floor could become false
+  # with CI green. Adopted from epubveri's `msrv` job.
+  #
+  # The version is read out of the manifests rather than written here, so it
+  # is never a second copy free to drift. Both crates declare it; the job
+  # refuses to run if they disagree, so neither can drift from the other.
+  #
+  # `check` rather than `test`: the promise is that the crates compile.
+  # Dev-dependencies and the test harness are ours, not a consumer's.
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Read the declared MSRV
+        id: msrv
+        run: |
+          set -euo pipefail
+          v=$(grep -m1 '^rust-version' Cargo.toml | cut -d'"' -f2)
+          w=$(grep -m1 '^rust-version' epubsana-wasm/Cargo.toml | cut -d'"' -f2)
+          test -n "$v" || { echo "error: no rust-version in Cargo.toml" >&2; exit 1; }
+          test "$v" = "$w" || { echo "error: rust-version differs: Cargo.toml '$v', epubsana-wasm/Cargo.toml '$w'" >&2; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "declared MSRV: $v"
+
+      - name: Install it
+        run: |
+          rustup toolchain install "${{ steps.msrv.outputs.version }}" --profile minimal
+          rustup default "${{ steps.msrv.outputs.version }}"
+          rustc -V
+
+      - name: Compile at the floor
+        run: cargo check --workspace --locked
+
   # The mutation fuzzer (examples/fuzz.rs): two defective books corrupted
   # 3,000 times each, every result repaired with every fix approved, and any
   # panic fails the job. Deterministic per seed, so red here reproduces
