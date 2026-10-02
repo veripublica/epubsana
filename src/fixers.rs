@@ -8683,6 +8683,45 @@ mod tests {
         assert!(plan_font_face_drops(nested, &urls).is_none());
     }
 
+    /// epubveri 0.21 reads an unquoted `url()` holding a space, a quote or a
+    /// parenthesis as epubcheck does (up to the first `)`), so a missing font
+    /// there now reaches this fixer; before, it was CSS-008 and nothing else.
+    /// Through the real detector, because the claim is about what it reports.
+    #[test]
+    fn font_face_drops_a_missing_font_named_by_an_unquoted_bad_url() {
+        for src in ["f/a b.ttf", "f/q'q.ttf", "f/p(p.ttf"] {
+            let css =
+                format!("@font-face {{ font-family: A; src: url({src}); }}\np {{ margin: 0 }}");
+            let mut ws = container(&[
+                (
+                    "META-INF/container.xml",
+                    r#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#,
+                ),
+                (
+                    "content.opf",
+                    r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="id">x</dc:identifier></metadata>
+  <manifest><item href="s.css" id="css" media-type="text/css"/></manifest>
+  <spine/>
+</package>"#,
+                ),
+                ("s.css", &css),
+            ]);
+            let report = ws.detect().unwrap();
+            let fixes = font_face_missing_target(&report, &ws);
+            assert_eq!(
+                fixes.len(),
+                1,
+                "{src}: the missing font is reported and planned"
+            );
+            (fixes.into_iter().next().unwrap().apply_fn)(&mut ws);
+            let out = ws.get_text("s.css").unwrap();
+            assert!(!out.contains("@font-face"), "{src}: {out}");
+            assert!(out.contains("p { margin: 0 }"), "{src}: {out}");
+        }
+    }
+
     #[test]
     fn font_face_ignores_a_matching_url_outside_a_font_face_rule() {
         let css = "body { background: url(../Fonts/arial.ttf) }";

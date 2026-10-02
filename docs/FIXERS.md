@@ -1586,6 +1586,16 @@ parser is added.** The crate still runs on five dependencies.
 - A stylesheet that cannot be read, or in which the reported url does not appear
   inside a `@font-face` rule at all.
 
+**An unquoted url with a space, a quote or a parenthesis in it (epubveri 0.21+).**
+`url(f/a b.ttf)`, `url(f/q'q.ttf)` and `url(f/p(p.ttf)` were a CSS syntax error
+(CSS-008) and nothing else up to epubveri 0.20, so nothing was proposed. From 0.21
+epubveri reads them as epubcheck does, up to the first `)`, and a missing font
+there draws RSC-007 like any other. The fix is the same deletion, and is safer
+here if anything: CSS calls such a url malformed, so no browser would load it
+even if the file were present. `params[0]` is the url as written, so the text
+match holds; a test runs all three shapes through the real detector. 0 cases on
+the shelf (2026-10-02).
+
 **Measured (2026-08-13): 21 findings across 5 books**, error severity — the only
 error-severity candidate left on this shelf, and so the only remaining fixer that
 can move the `--goal valid` line. It does: **one book goes fully valid** that did

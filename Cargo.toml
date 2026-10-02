@@ -177,6 +177,21 @@ members = ["epubsana-wasm"]
 #   and 50 renames, so a `params` answer that failed to arrive would have deleted
 #   every one of them.
 #
+#   **0.21.0 (2026-10-02) is a TRACKING floor.** A minor (two CSS shapes
+#   epubcheck reports are now CSS-008, so a book can fail where it passed). No
+#   source change, no API change upstream. The one rule we consume from CSS,
+#   `css.font_face.missing_target`, gains a shape: an unquoted `url()` holding a
+#   space, a quote or a parenthesis was CSS-008 `bad_token` and nothing else, and
+#   is now read as epubcheck reads it, so a missing font there draws RSC-007 and
+#   `fix.font_face_missing_target` proposes the drop it proposes for any other
+#   missing font. `params[0]` is the url as written, so the fixer's text match
+#   holds; probe books for all three shapes repair to zero CSS findings. The
+#   new `css.declaration.nested_rule` is not dispatched on, and a rule nested in
+#   `@font-face` (now CSS-008 too) is still declined by the brace check.
+#   Measured on 544 books: plan digest, `regression_audit` and every finding's
+#   identity and position (`pos_ab`, 55,573) byte-identical; the shelf holds
+#   none of the changed shapes.
+#
 #   **0.20.0 (2026-10-01) is a TRACKING floor.** A minor (a new error key, so a
 #   book can now fail where it passed), so the caret on 0.19.1 stops before it.
 #   No source change, no API change upstream. The one new key,
@@ -266,7 +281,7 @@ members = ["epubsana-wasm"]
 #
 # For local co-development of epubveri, add an uncommitted override:
 #   [patch.crates-io] epubveri = { path = "../epubveri" }
-epubveri = "0.20.0"
+epubveri = "0.21.0"
 # Pure-Rust only (no C deps), same philosophy as epubveri: zip's "deflate"
 # feature uses zlib-rs (Rust) on the 8.x line; bzip2/zstd (C) stay disabled.
 # Aligned to epubveri's zip major — the family shares one zip version because

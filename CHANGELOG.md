@@ -8,6 +8,19 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Requires epubveri 0.21.0**, which reads an unquoted CSS `url()` the way
+  epubcheck does and reports two CSS errors epubcheck reports (a rule inside
+  `@font-face`, a value holding a `{ }` block). A `@font-face` whose only
+  source is an unquoted url with a space, a quote or a parenthesis in it, and
+  whose font is missing, is now dropped by `fix.font_face_missing_target` like
+  any other missing font; before, it was reported only as a CSS syntax error
+  and nothing was proposed. Every fix proposed across the 544-book test shelf
+  is identical under both versions.
+
 ## [0.22.0] - 2026-10-01
 
 ### Fixed
