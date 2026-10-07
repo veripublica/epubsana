@@ -1,6 +1,6 @@
 [package]
 name = "epubsana"
-version = "0.23.0"
+version = "0.24.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Repairs the EPUB defects epubveri detects — a pure-Rust, confirm-each-step EPUB fixer."
@@ -177,6 +177,27 @@ members = ["epubsana-wasm"]
 #   and 50 renames, so a `params` answer that failed to arrive would have deleted
 #   every one of them.
 #
+#   **0.23.0 (2026-10-08) is a CORRECTNESS floor, and it moved a fixer.** It
+#   spans 0.21.1 (the entity API, additive), 0.22.0 (XML names and whitespace
+#   from epubcheck's own tables) and 0.23.0 (five keys folded into others, none
+#   of which we dispatch on). 0.22.0 makes a no-break space *text* to the
+#   grammar, as in epubcheck. `fix.bare_text_in_body` trimmed its runs with
+#   Rust's `trim`, which strips U+00A0, so a line ending `Zweig\u{a0}` was
+#   wrapped as `<div>Zweig</div>\u{a0}` and left a new stray-text finding behind
+#   on every line. Measured on 544 books, original findings byte-identical
+#   (`pos_ab`, 55,573; `rule_census`): unchanged code on 0.23 left 2,209 more
+#   errors after repair than on 0.21 (15,880 → 18,089), all `RSC-005`
+#   stray text, in three books (2,102 in one). Our rollback could not see it:
+#   no `(id, rule)` count rose above the original. With the trim on XML's four
+#   whitespace characters (`xmlext::is_xml_space`), `regression_audit` is
+#   byte-identical to 0.21 and the plan moves only in those three books' wrap
+#   spans. Three more list/whitespace helpers moved to the same predicate for
+#   the same reason (unit-tested; no shelf book has the shape). The floor is
+#   for correctness, argued rather than measured: below 0.22 an EPUB 2 id
+#   spelled with a combining mark (a decomposed Turkish `ş`, as macOS writes
+#   it) is a false RSC-005, which `fix.content_document_invalid_id` would
+#   rename. No shelf book has one.
+#
 #   **0.21.0 (2026-10-02) is a TRACKING floor.** A minor (two CSS shapes
 #   epubcheck reports are now CSS-008, so a book can fail where it passed). No
 #   source change, no API change upstream. The one rule we consume from CSS,
@@ -281,7 +302,7 @@ members = ["epubsana-wasm"]
 #
 # For local co-development of epubveri, add an uncommitted override:
 #   [patch.crates-io] epubveri = { path = "../epubveri" }
-epubveri = "0.21.0"
+epubveri = "0.23.0"
 # Pure-Rust only (no C deps), same philosophy as epubveri: zip's "deflate"
 # feature uses zlib-rs (Rust) on the 8.x line; bzip2/zstd (C) stay disabled.
 # Aligned to epubveri's zip major — the family shares one zip version because

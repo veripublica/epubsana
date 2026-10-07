@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ops::Range;
 
 use epubveri::report::{Report, Severity, ViolationKind};
+use epubveri::xmlext::is_xml_space;
 
 use crate::{Change, Goal, ProposedFix, Tier, Workspace, entities};
 
@@ -1897,9 +1898,13 @@ fn ncx_content_src_spaces(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
 /// decoded `text()`: the two differ in length wherever an entity reference
 /// appears, and offsets measured against the decoded form would land in the
 /// wrong place in the document.
+///
+/// Whitespace here is XML's four characters, not Rust's `trim`: a no-break
+/// space is text to the grammar (epubveri 0.22, as in epubcheck), so one left
+/// outside the wrapper is a new stray-text finding.
 fn trimmed_span(range: Range<usize>, raw: &str) -> Option<Range<usize>> {
-    let lead = raw.len() - raw.trim_start().len();
-    let trail = raw.len() - raw.trim_end().len();
+    let lead = raw.len() - raw.trim_start_matches(is_xml_space).len();
+    let trail = raw.len() - raw.trim_end_matches(is_xml_space).len();
     if lead + trail >= raw.len() {
         return None; // whitespace only — not the defect, never wrap it
     }
@@ -2805,7 +2810,7 @@ fn nav_item_ids(opf: &str) -> BTreeSet<String> {
         .filter(|n| n.is_element() && n.tag_name().name() == "item")
         .filter(|n| {
             n.attr_no_ns("properties")
-                .is_some_and(|p| p.split_whitespace().any(|t| t == "nav"))
+                .is_some_and(|p| p.split(is_xml_space).any(|t| t == "nav"))
         })
         .filter_map(|n| n.attr_no_ns("id").map(String::from))
         .collect()
@@ -6146,9 +6151,10 @@ fn plan_extra_identifier_drops(opf: &str) -> Option<(usize, Vec<MetaEdit>)> {
 }
 
 /// `range` extended back over the whitespace that preceded it, so dropping an
-/// element on its own line doesn't leave the blank line behind.
+/// element on its own line doesn't leave the blank line behind. XML whitespace
+/// only: a no-break space before the element is text, and is kept.
 fn with_leading_whitespace(text: &str, range: Range<usize>) -> Range<usize> {
-    let start = text[..range.start].trim_end().len();
+    let start = text[..range.start].trim_end_matches(is_xml_space).len();
     start..range.end
 }
 
@@ -6631,7 +6637,8 @@ fn compute_properties_edit(
     let mut tokens: Vec<String> = existing
         .as_deref()
         .unwrap_or("")
-        .split_whitespace()
+        .split(is_xml_space)
+        .filter(|t| !t.is_empty())
         .map(str::to_string)
         .collect();
     let mut added = false;
@@ -6914,15 +6921,19 @@ fn resolve_href(base: &str, href: &str) -> String {
 /// Invalid escapes are left as written — we decode what we understand and never
 /// mangle the rest.
 fn percent_decode(s: &str) -> String {
+    fn hex(c: u8) -> Option<u8> {
+        (c as char).to_digit(16).map(|d| d as u8)
+    }
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
     while i < b.len() {
+        // Byte by byte: a str slice here could end inside a UTF-8 char.
         if b[i] == b'%'
             && i + 2 < b.len()
-            && let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16)
+            && let (Some(hi), Some(lo)) = (hex(b[i + 1]), hex(b[i + 2]))
         {
-            out.push(v);
+            out.push(hi << 4 | lo);
             i += 3;
             continue;
         }
@@ -7156,6 +7167,20 @@ mod tests {
             ("OEBPS/c.xhtml", &nested(100_000)),
         ]);
         let labels = toc_labels(&ws);
+        assert_eq!(
+            labels.get("OEBPS/d.xhtml").map(String::as_str),
+            Some("Chapter D")
+        );
+    }
+
+    /// The route `percent_decode`'s panic was reachable by: every nav href is
+    /// resolved, so one `%` before a non-ASCII char crashed the whole run.
+    #[test]
+    fn toc_labels_reads_an_href_with_a_percent_before_a_multibyte_char() {
+        let nav = "<html xmlns=\"http://www.w3.org/1999/xhtml\"><body><nav><ol>\
+                   <li><a href=\"%Bölüm.xhtml\">Bölüm</a></li>\
+                   <li><a href=\"d.xhtml\">Chapter D</a></li></ol></nav></body></html>";
+        let labels = toc_labels(&container(&[("OEBPS/nav.xhtml", nav)]));
         assert_eq!(
             labels.get("OEBPS/d.xhtml").map(String::as_str),
             Some("Chapter D")
@@ -9865,6 +9890,24 @@ mod tests {
         assert_eq!(fixes.len(), 1, "EPUB 3 is where the attribute belongs");
     }
 
+    /// The existing list is split as epubcheck splits it, on XML whitespace
+    /// only, so a token holding a no-break space is carried over as written
+    /// rather than broken in two.
+    #[test]
+    fn an_existing_token_with_a_no_break_space_is_kept_whole() {
+        let mut ws = properties_ws("3.0");
+        let opf = ws
+            .get_text("content.opf")
+            .unwrap()
+            .replace("id=\"css\"", "id=\"css\" properties=\"a\u{a0}b\"");
+        ws.set_text("content.opf", opf);
+        let props = BTreeSet::from(["remote-resources".to_string()]);
+        let (_, before, after) =
+            compute_properties_edit(&ws, "content.opf", "s.css", &props).unwrap();
+        assert_eq!(before.as_deref(), Some("a\u{a0}b"));
+        assert_eq!(after, "a\u{a0}b remote-resources");
+    }
+
     /// The shelf's only regression on 2026-08-20: adding an EPUB 3 attribute to
     /// an EPUB 2 package cleared the OPF-014 and produced an RSC-005 in its
     /// place. `properties` does not exist in OPS 2.0.1, so there is no edit that
@@ -10210,7 +10253,15 @@ mod tests {
     /// merely contains the letters makes an item the navigation document.
     #[test]
     fn nav_is_matched_as_a_token_not_a_substring() {
-        for props in ["mathml", "navigation", "scripted mathml"] {
+        // A no-break space does not split the list (epubveri 0.23, as in
+        // epubcheck): `nav\u{a0}` is one unknown token, not `nav`.
+        for props in [
+            "mathml",
+            "navigation",
+            "scripted mathml",
+            "nav\u{a0}",
+            "mathml\u{a0}nav",
+        ] {
             let opf = OPF.replace(
                 "<item id=\"gone\" href=\"gone.xhtml\"",
                 &format!("<item id=\"gone\" properties=\"{props}\" href=\"gone.xhtml\""),
@@ -10401,6 +10452,23 @@ mod tests {
     fn percent_decode_leaves_an_invalid_escape_alone() {
         assert_eq!(percent_decode("a%20b"), "a b");
         assert_eq!(percent_decode("100%zz"), "100%zz");
+    }
+
+    #[test]
+    fn percent_decode_survives_a_multibyte_char_after_the_percent() {
+        // The two bytes after `%` can end inside a UTF-8 char; slicing the
+        // str there panicked.
+        assert_eq!(percent_decode("x%aéy.xhtml"), "x%aéy.xhtml");
+        assert_eq!(percent_decode("%Bölüm.xhtml"), "%Bölüm.xhtml");
+        assert_eq!(percent_decode("%é"), "%é");
+    }
+
+    #[test]
+    fn percent_decode_takes_only_two_hex_digits() {
+        // `from_str_radix` accepts a sign, so `%+1` decoded to U+0001.
+        assert_eq!(percent_decode("a%+1b"), "a%+1b");
+        assert_eq!(percent_decode("a%-1b"), "a%-1b");
+        assert_eq!(percent_decode("a%c3%a7b"), "açb");
     }
 
     #[test]
@@ -10780,6 +10848,20 @@ mod tests {
         );
     }
 
+    /// A no-break space is text to the grammar (epubveri 0.22, epubcheck). A
+    /// commercial book ends every line `Stefan\u{a0}Zweig\u{a0}<p…>`; trimming
+    /// it with Rust's `trim` left the trailing one outside the `<div>` as a new
+    /// stray-text finding, ~2,100 of them in that book. A run of them alone is
+    /// stray text too, and is wrapped like any other.
+    #[test]
+    fn a_no_break_space_is_text_and_stays_inside_the_wrapper() {
+        let doc = "<html><body>\nStefan\u{a0}Zweig\u{a0}<p>x</p>\n\u{a0}\n<p>y</p></body></html>";
+        assert_eq!(
+            wrap_body_text(doc).unwrap(),
+            "<html><body>\n<div>Stefan\u{a0}Zweig\u{a0}</div><p>x</p>\n<div>\u{a0}</div>\n<p>y</p></body></html>"
+        );
+    }
+
     /// The one that matters: `<body>` holds 7594 whitespace-only text nodes to
     /// 54 real ones on the corpus. Wrapping them would add thousands of empty
     /// `<div>`s per book.
@@ -11024,9 +11106,21 @@ mod tests {
         assert!(!is_empty_lang(&empty("id", "06")));
     }
 
+    /// Dropping an element takes the line break and indentation before it,
+    /// but a no-break space there is text, and stays.
+    #[test]
+    fn a_dropped_element_takes_its_indent_but_not_a_no_break_space() {
+        let text = "<a/>\n  <b/>";
+        assert_eq!(with_leading_whitespace(text, 7..11), 4..11);
+        let text = "<a/>\u{a0}\n <b/>";
+        assert_eq!(with_leading_whitespace(text, 8..12), 6..12);
+    }
+
     #[test]
     fn whitespace_only_span_is_none_but_real_text_is_trimmed() {
         assert_eq!(trimmed_span(0..3, "   "), None);
         assert_eq!(trimmed_span(10..17, "\n abc \n"), Some(12..15));
+        assert_eq!(trimmed_span(0..2, "\u{a0}"), Some(0..2));
+        assert_eq!(trimmed_span(0..5, " a\u{a0} "), Some(1..4));
     }
 }

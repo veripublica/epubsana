@@ -8,6 +8,33 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [0.24.0] - 2026-10-08
+
+### Fixed
+
+- **A link whose `%` was followed by a non-ASCII letter crashed the run.**
+  Decoding `%Bölüm.xhtml` or `x%aé.xhtml` in a table of contents or manifest
+  sliced the text inside a multi-byte character and panicked, so the whole book
+  failed to repair. Such an escape is now left as written, like any other
+  invalid one, and `%+1` is no longer decoded as a character. Reported by
+  epubveri, which found it by reading the code; no book on the test shelf has
+  the shape.
+- **Wrapping stray text in `<div>` no longer leaves a no-break space outside
+  the wrapper.** `fix.bare_text_in_body` treated a no-break space as
+  whitespace, so a line ending in one was wrapped without it. epubcheck, and
+  now epubveri, read a no-break space as text, so each one left behind was a
+  new error. In one test-shelf book that was about 2,100 errors after repair.
+  The same correction applies when a fix removes an element (a no-break space
+  before it is kept) and when it reads or extends a `properties` list.
+
+### Changed
+
+- **Requires epubveri 0.23.0**, which judges XML names and whitespace with
+  epubcheck's own tables. An EPUB 2 id spelled with a combining mark, as macOS
+  writes a Turkish `ş`, is valid and is no longer proposed for renaming. Across the 544-book
+  test shelf, every book ends up with the same findings after repair as under
+  0.21.0.
+
 ## [0.23.0] - 2026-10-02
 
 ### Changed
