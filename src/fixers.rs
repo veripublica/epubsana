@@ -847,10 +847,16 @@ fn plan_lang_agreement_edits(text: &str, pairs: &BTreeSet<(String, String)>) -> 
         else {
             continue;
         };
-        // epubveri trims both sides before comparing and before reporting, so
-        // match on the trimmed values or a padded attribute never lines up.
-        let (lang, xml_lang) = (lang.trim(), xml_lang.trim());
+        // Matched as written: epubveri compares and reports both values
+        // untrimmed, as epubcheck does, since attribute-value normalization
+        // strips nothing.
         if !pairs.contains(&(lang.to_string(), xml_lang.to_string())) {
+            continue;
+        }
+        // A padded value has no clean copy: written as is it puts the padding
+        // in a second attribute, and trimmed it leaves the two still unequal.
+        // A whitespace-only side is padding too, not an empty attribute.
+        if [lang, xml_lang].iter().any(|v| trim_xml(v) != *v) {
             continue;
         }
         // Which attribute to write, and what to write into it. Both populated is
@@ -1615,7 +1621,7 @@ fn compute_dtb_uid_edit(ws: &Workspace, file: &str) -> Option<(MetaEdit, String,
     let uid = package_unique_id(ws)?;
     let text = ws.get_text(file)?;
     let (range, old) = find_dtb_uid_meta(&text)?;
-    if old.trim() == uid {
+    if trim_xml(&old) == uid {
         return None; // already correct
     }
     let new_element = set_content_attr(&text[range.clone()], &uid)?;
@@ -1650,23 +1656,33 @@ fn opf_path_from_container(container: &str) -> Option<String> {
 /// The value of the `dc:identifier` referenced by `package/@unique-identifier`.
 fn unique_id_from_opf(opf: &str) -> Option<String> {
     let doc = parse_xml(opf)?;
-    // Mirror epubveri's resolution exactly (opf.rs): trim both sides of the
-    // id match, and concatenate ALL descendant text, so our value is byte-for-
-    // byte what epubveri compares dtb:uid against.
-    let uid_id = doc.root_element().attr_no_ns("unique-identifier")?.trim();
+    // Mirror epubveri's resolution exactly (`check_unique_identifier`, which is
+    // epubcheck's `idAttr.trim().equals(uniqueIdent)`): the `id` is trimmed,
+    // `unique-identifier` is compared as written, and ALL descendant text is
+    // concatenated, so our value is byte-for-byte what epubveri compares
+    // dtb:uid against. Trimmed of XML whitespace only, as Java's `trim` is: a
+    // no-break space is part of the value.
+    let uid_id = doc.root_element().attr_no_ns("unique-identifier")?;
     let value: String = doc
         .descendants()
         .find(|n| {
             n.is_element()
                 && n.tag_name().name() == "identifier"
-                && n.attr_no_ns("id").map(str::trim) == Some(uid_id)
+                && n.attr_no_ns("id").map(trim_xml) == Some(uid_id)
         })?
         .descendants()
         .filter(|t| t.is_text())
         .filter_map(|t| t.text())
         .collect();
-    let value = value.trim().to_string();
+    let value = trim_xml(&value).to_string();
     (!value.is_empty()).then_some(value)
+}
+
+/// `s` without leading or trailing XML whitespace — what Java's `trim` and the
+/// XSD whitespace facet remove. `str::trim` also strips a no-break space, which
+/// the validator reads as part of the value.
+fn trim_xml(s: &str) -> &str {
+    s.trim_matches(is_xml_space)
 }
 
 /// The `<meta name="dtb:uid">` element's byte range and current `content`.
@@ -2892,6 +2908,7 @@ fn any_entry_references(ws: &Workspace, target: &str, except: &str) -> bool {
     let Some(base) = target.rsplit('/').next() else {
         return false;
     };
+    let spellings = escaped_spellings(base);
     for name in ws.names() {
         if name == except || !can_reference_a_fragment(name) {
             continue;
@@ -2899,20 +2916,44 @@ fn any_entry_references(ws: &Workspace, target: &str, except: &str) -> bool {
         let Some(text) = ws.get_text(name) else {
             continue;
         };
-        for (at, _) in text.match_indices(base) {
-            let Some(value) = enclosing_attr_value(&text, at, base.len()) else {
-                continue;
-            };
-            let path = value.split(['#', '?']).next().unwrap_or_default();
-            if path.is_empty() || path.contains(':') {
-                continue; // a remote or data URL names no container entry
-            }
-            if resolve_against(name, path).as_deref() == Some(target) {
-                return true;
+        for needle in &spellings {
+            for (at, _) in text.match_indices(needle.as_str()) {
+                let Some(value) = enclosing_attr_value(&text, at, needle.len()) else {
+                    continue;
+                };
+                let path = value.split(['#', '?']).next().unwrap_or_default();
+                if path.is_empty() || path.contains(':') {
+                    continue; // a remote or data URL names no container entry
+                }
+                if resolve_against(name, path).as_deref() == Some(target) {
+                    return true;
+                }
             }
         }
     }
     false
+}
+
+/// The ways a link can spell the entry name `base`: as is, and with its space
+/// and non-ASCII bytes percent-escaped (either hex case). Only the search uses
+/// these — every hit is still resolved and compared with the target — so a
+/// spelling missing here can only make the guard see less, never invent a
+/// reference.
+fn escaped_spellings(base: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::from([base.to_string()]);
+    for upper in [true, false] {
+        let escaped: String = base
+            .bytes()
+            .map(|b| match b {
+                b' ' | 0x80.. if upper => format!("%{b:02X}"),
+                b' ' | 0x80.. => format!("%{b:02x}"),
+                _ => (b as char).to_string(),
+            })
+            .collect();
+        out.insert(escaped);
+    }
+    out.insert(base.replace(' ', "%20"));
+    out
 }
 
 /// The whole quoted attribute value containing `text[at..at + len]`, or `None`
@@ -3861,26 +3902,26 @@ fn can_reference_a_fragment(name: &str) -> bool {
 }
 
 /// `path` resolved against the directory of `from`, as a container-absolute
-/// name. `None` if it escapes the container or is percent-encoded (we do not
-/// guess at an encoding we would then have to re-emit).
+/// name, the way the validator resolves it (`opf::resolve`: split on `/`, then
+/// each segment percent-decoded). `None` if it climbs above the container root,
+/// which `resolve` would silently clamp. Callers only compare the result; none
+/// writes it back, so decoding an escape is never a guess at how to re-emit it.
 fn resolve_against(from: &str, path: &str) -> Option<String> {
-    if path.contains('%') {
-        return None;
-    }
-    let mut parts: Vec<&str> = match from.rfind('/') {
-        Some(i) => from[..i].split('/').collect(),
-        None => Vec::new(),
+    let base = dir_of(from);
+    let mut depth = if path.starts_with('/') {
+        0
+    } else {
+        base.split('/').filter(|s| !s.is_empty()).count()
     };
-    for seg in path.split('/') {
+    let path_part = path.split(['#', '?']).next().unwrap_or_default();
+    for seg in path_part.split('/') {
         match seg {
             "" | "." => {}
-            ".." => {
-                parts.pop()?;
-            }
-            s => parts.push(s),
+            ".." => depth = depth.checked_sub(1)?,
+            _ => depth += 1,
         }
     }
-    Some(parts.join("/"))
+    Some(resolve(&base, path))
 }
 
 /// `RSC-005` / `opf.content_document.schema_violation`, *value of attribute
@@ -5245,7 +5286,7 @@ fn ncx_uid_syncs(ws: &Workspace, value: &str) -> Vec<(String, MetaEdit)> {
         let Some((range, old)) = find_dtb_uid_meta(&text) else {
             continue;
         };
-        if old.trim() == value {
+        if trim_xml(&old) == value {
             continue;
         }
         let Some(new_element) = set_content_attr(&text[range.clone()], value) else {
@@ -5270,8 +5311,13 @@ fn plan_package_identifier(opf: &str, ws: &Workspace) -> Option<IdentifierPlan> 
     let package = doc
         .descendants()
         .find(|n| n.is_element() && n.tag_name().name() == "package")?;
-    let uid = package.attr_no_ns("unique-identifier")?.trim().to_string();
-    if uid.is_empty() {
+    // The repair writes this value as an `id`, so it must be one: an NCName,
+    // exactly as written. epubveri compares `unique-identifier` untrimmed
+    // against a trimmed `id`, so a padded value names nothing whatever we
+    // write, and one carrying a no-break space would resolve only through an
+    // `id` that is itself RSC-005. Either way the trade is not a repair.
+    let uid = package.attr_no_ns("unique-identifier")?.to_string();
+    if !is_ncname(&uid) {
         return None;
     }
     let metadata = doc
@@ -5287,14 +5333,14 @@ fn plan_package_identifier(opf: &str, ws: &Workspace) -> Option<IdentifierPlan> 
             .filter(|t| t.is_text())
             .filter_map(|t| t.text())
             .collect::<String>()
-            .trim()
+            .trim_matches(is_xml_space)
             .to_string()
     };
 
     // The element the declaration currently lands on, if any.
     let declared = identifiers
         .iter()
-        .find(|n| n.attr_no_ns("id").map(str::trim) == Some(uid.as_str()));
+        .find(|n| n.attr_no_ns("id").map(trim_xml) == Some(uid.as_str()));
     let drop_empty = match declared {
         // Already resolved and non-empty: nothing to do (or a stale finding).
         Some(n) if !text_of(n).is_empty() => return None,
@@ -7480,6 +7526,38 @@ mod tests {
         assert!(ident_plan(&opf, &[]).is_none());
     }
 
+    /// A padded `unique-identifier` is compared as written against a trimmed
+    /// `id`, so no `id` we could write would resolve it; one with a no-break
+    /// space resolves only through an `id` that is itself invalid.
+    #[test]
+    fn a_padded_unique_identifier_is_declined() {
+        let opf = ident_package("uuid ", &[("", "urn:uuid:abc")]);
+        assert!(ident_plan(&opf, &[]).is_none());
+        let opf = ident_package("uuid\u{a0}", &[("", "urn:uuid:abc")]);
+        assert!(ident_plan(&opf, &[]).is_none());
+    }
+
+    /// An `id` ending in a no-break space does not resolve `uuid`, so the
+    /// identifier without an `id` is still the one candidate.
+    #[test]
+    fn an_id_padded_with_a_no_break_space_does_not_resolve() {
+        let opf = ident_package("uuid", &[("uuid\u{a0}", "old"), ("", "urn:uuid:abc")]);
+        let out = ident_plan(&opf, &[]).expect("OPF-030 is real here");
+        assert!(
+            out.contains("<dc:identifier id=\"uuid\">urn:uuid:abc"),
+            "{out}"
+        );
+    }
+
+    /// The identifier's text is trimmed as epubveri trims it, so a value that
+    /// is only a no-break space is a value, not an empty element.
+    #[test]
+    fn an_identifier_of_one_no_break_space_is_not_empty() {
+        // With an empty reading, the id-less identifier would be moved onto.
+        let opf = ident_package("uuid", &[("uuid", "\u{a0}"), ("", "urn:uuid:abc")]);
+        assert!(ident_plan(&opf, &[]).is_none(), "already resolved");
+    }
+
     #[test]
     fn an_identifier_that_already_resolves_is_left_alone() {
         let opf = ident_package("uuid", &[("uuid", "urn:uuid:abc"), ("", "isbn")]);
@@ -8604,7 +8682,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_against_handles_dot_dot_and_refuses_percent_encoding() {
+    fn resolve_against_handles_dot_dot_and_decodes_like_the_validator() {
         assert_eq!(
             resolve_against("OEBPS/toc.ncx", "text/ch1.xhtml").as_deref(),
             Some("OEBPS/text/ch1.xhtml")
@@ -8613,7 +8691,27 @@ mod tests {
             resolve_against("OEBPS/text/ch2.xhtml", "../images/x.svg").as_deref(),
             Some("OEBPS/images/x.svg")
         );
-        assert_eq!(resolve_against("a/b.xhtml", "c%20d.xhtml"), None);
+        assert_eq!(
+            resolve_against("a/b.xhtml", "c%20d.xhtml").as_deref(),
+            Some("a/c d.xhtml")
+        );
+        // Split before decoding: an escaped `..` is a name, not a step up.
+        assert_eq!(
+            resolve_against("a/b.xhtml", "%2E%2E/x.xhtml").as_deref(),
+            Some("a/../x.xhtml")
+        );
+        // Climbing out of the container is declined, not clamped.
+        assert_eq!(resolve_against("a/b.xhtml", "../../x.xhtml"), None);
+        // A leading `/` starts at the root, so one `..` from there escapes.
+        assert_eq!(resolve_against("a/b/c.xhtml", "/../x.xhtml"), None);
+        assert_eq!(
+            resolve_against("a/b/c.xhtml", "/x.xhtml").as_deref(),
+            Some("x.xhtml")
+        );
+        assert_eq!(
+            resolve_against("a/b.xhtml", "../x.xhtml").as_deref(),
+            Some("x.xhtml")
+        );
     }
 
     /// One empty date, one malformed-but-real date, one valid one. The middle
@@ -9481,6 +9579,16 @@ mod tests {
         );
     }
 
+    /// epubveri reports the pair untrimmed, so a padded value is matched and
+    /// then declined: neither copying nor trimming makes the two agree cleanly.
+    #[test]
+    fn a_padded_value_is_matched_as_written_and_declined() {
+        let doc = r#"<html lang="" xml:lang=" de"><body/></html>"#;
+        assert!(plan_lang_agreement_edits(doc, &lang_pairs(&[("", " de")])).is_empty());
+        let doc = r#"<html lang=" " xml:lang="de"><body/></html>"#;
+        assert!(plan_lang_agreement_edits(doc, &lang_pairs(&[(" ", "de")])).is_empty());
+    }
+
     #[test]
     fn a_pair_no_finding_named_is_left_alone() {
         // Only what epubveri reported is repaired — the fixer never sweeps the
@@ -10069,6 +10177,32 @@ mod tests {
         assert!(!any_entry_references(&ws, "OEBPS/Text/x.png", "none"));
     }
 
+    /// A link that percent-escapes the name still points at the entry: the guard
+    /// must see it, or dropping the declaration trades RSC-001 for RSC-007.
+    #[test]
+    fn an_escaped_reference_is_still_a_reference() {
+        let ws = container(&[
+            ("OEBPS/a.xhtml", r#"<img src="images/my%20pic.jpg"/>"#),
+            (
+                "OEBPS/b.xhtml",
+                r#"<img src="images/B%c3%b6l%c3%bcm.png"/>"#,
+            ),
+            ("OEBPS/c.xhtml", r#"<img src="images/Şekil%201.png"/>"#),
+        ]);
+        assert!(any_entry_references(
+            &ws,
+            "OEBPS/images/Şekil 1.png",
+            "none"
+        ));
+        assert!(any_entry_references(&ws, "OEBPS/images/my pic.jpg", "none"));
+        assert!(any_entry_references(&ws, "OEBPS/images/Bölüm.png", "none"));
+        assert!(!any_entry_references(
+            &ws,
+            "OEBPS/images/my pic.png",
+            "none"
+        ));
+    }
+
     /// The package document is excluded: its own manifest entry is what is being
     /// dropped, so letting it answer would veto every deletion.
     #[test]
@@ -10549,6 +10683,45 @@ mod tests {
     fn unique_id_resolves_the_referenced_identifier() {
         let opf = r#"<package xmlns="http://www.idpf.org/2007/opf" unique-identifier="pub-id"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="other">wrong</dc:identifier><dc:identifier id="pub-id">urn:uuid:ABC</dc:identifier></metadata></package>"#;
         assert_eq!(unique_id_from_opf(opf).as_deref(), Some("urn:uuid:ABC"));
+    }
+
+    /// epubcheck trims as Java does — XML whitespace only — so a no-break space
+    /// is part of the identifier, and the `id` side is trimmed while
+    /// `unique-identifier` is read as written.
+    #[test]
+    fn unique_id_trims_xml_whitespace_only() {
+        let opf = "<package xmlns=\"http://www.idpf.org/2007/opf\" unique-identifier=\"pub-id\">\
+                   <metadata xmlns:dc=\"http://purl.org/dc/elements/1.1/\">\
+                   <dc:identifier id=\" pub-id \"> urn:x\u{a0}</dc:identifier></metadata></package>";
+        assert_eq!(unique_id_from_opf(opf).as_deref(), Some("urn:x\u{a0}"));
+        let padded = opf.replace(
+            "unique-identifier=\"pub-id\"",
+            "unique-identifier=\"pub-id \"",
+        );
+        assert_eq!(unique_id_from_opf(&padded), None, "names no identifier");
+        let nbsp_id = opf.replace("id=\" pub-id \"", "id=\"pub-id\u{a0}\"");
+        assert_eq!(
+            unique_id_from_opf(&nbsp_id),
+            None,
+            "a no-break space is kept"
+        );
+    }
+
+    #[test]
+    fn a_dtb_uid_differing_only_by_a_no_break_space_is_rewritten() {
+        let container_xml = "<container><rootfiles><rootfile full-path=\"OEBPS/package.opf\"/></rootfiles></container>";
+        let opf = "<package unique-identifier=\"pub-id\"><metadata xmlns:dc=\"http://purl.org/dc/elements/1.1/\">\
+                   <dc:identifier id=\"pub-id\">urn:x</dc:identifier></metadata></package>";
+        let ncx = "<ncx><head><meta name=\"dtb:uid\" content=\"urn:x\u{a0}\"/></head></ncx>";
+        let ws = container(&[
+            ("META-INF/container.xml", container_xml),
+            ("OEBPS/package.opf", opf),
+            ("OEBPS/toc.ncx", ncx),
+        ]);
+        let (_, old, new) = compute_dtb_uid_edit(&ws, "OEBPS/toc.ncx").expect("NCX-001 is real");
+        assert_eq!((old.as_str(), new.as_str()), ("urn:x\u{a0}", "urn:x"));
+        // And the package_identifier sync reads the same way.
+        assert_eq!(ncx_uid_syncs(&ws, "urn:x").len(), 1);
     }
 
     #[test]

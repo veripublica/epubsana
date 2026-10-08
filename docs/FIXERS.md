@@ -240,6 +240,17 @@ nothing else is affected.
 missing OPF `unique-identifier` / `dc:identifier`), or the NCX won't parse, the
 fixer leaves it untouched rather than invent a value.
 
+**Trimming, as epubcheck trims (2026-10-08).** Both sides are trimmed of XML
+whitespace only — Java's `trim`, which keeps a NO-BREAK SPACE — and
+`unique-identifier` is read as written against a trimmed `id`
+(`idAttr.trim().equals(uniqueIdent)`). With Rust's `str::trim` a `dtb:uid` that
+differs from the identifier only by a trailing no-break space looked already
+correct and the real NCX-001 was declined, and an identifier ending in one was
+written into the NCX without it, which epubveri still reports as a mismatch:
+a repair that changes the file and clears nothing, and which rollback cannot
+see. No book on the 544-book shelf has a padded identifier (probe verified on a
+fixture that has one); the fix is argued and unit-tested.
+
 ---
 
 ## RSC-005 — empty `<title>`
@@ -343,8 +354,9 @@ manifest `<item>` does not declare. epubveri names the property in `params[0]`.
 **Fix** (`fix.content_properties`, AutoSafe). Add the token to the `properties`
 attribute of the manifest item whose `href` resolves to that document (existing
 tokens are kept; the attribute is created if absent). The item's href is resolved
-the way a reading system resolves it — relative to the OPF's directory,
-percent-decoded, with `.`/`..` normalized.
+the way the validator resolves it (`epubveri::opf::resolve`) — relative to the
+OPF's directory, split on `/` and then percent-decoded per segment, with
+`.`/`..` normalized.
 
 **Why it's safe.** epubveri has already *proven* the usage by finding it in the
 document, so the declaration is not a guess — it is the manifest being made to
@@ -711,6 +723,16 @@ check — if it ever regressed, a guard here would hide the bug rather than fix 
   the referring document's own directory, to the missing entry: the filename in
   prose, in a comment, inside a longer string, or in a remote URL is not a
   reference.
+
+  **An escaped link is a link (2026-10-08).** The scan searches for the
+  filename as is and with its space and non-ASCII bytes percent-escaped, and
+  resolves every hit with epubveri's `opf::resolve`, which decodes. Before
+  this, a manifest `href` containing `%` skipped the guard altogether, and a
+  link spelling `my%20pic.jpg` was never found — the guard failed open, leaving
+  only rollback to catch the trade. A spelling the search does not try (mixed
+  hex case in one name) can only make the guard see less, never invent a
+  reference. The shelf has 17 escaped manifest hrefs in 9 books, none of them
+  dangling.
 
 **Measured.** 2 books in the 171-book corpus, both the same shape: a conversion
 left `cover-1.jpg`/`cover-2.jpg` declared beside the real, present cover
@@ -1656,8 +1678,12 @@ belongs to the file it appears in.
   in prose — cannot be rewritten with confidence, so the whole rename for that id
   is abandoned. This is the safety net, and it is why the fixer can promise that
   a rename never leaves a reference behind.
-- **A percent-encoded path** in a reference: we do not guess at an encoding we
-  would then have to re-emit.
+- **A reference that climbs out of the container** (`../` past the root).
+  A percent-encoded path is **not** a decline since 2026-10-08: it is decoded
+  with epubveri's `opf::resolve` only to decide which document it names, and
+  the rename rewrites the fragment alone, so no encoding is ever re-emitted.
+  (The 544-book shelf has 1,040 such links in 10 books, none of them pointing at
+  an invalid id, so no proposal moved.)
 - **Two elements sharing the invalid id.** That is a duplicate-id defect, and
   which of them a reference meant is not ours to guess.
 - **A value nothing usable survives sanitizing.** Never invent an id.
@@ -1954,7 +1980,12 @@ approving half of this would leave a finding epubsana created itself.
   therefore still unanswered and still not needed.
 - **The single candidate is itself empty.** Attaching the id would clear
   `OPF-030` and raise the empty-identifier finding in its place, which is not a
-  repair.
+  repair. Empty means XML whitespace only; a no-break space is a value.
+- **The `unique-identifier` value is not an NCName as written**
+  (`epubveri::xmlname::is_ncname`). The repair writes it as an `id`, so it must
+  be one. A padded value names nothing whatever we write, because epubveri
+  trims the `id` side only; one carrying a no-break space, or starting with a
+  digit, resolves only through an `id` that is itself RSC-005.
 - A package document that doesn't parse.
 
 **Measured.** 10 findings across 10 books; **3 repaired, 7 declined**. That ratio
@@ -2140,7 +2171,9 @@ shelf turns into a mistake. It came back at 24 books / 201 findings.
 
 **Finding.** `opf.content_document.lang_xmllang_mismatch`, message *lang and
 xml:lang attributes must have the same value*. `params[0]` is the `lang` value and
-`params[1]` the `xml:lang` value, both already trimmed by epubveri. **EPUB 3
+`params[1]` the `xml:lang` value, both **as written**: epubveri compares them
+untrimmed, as epubcheck does, so `lang=" en"` beside `xml:lang="en"` is a real
+mismatch (it once trimmed both, and our match followed it). **EPUB 3
 only** — epubcheck asserts it in `epub-xhtml-30.sch` and XHTML 1.1 declares the
 two attributes independently, so a disagreeing EPUB 2 book is valid and is never
 reported.
@@ -2165,7 +2198,10 @@ which we cannot know and must not guess. Such a book is left alone.
 value in play, so the repair has no degrees of freedom — the same reasoning that
 made `fix.empty_lang` fill an empty root language rather than delete it.
 
-**When it declines.** Both values non-empty (above); the document won't parse; or
+**When it declines.** Both values non-empty (above); either value padded with
+XML whitespace, a whitespace-only one included — copied as is the padding lands
+in a second attribute, trimmed the two still differ, so there is no single clean
+repair; the document won't parse; or
 no element carries both attributes with the reported pair, in which case nothing
 is edited rather than guessed at.
 

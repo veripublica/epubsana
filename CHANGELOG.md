@@ -23,6 +23,23 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
   one of these shapes.
 - `LICENSING-FAQ.md` now also covers kepubverto.
 
+### Fixed
+
+- **The package identifier is read the way epubcheck reads it.** The `dtb:uid`
+  and package-identifier repairs trimmed values with Rust's `trim`, which also
+  removes a no-break space; epubcheck keeps it. A `dtb:uid` differing only by
+  one was left unrepaired, and an identifier ending in one was copied into the
+  NCX without it, which changed the file and fixed nothing.
+  `fix.package_identifier` now also declines when the `unique-identifier`
+  value could not itself be a valid `id`. No book on the test shelf has either
+  shape.
+- **A dangling manifest entry is no longer dropped while a percent-escaped link
+  still points at it.** The check that looks for links to the missing file
+  skipped a `%` in the manifest `href` and did not find `my%20pic.jpg`.
+- **An invalid id is no longer left alone just because a link to it is
+  percent-escaped.** The link's path is decoded only to find its target; the
+  rename still rewrites the fragment alone.
+
 ## [0.24.0] - 2026-10-08
 
 ### Fixed
