@@ -105,9 +105,25 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # The release binary, pinned and checked, not `cargo install`: compiling
+      # it took 1 min 40 s of this job's 3 min 49 s on v0.24.0, on the path
+      # every release waits on. Same version that build compiled (0.15.0),
+      # digest from the GitHub release API (2026-10-08). Bump both together.
       - name: Install wasm-pack
         if: steps.check.outputs.skip == 'false'
-        run: cargo install wasm-pack --locked
+        env:
+          WASM_PACK: v0.15.0
+          WASM_PACK_SHA256: c09f971ecaed9a2efc80fdcea7a00ef6b53c7fadc8c57d1f61b53a6aa66b668a
+        run: |
+          set -euo pipefail
+          name="wasm-pack-$WASM_PACK-x86_64-unknown-linux-musl"
+          curl -sSfL -o wasm-pack.tar.gz \
+            "https://github.com/wasm-bindgen/wasm-pack/releases/download/$WASM_PACK/$name.tar.gz"
+          echo "$WASM_PACK_SHA256  wasm-pack.tar.gz" | sha256sum -c -
+          tar xzf wasm-pack.tar.gz
+          install "$name/wasm-pack" "$HOME/.cargo/bin/wasm-pack"
+          rm -rf wasm-pack.tar.gz "$name"
+          wasm-pack --version
 
       # No --out-name: the artefacts are `epubsana_wasm*`, derived from the
       # crate name, which is what every published version so far contains. The
