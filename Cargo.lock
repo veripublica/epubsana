@@ -37,6 +37,7 @@ dependencies = [
  "roxmltree",
  "serde",
  "serde_json",
+ "unicode-normalization",
  "zip",
 ]
 

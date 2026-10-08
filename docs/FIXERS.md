@@ -356,7 +356,9 @@ attribute of the manifest item whose `href` resolves to that document (existing
 tokens are kept; the attribute is created if absent). The item's href is resolved
 the way the validator resolves it (`epubveri::opf::resolve`) — relative to the
 OPF's directory, split on `/` and then percent-decoded per segment, with
-`.`/`..` normalized.
+`.`/`..` normalized — and compared with the document's entry name under NFC,
+as the validator compares them (2026-10-08; the same holds wherever a fixer
+asks which entry a reference names).
 
 **Why it's safe.** epubveri has already *proven* the usage by finding it in the
 document, so the declaration is not a guess — it is the manifest being made to

@@ -14,6 +14,7 @@ use epubveri::opf::resolve;
 use epubveri::report::{Report, Severity, ViolationKind};
 use epubveri::xmlext::is_xml_space;
 use epubveri::xmlname::is_ncname;
+use unicode_normalization::UnicodeNormalization;
 
 use crate::{Change, Goal, ProposedFix, Tier, Workspace, entities};
 
@@ -2908,7 +2909,11 @@ fn any_entry_references(ws: &Workspace, target: &str, except: &str) -> bool {
     let Some(base) = target.rsplit('/').next() else {
         return false;
     };
-    let spellings = escaped_spellings(base);
+    let spellings: BTreeSet<String> = [base.to_string(), nfc(base), base.nfd().collect()]
+        .iter()
+        .flat_map(|b| escaped_spellings(b))
+        .collect();
+    let target = nfc(target);
     for name in ws.names() {
         if name == except || !can_reference_a_fragment(name) {
             continue;
@@ -2925,7 +2930,7 @@ fn any_entry_references(ws: &Workspace, target: &str, except: &str) -> bool {
                 if path.is_empty() || path.contains(':') {
                     continue; // a remote or data URL names no container entry
                 }
-                if resolve_against(name, path).as_deref() == Some(target) {
+                if resolve_against(name, path).is_some_and(|p| nfc(&p) == target) {
                     return true;
                 }
             }
@@ -4104,7 +4109,7 @@ fn plan_id_renames(ws: &Workspace, doc: &str, values: &BTreeSet<String>) -> Opti
                     file.clone()
                 } else {
                     match resolve_against(file, &path) {
-                        Some(t) => t,
+                        Some(t) => to_entry(ws, t),
                         None => {
                             resolvable = false;
                             break;
@@ -4733,7 +4738,7 @@ fn fragment_wrong_path(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
             let Some(home) = sole_id_home(ws, frag) else {
                 continue;
             };
-            if !in_spine.contains(&home) {
+            if !in_spine.contains(&nfc(&home)) {
                 continue;
             }
             let replacement = if home == doc {
@@ -4829,7 +4834,7 @@ fn spine_paths(opf: &str, base: &str) -> BTreeSet<String> {
         .filter_map(|n| {
             Some((
                 n.attr_no_ns("id")?.to_string(),
-                resolve(base, n.attr_no_ns("href")?),
+                nfc(&resolve(base, n.attr_no_ns("href")?)),
             ))
         })
         .collect();
@@ -6680,7 +6685,10 @@ fn compute_properties_edit(
     let item = parsed
         .descendants()
         .filter(|n| n.is_element() && n.tag_name().name() == "item")
-        .find(|n| n.attr_no_ns("href").map(|h| resolve(&base, h)).as_deref() == Some(doc))?;
+        .find(|n| {
+            n.attr_no_ns("href")
+                .is_some_and(|h| to_entry(ws, resolve(&base, h)) == doc)
+        })?;
 
     let existing = item.attr_no_ns("properties").map(str::to_string);
     let mut tokens: Vec<String> = existing
@@ -6820,7 +6828,8 @@ fn plan_title_fill(text: &str, title: &str) -> Option<MetaEdit> {
 }
 
 /// The label the book's own table of contents gives each content document:
-/// container path → label. Read from the NCX (`navPoint` → `navLabel/text`) and
+/// container entry name → label (the entry itself, even when the TOC spells
+/// it in another Unicode form). Read from the NCX (`navPoint` → `navLabel/text`) and
 /// from an EPUB 3 nav document (`<a href>` text). A document listed twice keeps
 /// the **first** label, and only non-empty labels are kept.
 pub fn toc_labels(ws: &Workspace) -> BTreeMap<String, String> {
@@ -6856,7 +6865,7 @@ pub fn toc_labels(ws: &Workspace) -> BTreeMap<String, String> {
                 .find(|n| n.is_element() && n.tag_name().name() == "text")
                 .and_then(|n| n.text());
             if let (Some(src), Some(label)) = (src, label) {
-                insert_label(&mut labels, &base, src, label);
+                insert_label(ws, &mut labels, &base, src, label);
             }
         }
 
@@ -6873,21 +6882,27 @@ pub fn toc_labels(ws: &Workspace) -> BTreeMap<String, String> {
                 .filter(|n| n.is_text())
                 .filter_map(|n| n.text())
                 .collect();
-            insert_label(&mut labels, &base, href, &label);
+            insert_label(ws, &mut labels, &base, href, &label);
         }
     }
     labels
 }
 
-/// Record `label` for the container path `href` resolves to, keeping the first
+/// Record `label` for the container entry `href` resolves to, keeping the first
 /// label seen and ignoring empty ones. The fragment is dropped: a TOC entry that
 /// points *into* a document still names that document.
-fn insert_label(labels: &mut BTreeMap<String, String>, base: &str, href: &str, label: &str) {
+fn insert_label(
+    ws: &Workspace,
+    labels: &mut BTreeMap<String, String>,
+    base: &str,
+    href: &str,
+    label: &str,
+) {
     let label = collapse_ws(label);
     if label.is_empty() {
         return;
     }
-    let path = resolve(base, href);
+    let path = to_entry(ws, resolve(base, href));
     labels.entry(path).or_insert(label);
 }
 
@@ -6945,6 +6960,30 @@ fn dir_of(path: &str) -> String {
     match path.rfind('/') {
         Some(i) => path[..i].to_string(),
         None => String::new(),
+    }
+}
+
+/// `s` in Unicode NFC. `opf::resolve` does not normalize, and a reference may
+/// spell a name in another form than its ZIP entry (macOS writes NFD); the
+/// validator compares the two under NFC, so every comparison here does too.
+fn nfc(s: &str) -> String {
+    s.nfc().collect()
+}
+
+/// The container entry a resolved `path` names: `path` itself when an entry is
+/// spelled exactly so, else the one entry equal to it under NFC. Unchanged when
+/// none is, or when several are — a container holding two spellings of one
+/// name is defective, and which one a link meant is not ours to choose.
+fn to_entry(ws: &Workspace, path: String) -> String {
+    // A fast path only: the search below gives the same answer.
+    if ws.names().any(|n| *n == path) {
+        return path;
+    }
+    let key = nfc(&path);
+    let mut hits = ws.names().filter(|n| nfc(n) == key);
+    match (hits.next(), hits.next()) {
+        (Some(n), None) => n.clone(),
+        _ => path,
     }
 }
 
@@ -7176,6 +7215,18 @@ mod tests {
             labels.get("OEBPS/d.xhtml").map(String::as_str),
             Some("Chapter D")
         );
+    }
+
+    /// A label is keyed by the entry it names, not by the TOC's spelling.
+    #[test]
+    fn toc_labels_key_the_entry_even_when_the_toc_spells_it_in_nfc() {
+        let doc = format!("OEBPS/{BOLUM_NFD}.xhtml");
+        let nav = format!(
+            "<html xmlns=\"http://www.w3.org/1999/xhtml\"><body><nav><ol>\
+             <li><a href=\"{BOLUM_NFC}.xhtml\">B\u{f6}l\u{fc}m</a></li></ol></nav></body></html>"
+        );
+        let ws = container(&[("OEBPS/nav.xhtml", nav.as_str()), (doc.as_str(), "x")]);
+        assert!(toc_labels(&ws).contains_key(&doc));
     }
 
     /// The route the 0.23 `percent_decode` panic was reachable by: every nav
@@ -8376,6 +8427,27 @@ mod tests {
         assert!(fragment_wrong_path(&report, &ws).is_empty());
     }
 
+    /// The spine names `b` in NFC, the container holds it in NFD: it is still
+    /// a spine document, so the guard that keeps links inside the reading
+    /// order lets the repair through.
+    #[test]
+    fn a_spine_document_spelled_in_another_unicode_form_is_in_the_spine() {
+        let opf = MOVED_FRAG_OPF.replace("Text/b.xhtml", &format!("Text/{BOLUM_NFC}.xhtml"));
+        let html = |body: &str| {
+            format!(
+                r##"<?xml version="1.0" encoding="utf-8"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>t</title></head><body>{body}</body></html>"##
+            )
+        };
+        let b = format!("Text/{BOLUM_NFD}.xhtml");
+        let ws = container(&[
+            ("META-INF/container.xml", MOVED_FRAG_CONTAINER),
+            ("content.opf", opf.as_str()),
+            ("Text/a.xhtml", &html(r##"<a href="#moved">x</a>"##)),
+            (b.as_str(), &html(r##"<p id="moved">y</p>"##)),
+        ]);
+        assert!(!frag_declines(&ws, "moved"));
+    }
+
     fn frag_declines(ws: &Workspace, frag: &str) -> bool {
         fragment_wrong_path(&frag_report("Text/a.xhtml", &[frag]), ws).is_empty()
     }
@@ -8529,6 +8601,9 @@ mod tests {
         // in the container, never declared — so it cannot reach the spine
         assert!(!spine.contains("Text/nodecl.xhtml"));
         assert!(spine.contains("Text/a.xhtml") && spine.contains("Text/b.xhtml"));
+        // Held in NFC, so the caller can look up an entry spelled either way.
+        let nfd = MOVED_FRAG_OPF.replace("Text/a.xhtml", &format!("Text/{BOLUM_NFD}.xhtml"));
+        assert!(spine_paths(&nfd, "").contains(&format!("Text/{BOLUM_NFC}.xhtml")));
     }
 
     /// A container holding exactly the files given, so a cross-file rename can
@@ -8560,6 +8635,47 @@ mod tests {
         let text = ws.get_text(file).unwrap();
         let edits = plan.edits.get(file).cloned().unwrap_or_default();
         apply_edits(&text, edits)
+    }
+
+    /// `ö` precomposed (NFC) and decomposed (NFD, as macOS writes it).
+    const BOLUM_NFC: &str = "B\u{f6}l\u{fc}m";
+    const BOLUM_NFD: &str = "Bo\u{308}lu\u{308}m";
+
+    #[test]
+    fn to_entry_finds_the_entry_under_nfc() {
+        let nfd = format!("OEBPS/{BOLUM_NFD}.xhtml");
+        let ws = container(&[(nfd.as_str(), "x")]);
+        assert_eq!(to_entry(&ws, format!("OEBPS/{BOLUM_NFC}.xhtml")), nfd);
+        assert_eq!(to_entry(&ws, nfd.clone()), nfd);
+        assert_eq!(to_entry(&ws, "OEBPS/x.xhtml".into()), "OEBPS/x.xhtml");
+    }
+
+    /// Two entries equal under NFC: which one a link meant is not ours to say.
+    #[test]
+    fn to_entry_declines_two_spellings_of_one_name() {
+        let (a, b) = (format!("{BOLUM_NFC}.xhtml"), format!("{BOLUM_NFD}.xhtml"));
+        let ws = container(&[(a.as_str(), "x"), (b.as_str(), "y")]);
+        let other = format!("{}.xhtml", "Bo\u{308}l\u{fc}m");
+        assert_eq!(to_entry(&ws, other.clone()), other);
+        assert_eq!(to_entry(&ws, a.clone()), a);
+    }
+
+    /// The link spells the document NFC, the entry is NFD: still the same
+    /// document, so the reference moves with the anchor.
+    #[test]
+    fn a_reference_spelled_in_another_unicode_form_is_rewritten() {
+        let doc = format!("{BOLUM_NFD}.xhtml");
+        let link = format!(r##"<a href="{BOLUM_NFC}.xhtml#09">x</a>"##);
+        let ws = container(&[
+            (
+                doc.as_str(),
+                r#"<html><body><p id="09">x</p></body></html>"#,
+            ),
+            ("toc.xhtml", link.as_str()),
+        ]);
+        let plan = planned(&ws, &doc, &["09"]).expect("the link resolves to the doc");
+        let out = applied(&ws, &plan, "toc.xhtml");
+        assert!(out.contains("#id_09"), "{out}");
     }
 
     #[test]
@@ -9961,6 +10077,20 @@ mod tests {
     /// only, so a token holding a no-break space is carried over as written
     /// rather than broken in two.
     #[test]
+    fn a_manifest_href_in_another_unicode_form_finds_its_item() {
+        let mut ws = properties_ws("3.0");
+        let opf = ws
+            .get_text("content.opf")
+            .unwrap()
+            .replace("href=\"s.css\"", &format!("href=\"{BOLUM_NFC}.css\""));
+        ws.set_text("content.opf", opf);
+        let doc = format!("{BOLUM_NFD}.css");
+        ws.set_text(&doc, "x".into());
+        let props = BTreeSet::from(["remote-resources".to_string()]);
+        assert!(compute_properties_edit(&ws, "content.opf", &doc, &props).is_some());
+    }
+
+    #[test]
     fn an_existing_token_with_a_no_break_space_is_kept_whole() {
         let mut ws = properties_ws("3.0");
         let opf = ws
@@ -10175,6 +10305,19 @@ mod tests {
         ]);
         assert!(any_entry_references(&ws, "OEBPS/Images/x.png", "none"));
         assert!(!any_entry_references(&ws, "OEBPS/Text/x.png", "none"));
+    }
+
+    /// The manifest and the link spell the missing file in different Unicode
+    /// forms, raw or escaped: still the same file, so still a reference.
+    #[test]
+    fn a_reference_in_another_unicode_form_is_still_a_reference() {
+        let raw = format!(r#"<img src="images/{BOLUM_NFD}.png"/>"#);
+        let escaped = r#"<img src="images/Bo%CC%88lu%CC%88m.png"/>"#;
+        let target = format!("OEBPS/images/{BOLUM_NFC}.png");
+        let ws = container(&[("OEBPS/a.xhtml", raw.as_str())]);
+        assert!(any_entry_references(&ws, &target, "none"));
+        let ws = container(&[("OEBPS/a.xhtml", escaped)]);
+        assert!(any_entry_references(&ws, &target, "none"));
     }
 
     /// A link that percent-escapes the name still points at the entry: the guard

@@ -190,9 +190,10 @@ members = ["epubsana-wasm"]
 #   all three. Not a vacuous null — the digest carries 287 renamed ids and 226
 #   proposals from the fixers that resolve hrefs, so a changed answer would
 #   have shown; the shelf simply holds none of the shapes the change corrects.
-#   `resolve` does not NFC-normalize; our callers compare its output with
-#   container names unnormalized, as before. The shelf has one decomposed
-#   href, and its ZIP entry is decomposed the same way.
+#   `resolve` does not NFC-normalize, so every comparison with a container
+#   name goes through NFC (`to_entry`, `nfc` in src/fixers.rs), as the
+#   validator's does. The shelf has one decomposed href, and its ZIP entry is
+#   decomposed the same way, so plan and audit stayed byte-identical.
 #
 #   **0.23.0 (2026-10-08) is a CORRECTNESS floor, and it moved a fixer.** It
 #   spans 0.21.1 (the entity API, additive), 0.22.0 (XML names and whitespace
@@ -326,6 +327,11 @@ epubveri = "0.24.0"
 # epubsana re-emits containers epubveri reads. NB: 8.x's deflate backend differs
 # from 2.x, so repaired files' bytes change (same content, still deterministic).
 zip = { version = "8.6", default-features = false, features = ["deflate"] }
+# NFC, to compare a resolved reference with a ZIP entry name as the validator
+# does (`opf::resolve` leaves that to the caller). Already epubveri's own
+# dependency, so no new transitive weight; pure Rust. The floor is the version
+# tested.
+unicode-normalization = "0.1.25"
 # Structural editing for content-model fixers: parse an XHTML document to find
 # a node's exact byte range and edit it surgically (preserving everything
 # else). Pure-Rust, and already epubveri's own XML parser — no new transitive

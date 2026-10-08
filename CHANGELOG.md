@@ -36,6 +36,12 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 - **A dangling manifest entry is no longer dropped while a percent-escaped link
   still points at it.** The check that looks for links to the missing file
   skipped a `%` in the manifest `href` and did not find `my%20pic.jpg`.
+- **A link and a file name in different Unicode forms now match.** macOS
+  writes `ö` as `o` plus a combining mark; a table of contents, manifest or
+  link may spell the same name precomposed. epubcheck treats the two as one
+  file, and the fixers that look up the document a link names now do too.
+  One test-shelf book has a decomposed name, spelled the same way on both
+  sides, so nothing on the shelf changed.
 - **An invalid id is no longer left alone just because a link to it is
   percent-escaped.** The link's path is decoded only to find its target; the
   rename still rewrites the fragment alone.
