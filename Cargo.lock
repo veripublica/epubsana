@@ -31,7 +31,7 @@ dependencies = [
 
 [[package]]
 name = "epubsana"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "epubveri",
  "roxmltree",
@@ -43,7 +43,7 @@ dependencies = [
 
 [[package]]
 name = "epubsana-wasm"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "epubsana",
  "serde",
