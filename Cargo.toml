@@ -23,7 +23,7 @@ members = ["epubsana-wasm"]
 # into an error) and the `rule`/`params` sub-codes epubsana's fixers dispatch on
 # both arrived on the 0.5 line, the conventions-v0.4 one.
 #
-# **The floor is 0.16.** Most raises have been *correctness* floors, made for the
+# **The floor is 0.24.** Most raises have been *correctness* floors, made for the
 # same reason each time: below them, a detector false positive makes some fixer
 # here repair a book that was not broken. The last two are different classes —
 # 0.9.26 is completeness and 0.10.0 is capability — and each says which it is.
@@ -177,6 +177,23 @@ members = ["epubsana-wasm"]
 #   and 50 renames, so a `params` answer that failed to arrive would have deleted
 #   every one of them.
 #
+#   **0.24.0 (2026-10-08) is an API floor, and a compile-time one.** It makes
+#   public the resolver and the name test the validator itself uses:
+#   `opf::resolve` replaces our `resolve_href` and `percent_decode` (split on
+#   `/` before decoding, so `%2F` and `%2E%2E` stay inside a segment; URL
+#   whitespace trimmed as epubcheck's parser trims it; a leading `/` from the
+#   root), and `xmlname::is_ncname` replaces `char::is_alphanumeric` in
+#   `sanitize_ncname`, so a renamed id is exactly what the grammars accept.
+#   The new findings are all SVG and none is a key we dispatch on.
+#   Measured on 544 books in three arms (0.23 + old code, 0.24 + old code,
+#   0.24 + new code): plan digest and `regression_audit` byte-identical across
+#   all three. Not a vacuous null — the digest carries 287 renamed ids and 226
+#   proposals from the fixers that resolve hrefs, so a changed answer would
+#   have shown; the shelf simply holds none of the shapes the change corrects.
+#   `resolve` does not NFC-normalize; our callers compare its output with
+#   container names unnormalized, as before. The shelf has one decomposed
+#   href, and its ZIP entry is decomposed the same way.
+#
 #   **0.23.0 (2026-10-08) is a CORRECTNESS floor, and it moved a fixer.** It
 #   spans 0.21.1 (the entity API, additive), 0.22.0 (XML names and whitespace
 #   from epubcheck's own tables) and 0.23.0 (five keys folded into others, none
@@ -302,7 +319,7 @@ members = ["epubsana-wasm"]
 #
 # For local co-development of epubveri, add an uncommitted override:
 #   [patch.crates-io] epubveri = { path = "../epubveri" }
-epubveri = "0.23.0"
+epubveri = "0.24.0"
 # Pure-Rust only (no C deps), same philosophy as epubveri: zip's "deflate"
 # feature uses zlib-rs (Rust) on the 8.x line; bzip2/zstd (C) stay disabled.
 # Aligned to epubveri's zip major — the family shares one zip version because

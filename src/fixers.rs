@@ -10,8 +10,10 @@ use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ops::Range;
 
+use epubveri::opf::resolve;
 use epubveri::report::{Report, Severity, ViolationKind};
 use epubveri::xmlext::is_xml_space;
+use epubveri::xmlname::is_ncname;
 
 use crate::{Change, Goal, ProposedFix, Tier, Workspace, entities};
 
@@ -1122,16 +1124,22 @@ fn attr_value_span(text: &str, attr: Range<usize>) -> Option<Range<usize>> {
 }
 
 /// Derive a valid XML NCName from an invalid `id`, preserving as much of the
-/// original as possible: drop characters not allowed in an NCName, then prefix
-/// `id_` if the result doesn't start with a letter or `_`. `None` when nothing
-/// usable remains — we never invent an id from thin air.
+/// original as possible: drop every character epubcheck's grammars do not allow
+/// in an NCName, then prefix `id_` if what is left cannot start one. `None` when
+/// nothing usable remains — we never invent an id from thin air. A value that is
+/// already an NCName comes back unchanged.
+///
+/// The test is epubveri's own (`is_ncname`, XML 1.0 Appendix B), so a name
+/// written here is exactly one the validator accepts; `char::is_alphanumeric`
+/// admits letters those tables do not.
 fn sanitize_ncname(bad: &str) -> Option<String> {
+    // A name character is whatever may follow a letter.
     let filtered: String = bad
         .chars()
-        .filter(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '.'))
+        .filter(|c| is_ncname(&format!("a{c}")))
         .collect();
     let first = filtered.chars().next()?;
-    Some(if first.is_alphabetic() || first == '_' {
+    Some(if is_ncname(first.encode_utf8(&mut [0; 4])) {
         filtered
     } else {
         format!("id_{filtered}")
@@ -3715,7 +3723,7 @@ fn compute_guide_fragment_edits(
         let Some((path, frag)) = href.split_once('#') else {
             continue;
         };
-        if !flagged.contains(&(frag.to_string(), resolve_href(&base, href))) {
+        if !flagged.contains(&(frag.to_string(), resolve(&base, href))) {
             continue;
         }
         candidates.push((*r, href.to_string(), path.to_string()));
@@ -4780,7 +4788,7 @@ fn spine_paths(opf: &str, base: &str) -> BTreeSet<String> {
         .filter_map(|n| {
             Some((
                 n.attr_no_ns("id")?.to_string(),
-                resolve_href(base, n.attr_no_ns("href")?),
+                resolve(base, n.attr_no_ns("href")?),
             ))
         })
         .collect();
@@ -6626,12 +6634,7 @@ fn compute_properties_edit(
     let item = parsed
         .descendants()
         .filter(|n| n.is_element() && n.tag_name().name() == "item")
-        .find(|n| {
-            n.attr_no_ns("href")
-                .map(|h| resolve_href(&base, h))
-                .as_deref()
-                == Some(doc)
-        })?;
+        .find(|n| n.attr_no_ns("href").map(|h| resolve(&base, h)).as_deref() == Some(doc))?;
 
     let existing = item.attr_no_ns("properties").map(str::to_string);
     let mut tokens: Vec<String> = existing
@@ -6838,7 +6841,7 @@ fn insert_label(labels: &mut BTreeMap<String, String>, base: &str, href: &str, l
     if label.is_empty() {
         return;
     }
-    let path = resolve_href(base, href);
+    let path = resolve(base, href);
     labels.entry(path).or_insert(label);
 }
 
@@ -6890,57 +6893,13 @@ fn is_epub2_package(opf: &str) -> bool {
         .is_some_and(|v| v.trim().starts_with('2') || v.trim().starts_with('1'))
 }
 
-/// The directory part of a container path, `""` for a top-level entry.
+/// The directory part of a container path, without a trailing `/` (`""` for a
+/// top-level entry) — the `base_dir` epubveri's `opf::resolve` takes.
 fn dir_of(path: &str) -> String {
     match path.rfind('/') {
-        Some(i) => path[..=i].to_string(),
+        Some(i) => path[..i].to_string(),
         None => String::new(),
     }
-}
-
-/// Resolve a document-relative `href` against `base` (a directory ending in `/`)
-/// into a container path: drop any fragment/query, percent-decode, and normalize
-/// `.`/`..` segments — the same resolution a reading system does.
-fn resolve_href(base: &str, href: &str) -> String {
-    let href = href.split(['#', '?']).next().unwrap_or("");
-    let joined = format!("{base}{}", percent_decode(href));
-    let mut out: Vec<&str> = Vec::new();
-    for seg in joined.split('/') {
-        match seg {
-            "" | "." => {}
-            ".." => {
-                out.pop();
-            }
-            s => out.push(s),
-        }
-    }
-    out.join("/")
-}
-
-/// Decode `%XX` escapes (a manifest href may legitimately spell a space `%20`).
-/// Invalid escapes are left as written — we decode what we understand and never
-/// mangle the rest.
-fn percent_decode(s: &str) -> String {
-    fn hex(c: u8) -> Option<u8> {
-        (c as char).to_digit(16).map(|d| d as u8)
-    }
-    let b = s.as_bytes();
-    let mut out = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        // Byte by byte: a str slice here could end inside a UTF-8 char.
-        if b[i] == b'%'
-            && i + 2 < b.len()
-            && let (Some(hi), Some(lo)) = (hex(b[i + 1]), hex(b[i + 2]))
-        {
-            out.push(hi << 4 | lo);
-            i += 3;
-            continue;
-        }
-        out.push(b[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Rewrite an existing quoted attribute's value inside one element's source,
@@ -7173,8 +7132,8 @@ mod tests {
         );
     }
 
-    /// The route `percent_decode`'s panic was reachable by: every nav href is
-    /// resolved, so one `%` before a non-ASCII char crashed the whole run.
+    /// The route the 0.23 `percent_decode` panic was reachable by: every nav
+    /// href is resolved, so one `%` before a non-ASCII char crashed the run.
     #[test]
     fn toc_labels_reads_an_href_with_a_percent_before_a_multibyte_char() {
         let nav = "<html xmlns=\"http://www.w3.org/1999/xhtml\"><body><nav><ol>\
@@ -10376,6 +10335,26 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_keeps_name_chars_alphanumeric_would_drop() {
+        // U+00B7 is an XML 1.0 extender and U+0301 a combining mark: both are
+        // name characters, so a valid id must come back byte for byte.
+        assert_eq!(sanitize_ncname("a\u{b7}b").as_deref(), Some("a\u{b7}b"));
+        assert_eq!(sanitize_ncname("s\u{327}ik").as_deref(), Some("s\u{327}ik"));
+    }
+
+    #[test]
+    fn sanitize_drops_letters_outside_the_xml_1_0_tables() {
+        // U+0870 (Arabic, Unicode 14) is alphabetic but in no XML 1.0 table:
+        // `is_alphanumeric` kept it and wrote an id the validator rejects.
+        let out = sanitize_ncname("n\u{870}1").unwrap();
+        assert_eq!(out, "n1");
+        assert!(is_ncname(&out));
+        // U+0903 is alphabetic to Rust but a combining mark to XML 1.0: it may
+        // follow a letter, never start a name, so it earns the prefix.
+        assert_eq!(sanitize_ncname("\u{903}x").as_deref(), Some("id_\u{903}x"));
+    }
+
+    #[test]
     fn sanitize_declines_when_nothing_usable() {
         assert_eq!(sanitize_ncname("{}"), None);
         assert_eq!(sanitize_ncname(":"), None);
@@ -10436,39 +10415,19 @@ mod tests {
     }
 
     #[test]
-    fn resolve_href_normalizes_relative_paths_and_drops_the_fragment() {
+    fn dir_of_gives_resolve_its_base() {
+        // `resolve` is epubveri's; what is ours is the base we hand it.
+        let base = dir_of("OEBPS/Text/ch1.xhtml");
+        assert_eq!(base, "OEBPS/Text");
         assert_eq!(
-            resolve_href("OEBPS/Text/", "../Styles/../Text/ch1.xhtml#p3"),
+            resolve(&base, "../Styles/../Text/ch1.xhtml#p3"),
             "OEBPS/Text/ch1.xhtml"
         );
         assert_eq!(
-            resolve_href("OEBPS/", "Text/ch%201.xhtml"),
+            resolve(&dir_of("OEBPS/content.opf"), "Text/ch%201.xhtml"),
             "OEBPS/Text/ch 1.xhtml"
         );
-        assert_eq!(resolve_href("", "toc.ncx"), "toc.ncx");
-    }
-
-    #[test]
-    fn percent_decode_leaves_an_invalid_escape_alone() {
-        assert_eq!(percent_decode("a%20b"), "a b");
-        assert_eq!(percent_decode("100%zz"), "100%zz");
-    }
-
-    #[test]
-    fn percent_decode_survives_a_multibyte_char_after_the_percent() {
-        // The two bytes after `%` can end inside a UTF-8 char; slicing the
-        // str there panicked.
-        assert_eq!(percent_decode("x%aéy.xhtml"), "x%aéy.xhtml");
-        assert_eq!(percent_decode("%Bölüm.xhtml"), "%Bölüm.xhtml");
-        assert_eq!(percent_decode("%é"), "%é");
-    }
-
-    #[test]
-    fn percent_decode_takes_only_two_hex_digits() {
-        // `from_str_radix` accepts a sign, so `%+1` decoded to U+0001.
-        assert_eq!(percent_decode("a%+1b"), "a%+1b");
-        assert_eq!(percent_decode("a%-1b"), "a%-1b");
-        assert_eq!(percent_decode("a%c3%a7b"), "açb");
+        assert_eq!(resolve(&dir_of("content.opf"), "toc.ncx"), "toc.ncx");
     }
 
     #[test]

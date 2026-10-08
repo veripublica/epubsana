@@ -8,6 +8,21 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Requires epubveri 0.24.0**, and uses its resolver and its XML name test
+  in place of our own copies. A link is now resolved exactly as the validator
+  resolves it: an escaped `/` or `..` (`%2F`, `%2E%2E`) stays part of a file
+  name, and surrounding URL whitespace is ignored. A renamed id keeps every
+  character XML allows in a name (`·`, combining marks) and drops the newer
+  Unicode letters the validator does not accept, so a repair can no longer
+  write an id that is itself invalid. Across the 544-book test shelf, every proposal and
+  every result after repair is the same as under 0.23.0; no book there has
+  one of these shapes.
+- `LICENSING-FAQ.md` now also covers kepubverto.
+
 ## [0.24.0] - 2026-10-08
 
 ### Fixed

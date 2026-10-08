@@ -8,14 +8,16 @@ version as a network service.**
 This document explains how we read `LICENSE` and how we intend it to apply. It
 does not modify `LICENSE`; where the two ever disagree, `LICENSE` governs.
 
-Applies to `epubsana` and `epubveri` — both AGPL-3.0-only OR a commercial
-license.
+Applies to `epubsana`, `epubveri` and `kepubverto` — all AGPL-3.0-only OR a
+commercial license.
 
 One distinction worth knowing, because it makes half of this page unnecessary
-for one of the two tools: **`epubveri` never writes to your book.** It reads and
-reports. There is no path by which any part of it can end up inside an EPUB.
-`epubsana` does write — that is its job — so the question of what ends up in your
-file is a real one for it, and is answered below.
+for one of the three tools: **`epubveri` never writes to your book.** It reads
+and reports. There is no path by which any part of it can end up inside an EPUB.
+`epubsana` and `kepubverto` do write — that is their job — so the question of
+what ends up in your file is a real one for them. It is answered below for
+`epubsana`; `kepubverto` answers it in its own
+[`LICENSING.md`](https://github.com/veripublica/kepubverto/blob/main/LICENSING.md).
 
 ---
 
