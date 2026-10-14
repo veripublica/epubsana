@@ -63,6 +63,7 @@ grows one carefully-argued entry at a time.
 | `RSC-005` | `navdoc.ol.empty` | ConfirmNeeded | An optional `<nav>` in the navigation document holds an `<ol>` with no `<li>` | [Delete the whole `<nav>`](#rsc-005--an-optional-nav-whose-list-is-empty) |
 | `OPF-054` | *(none)* | ConfirmNeeded | A `<dc:date>` holds no date at all (EPUB 2) | [Drop the empty element; never touch a non-empty one](#opf-054--an-empty-dcdate-epub-2) |
 | `RSC-005` / `RSC-025` | `svg.attributes.attribute_not_allowed` (a lowercased camelCase name) | AutoSafe | An SVG attribute was lowercased by an HTML tool (`viewbox`), so an XML reading system ignores it | [Restore the name's case from the HTML standard's own table](#rsc-005--rsc-025--an-svg-attribute-whose-name-lost-its-case) |
+| `RSC-005` | `opf.content_document.schema_violation` (`params[0] == "dir"`, an uppercase `LTR`/`RTL`) | AutoSafe | A `dir` value written in capitals, which the grammar does not accept | [Lowercase it to `ltr` / `rtl`](#rsc-005--a-dir-value-in-capitals) |
 
 **A note on structural fixers.** Fixers that must locate an element (rather than
 match a token) parse the document with `roxmltree` using `allow_dtd: true`, the
@@ -2481,4 +2482,60 @@ severity. The whole-shelf plan digest gains exactly that line. The only other
 change is that this book's next proposal moves from `--apply` index 3 to 4. The
 trial validation never declined anything here; the guard is pinned by tests on a
 `<rect viewbox>`, which epubveri reports again as `viewBox`.
+
+---
+
+## RSC-005 — a `dir` value in capitals
+
+> **Written spec-first on 2026-10-14.** The finding shape below is what
+> epubveri 0.26.0 reported on the shelf before any code existed.
+
+**Finding.** `opf.content_document.schema_violation`, kind
+`invalid_attribute_value`, `params` = `["dir", value]`, and `element_path`
+names the attribute:
+
+```
+…/h:body[1]/@dir      params ["dir", "LTR"]
+```
+
+**The shape.** `dir` takes `ltr` or `rtl` (EPUB 3 adds `auto`), in lowercase.
+HTML compares enumerated attribute values without regard to ASCII case, so a
+browser reads `dir="LTR"` as `ltr`. The XHTML grammar compares exactly and
+rejects it. On the shelf the shape is calibre output:
+
+```html
+<body text="#000000" dir="LTR" class="calibre">
+```
+
+**Fix** (`fix.dir_case`, AutoSafe). Replace the value with its ASCII
+lowercase, only when that is `ltr` or `rtl`. Only the value's bytes change. One
+proposal per book, because the decision is the same in every file.
+
+**Why it is safe.** The lowercased value is what HTML already reads the
+capitalised one as, so the direction of the text does not change. `ltr` and
+`rtl` are valid on every element that takes `dir`, in EPUB 2 and EPUB 3 alike.
+The finding is "invalid value", not "attribute not allowed", so the attribute
+is allowed where it stands, and no second check is needed.
+
+**When it declines.**
+
+- **A value whose lowercase is not `ltr` or `rtl`.** `AUTO` is valid only in
+  EPUB 3, and a value such as `left` has no single correction.
+- **A value that is not exactly what the finding reports**, byte for byte
+  between the quotes (padding, an entity reference). That is a different shape
+  and the edit would not be the one argued here.
+- **A node whose path no finding names**, an attribute in a namespace, or a
+  document that does not parse.
+
+**Measured (544 books, epubveri 0.26.0, before building).** 2 books, 12
+findings, all `<body dir="LTR">`. Both books also carry `text="#000000"` on the
+same `<body>`, a separate finding this fixer does not touch, so neither book
+becomes valid from this repair alone. Two books from one producer show that
+the shape exists. They do not show how often it occurs.
+
+**Measured after building (544 books, epubveri 0.26.0, 2026-10-14).** One
+proposal on each of the 2 books, and all 12 findings cleared. The two books
+enter `regression_audit`'s touched set at 24 errors before and 12 after; the
+12 that stay are the `text` attributes. No regression at any severity, and
+the whole-shelf plan digest gains exactly those two lines.
 

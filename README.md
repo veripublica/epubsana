@@ -17,7 +17,7 @@ apply → check → report) is solid. The check re-validates the book after
 applying, and a fix that made any finding more frequent is undone and reported
 as reverted — unless the fix let the validator see part of the book it could not
 see before, in which case what appears was always there and the run says so.
-Forty-two fixers so far:
+Forty-three fixers so far:
 
 - **`RSC-016`** — undeclared HTML entities (`&nbsp;`, `&mdash;`, …) → the exact
   character each denotes.
@@ -106,6 +106,8 @@ Forty-two fixers so far:
   `preserveaspectratio` and the rest of the HTML standard's camelCase table →
   `viewBox`, `preserveAspectRatio`, the names an XML reading system looks for.
   Only the name changes. A rename the validator would still reject is left out.
+- **`RSC-005` / an uppercase `dir`** — `dir="LTR"` / `dir="RTL"` → `ltr` / `rtl`,
+  which is how a browser already reads them. Any other value is left alone.
 - **`RSC-005` / empty `lang`** — an empty `lang=""` / `xml:lang=""`, which EPUB 2
   doesn't allow → deleted, so the element inherits its parent's language. A
   malformed tag is never guessed at.

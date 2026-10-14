@@ -88,6 +88,7 @@ pub fn plan(report: &Report, ws: &Workspace, _goal: Goal) -> Vec<ProposedFix> {
     fixes.extend(anchor_name_attrs(report, ws));
     fixes.extend(adept_meta_value(report, ws));
     fixes.extend(svg_attribute_case(report, ws));
+    fixes.extend(dir_case(report, ws));
     fixes.extend(empty_lang_attrs(report, ws));
     fixes.extend(lang_xmllang_mismatch(report, ws));
     fixes.extend(doctype_html5(report, ws));
@@ -2874,6 +2875,161 @@ fn svg_renames_still_reported(
             .filter_map(|m| Some((m.location.clone()?, m.element_path.as_ref()?.path.clone())))
             .collect(),
     )
+}
+
+/// `RSC-005` / `opf.content_document.schema_violation`, kind
+/// `invalid_attribute_value`, `params` = `["dir", value]`, where the value is
+/// `ltr` or `rtl` written with capitals: calibre writes
+/// `<body dir="LTR">`. HTML reads enumerated values without regard to ASCII
+/// case, so this is `ltr` to a browser. The XHTML grammar compares exactly.
+///
+/// The repair **lowercases the value**. Only its bytes change. `ltr` and `rtl`
+/// are valid wherever `dir` is, in EPUB 2 and EPUB 3, and an invalid-value
+/// finding means the attribute itself is allowed there, so nothing else needs
+/// checking.
+///
+/// **Acts only on what epubveri reported:** `element_path` names the attribute
+/// (`/h:html[1]/h:body[1]/@dir`), and a candidate is edited only when its own
+/// path is in that set and its value between the quotes is exactly the
+/// reported one.
+///
+/// **Declines:** a value whose lowercase is not `ltr` or `rtl` (`AUTO` is EPUB 3
+/// only), a value that differs from the reported one (padding, an entity), and
+/// a document that does not parse.
+fn dir_case(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    // document -> reported element path (`/@dir` stripped) -> reported value
+    let mut by_doc: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+    for m in &report.messages {
+        if !is_schema_violation(
+            m,
+            "opf.content_document.schema_violation",
+            ViolationKind::InvalidAttributeValue,
+        ) {
+            continue;
+        }
+        let (Some(doc), Some(np), Some(value)) = (
+            m.location.as_deref(),
+            m.element_path.as_ref(),
+            m.params.get(1),
+        ) else {
+            continue;
+        };
+        if !matches!(value.to_ascii_lowercase().as_str(), "ltr" | "rtl") {
+            continue;
+        }
+        // The path names the attribute, so `/@dir` is what selects `dir`
+        // (`params[0]` says the same and is not read twice).
+        let Some(element) = np.path.strip_suffix("/@dir") else {
+            continue;
+        };
+        by_doc
+            .entry(doc.to_string())
+            .or_default()
+            .insert(element.to_string(), value.clone());
+    }
+
+    let mut docs: Vec<(String, BTreeMap<String, String>, BTreeSet<String>)> = Vec::new();
+    for (doc, reported) in by_doc {
+        let Some(text) = ws.get_text(&doc) else {
+            continue;
+        };
+        let Some(edits) = plan_dir_case(&text, &reported) else {
+            continue; // won't parse: decline
+        };
+        if !edits.is_empty() {
+            let values = edits.iter().map(|e| e.replacement.clone()).collect();
+            docs.push((doc, reported, values));
+        }
+    }
+    if docs.is_empty() {
+        return Vec::new();
+    }
+
+    let files = docs.len();
+    let preview: Vec<Change> = docs
+        .iter()
+        .take(6)
+        .map(|(doc, reported, values)| Change {
+            path: doc.clone(),
+            note: format!(
+                "lowercase dir={} to dir={}",
+                reported
+                    .values()
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .join("/"),
+                values
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .join("/")
+            ),
+        })
+        .collect();
+    let docs_for_apply: Vec<(String, BTreeMap<String, String>)> =
+        docs.into_iter().map(|(d, r, _)| (d, r)).collect();
+
+    vec![ProposedFix {
+        fix_id: "fix.dir_case",
+        addresses_id: "RSC-005".to_string(),
+        addresses_rule: Some("opf.content_document.schema_violation"),
+        addresses_severity: addressed_severity(
+            report,
+            "RSC-005",
+            Some("opf.content_document.schema_violation"),
+        ),
+        tier: Tier::AutoSafe,
+        title: format!(
+            "Lowercase the text direction (`dir`) in {files} file{}",
+            if files == 1 { "" } else { "s" }
+        ),
+        rationale: "`dir` takes `ltr` or `rtl` in lowercase. A browser reads `LTR` as `ltr`, \
+                    but the XHTML grammar rejects it. Lowercasing the value keeps the text \
+                    direction exactly as it was and changes nothing else. A value that is not \
+                    `ltr` or `rtl` in some case is left alone."
+            .to_string(),
+        preview,
+        apply_fn: Box::new(move |ws: &mut Workspace| {
+            for (doc, reported) in &docs_for_apply {
+                if let Some(text) = ws.get_text(doc)
+                    && let Some(edits) = plan_dir_case(&text, reported)
+                {
+                    ws.set_text(doc, apply_edits(&text, edits));
+                }
+            }
+        }),
+    }]
+}
+
+/// The edits lowercasing each reported `dir` value: one per element whose path
+/// is in `reported` and whose raw value between the quotes is exactly the
+/// reported one. `None` (decline) if the document doesn't parse.
+fn plan_dir_case(text: &str, reported: &BTreeMap<String, String>) -> Option<Vec<MetaEdit>> {
+    let prepared = prepare_content_doc(text);
+    let doc = prepared.parse()?;
+    let mut edits = Vec::new();
+    for node in doc.descendants().filter(|n| n.is_element()) {
+        let Some(attr) = node
+            .attributes()
+            .find(|a| a.namespace().is_none() && a.name() == "dir")
+        else {
+            continue;
+        };
+        let Some(value) = xhtml_element_path(node).and_then(|p| reported.get(&p)) else {
+            continue;
+        };
+        let range = prepared.unshift(attr.range_value());
+        if text.get(range.clone()) != Some(value.as_str()) {
+            continue;
+        }
+        edits.push(MetaEdit {
+            range,
+            replacement: value.to_ascii_lowercase(),
+        });
+    }
+    Some(edits)
 }
 
 /// Is this finding "an empty `lang` / `xml:lang`"?
@@ -9401,6 +9557,151 @@ mod tests {
             assert_eq!(c.to_ascii_lowercase(), l);
             assert_ne!(c, l);
         }
+    }
+
+    // ---- fix.dir_case ------------------------------------------------
+
+    /// An EPUB 2 book whose one chapter is `<body {body_attrs}>{inner}</body>`,
+    /// for the real detector.
+    fn dir_book(body_attrs: &str, inner: &str) -> Workspace {
+        let chapter = format!(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:x="urn:x"><head><title>t</title></head><body {body_attrs}>{inner}</body></html>"#
+        );
+        container(&[
+            (
+                "META-INF/container.xml",
+                r#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#,
+            ),
+            (
+                "content.opf",
+                r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="id">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="id">x</dc:identifier><dc:title>t</dc:title><dc:language>en</dc:language></metadata>
+  <manifest><item href="c.xhtml" id="c" media-type="application/xhtml+xml"/></manifest>
+  <spine><itemref idref="c"/></spine>
+</package>"#,
+            ),
+            ("c.xhtml", &chapter),
+        ])
+    }
+
+    /// The `params` of every `dir` finding the detector makes on the book.
+    fn dir_findings(ws: &Workspace) -> Vec<Vec<String>> {
+        ws.detect()
+            .unwrap()
+            .messages
+            .iter()
+            .filter(|m| m.params.first().map(String::as_str) == Some("dir"))
+            .map(|m| m.params.clone())
+            .collect()
+    }
+
+    /// The shelf's shape, and an `RTL` deeper in the body: both lowercased,
+    /// nothing else moved, and the detector has no `dir` finding left.
+    #[test]
+    fn an_uppercase_dir_is_lowercased() {
+        let mut ws = dir_book(r#"dir="LTR" class="calibre""#, r#"<p dir="RTL">x</p>"#);
+        assert_eq!(
+            dir_findings(&ws).len(),
+            2,
+            "the fixture must carry both findings, or this test proves nothing"
+        );
+        let fixes = dir_case(&ws.detect().unwrap(), &ws);
+        assert_eq!(fixes.len(), 1);
+        assert_eq!(fixes[0].tier, Tier::AutoSafe);
+        fixes.into_iter().next().unwrap().apply(&mut ws);
+        let out = ws.get_text("c.xhtml").unwrap();
+        assert!(
+            out.contains(r#"<body dir="ltr" class="calibre"><p dir="rtl">x</p>"#),
+            "got: {out}"
+        );
+        assert!(dir_findings(&ws).is_empty());
+    }
+
+    /// `auto` is EPUB 3 only, so `AUTO` on an EPUB 2 book has no single
+    /// correction.
+    #[test]
+    fn an_uppercase_auto_is_declined() {
+        let ws = dir_book(r#"dir="AUTO""#, "<p>x</p>");
+        assert_eq!(
+            dir_findings(&ws),
+            vec![vec!["dir".to_string(), "AUTO".to_string()]]
+        );
+        assert!(dir_case(&ws.detect().unwrap(), &ws).is_empty());
+    }
+
+    /// The finding reports the parsed value; the file spells it with a
+    /// character reference. Not the shape argued for, so it is left alone.
+    #[test]
+    fn a_dir_spelled_with_a_reference_is_declined() {
+        let ws = dir_book(r#"dir="&#76;TR""#, "<p>x</p>");
+        assert_eq!(
+            dir_findings(&ws),
+            vec![vec!["dir".to_string(), "LTR".to_string()]]
+        );
+        assert!(dir_case(&ws.detect().unwrap(), &ws).is_empty());
+    }
+
+    /// Only the unprefixed `dir` the detector reported is edited.
+    #[test]
+    fn a_namespaced_dir_beside_the_reported_one_is_left_alone() {
+        let mut ws = dir_book(r#"x:dir="LTR" dir="LTR""#, "<p>x</p>");
+        let fixes = dir_case(&ws.detect().unwrap(), &ws);
+        assert_eq!(fixes.len(), 1);
+        fixes.into_iter().next().unwrap().apply(&mut ws);
+        let out = ws.get_text("c.xhtml").unwrap();
+        assert!(out.contains(r#"x:dir="LTR" dir="ltr""#), "got: {out}");
+    }
+
+    /// Another attribute's invalid value on the same element is not a `dir`
+    /// finding, even when it reads `LTR`: the reported path's `/@dir` is what
+    /// selects. Here only the `xml:space` finding is kept in the report.
+    #[test]
+    fn another_attributes_invalid_value_is_not_taken_for_dir() {
+        let ws = dir_book("", r#"<pre xml:space="LTR" dir="LTR">x</pre>"#);
+        let mut report = ws.detect().unwrap();
+        assert!(
+            report
+                .messages
+                .iter()
+                .any(
+                    |m| m.params.first().map(String::as_str) == Some("xml:space")
+                        && m.element_path
+                            .as_ref()
+                            .is_some_and(|n| n.path.ends_with("/@xml:space"))
+                ),
+            "the fixture must report xml:space with its own path"
+        );
+        report
+            .messages
+            .retain(|m| m.params.first().map(String::as_str) != Some("dir"));
+        assert!(dir_case(&report, &ws).is_empty());
+    }
+
+    /// Nothing reported, nothing touched.
+    #[test]
+    fn an_unreported_uppercase_dir_is_left_alone() {
+        let ws = dir_book(r#"dir="LTR""#, "<p>x</p>");
+        assert!(dir_case(&Report::default(), &ws).is_empty());
+    }
+
+    /// Reported on one element, present on two: only the reported one moves.
+    #[test]
+    fn only_the_reported_dir_is_lowercased() {
+        let mut ws = dir_book(r#"dir="LTR""#, r#"<p dir="RTL">x</p>"#);
+        let mut report = ws.detect().unwrap();
+        report.messages.retain(|m| {
+            m.params.first().map(String::as_str) != Some("dir") || m.params[1] == "LTR"
+        });
+        let fixes = dir_case(&report, &ws);
+        fixes.into_iter().next().unwrap().apply(&mut ws);
+        let out = ws.get_text("c.xhtml").unwrap();
+        assert!(
+            out.contains(r#"<body dir="ltr"><p dir="RTL">"#),
+            "got: {out}"
+        );
     }
 
     #[test]

@@ -22,6 +22,11 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
   does not list, an element that already has the camelCase name, and any
   rename the validator would still report, which it checks on a copy of the
   book before proposing.
+- **`fix.dir_case` (AutoSafe): a `dir` value in capitals.** calibre writes
+  `<body dir="LTR">`. A browser reads it as `ltr`, but the XHTML grammar
+  accepts only lowercase. The fixer lowercases `LTR` and `RTL` and changes
+  nothing else. Any other value is left alone, including `AUTO`, which only
+  EPUB 3 allows.
 
 ### Changed
 
