@@ -124,7 +124,7 @@ CLI, the in-browser WASM demo, and library consumers such as epublift):
 
 ## CLI reference
 
-epubsana conforms to the **[veripublica CLI convention v0.6](https://github.com/veripublica/conventions/blob/main/CLI.md)**,
+epubsana conforms to the **[veripublica CLI convention v0.7](https://github.com/veripublica/conventions/blob/main/CLI.md)**,
 so its flags, output naming, and exit codes match the other veripublica tools.
 
 ```

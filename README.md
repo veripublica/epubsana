@@ -241,7 +241,7 @@ epubsana -i book.epub --format json --dry-run
 ```
 
 The CLI conforms to the [veripublica conventions
-v0.6](https://github.com/veripublica/conventions) (`-i`/`-o`/`-f`,
+v0.7](https://github.com/veripublica/conventions) (`-i`/`-o`/`-f`,
 `<input-stem>_fixed.epub` output, `--format json`, exit `0`/`1`/`2`), so it
 behaves like the other veripublica tools. Full guide:
 **[docs/USAGE.md](docs/USAGE.md)**.

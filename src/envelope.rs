@@ -1,6 +1,6 @@
 //! epubsana's `--format json` — the veripublica machine envelope, built on
 //! **epubveri's reference types** ([`epubveri::envelope`], FORMATS.md
-//! convention v0.6).
+//! convention v0.7).
 //!
 //! The skeleton is not epubsana's: `Envelope`/`Input`/`Item` come from epubveri,
 //! generic over the two slots FORMATS.md §2 leaves to each tool — the `summary`
@@ -30,12 +30,15 @@ use crate::{ChangeReport, ReportedFix, Tier};
 /// the dependency cannot be mistaken for adopting a convention release, and
 /// epubveri now claims `"0.5"`.
 ///
-/// **`"0.6"` since 0.17.0, which emits `reverted`** (conventions v0.6.0, #31) —
-/// the release that added per-fix rollback. It was `"0.5"` from the release that
+/// **`"0.7"` since 0.26.0**, a re-declaration: conventions v0.7.0 (#34, #35)
+/// changed nothing epubsana emits — our long names are our own, and every fix
+/// item inherits a `code` and severity from an epubveri finding that already
+/// obeys the new `code` row. `"0.6"` from 0.17.0, which emits `reverted`
+/// (conventions v0.6.0, #31) — the release that added per-fix rollback. It was `"0.5"` from the release that
 /// shipped [`Summary`]'s seven missing counters. The key moves when this crate implements a convention release, never
 /// when the dependency does: it is an assertion about ourselves (FORMATS.md
 /// §1.1, settled by conventions on 2026-09-10).
-const CONVENTION: &str = "0.6";
+const CONVENTION: &str = "0.7";
 
 /// epubsana's `Outcome` in the envelope's vocabulary.
 ///
@@ -443,7 +446,7 @@ pub(crate) mod tests {
     /// does. Pinned so a dependency bump cannot quietly carry it.
     #[test]
     fn the_convention_key_is_our_own() {
-        assert_eq!(CONVENTION, "0.6");
+        assert_eq!(CONVENTION, "0.7");
     }
 
     /// Every outcome the envelope can carry is one epubsana can produce.

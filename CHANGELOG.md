@@ -8,6 +8,22 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Requires epubveri 0.26.0.** On EPUB 2 books the validator now checks
+  `<style>`, `<script>`, `<meta>` and `<base>` against XHTML 1.1's own
+  attribute lists, as epubcheck does, so a book with, for example,
+  `<style class="…">` or a `<style>` without `type` is no longer reported
+  valid after repair. epubsana does not repair these yet; such a book now ends
+  `--goal valid` with exit `1`. Across the 544-book test shelf every proposal
+  and every result after repair is the same as under 0.24.0.
+- **Conforms to veripublica conventions v0.7.** The json envelope's
+  `convention` key is now `"0.7"`, and `--help` says so. Nothing epubsana
+  emits changed: its long option names are its own, and every fix item's
+  `code` already follows v0.7's `code` rule.
+
 ## [0.25.0] - 2026-10-08
 
 ### Changed
