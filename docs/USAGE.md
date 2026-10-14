@@ -639,7 +639,32 @@ Two fields carry epubsana's half of the contract:
   fix. How much judgement the fix needs is a different axis, and lives in
   `data.tier`.
 
-A usage error produces **no envelope**: a short message on stderr and exit `2`.
+When the input cannot be processed (it cannot be read, is not an EPUB, or the
+repaired copy cannot be written), the envelope still comes, with exit `2`. Its
+top-level `status` and the input's `status` are both `"error"`, and the input
+carries `error` (the reason), no `summary`, and no items:
+
+```json
+{
+  "tool": "epubsana",
+  "tool_version": "0.27.0",
+  "convention": "0.7",
+  "status": "error",
+  "inputs": [
+    {
+      "path": "book.epub",
+      "status": "error",
+      "error": "cannot read book.epub: zip error: invalid Zip archive: Could not find EOCD",
+      "items": []
+    }
+  ]
+}
+```
+
+When epubsana cannot run at all, it prints **no envelope**: a short message on
+stderr and exit `2`. That covers a usage error, contradictory options, an output
+path that is the input, an existing output without `-f`, a prompt it cannot ask,
+and an `--apply` selector that matches no fix.
 
 ---
 

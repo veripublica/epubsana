@@ -21,6 +21,17 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
   Across the 562-book test shelf, every proposal and every result after
   repair is the same as under 0.26.0.
 
+- **`--format json` now prints an envelope when the input cannot be
+  processed.** An unreadable file, a file that is not an EPUB, or a repaired
+  copy that cannot be written now gives an envelope whose input has
+  `status: "error"` and an `error` string, with exit `2`. This is what
+  conventions FORMATS §1 asks for, and what epubveri already does. Before, these
+  runs printed nothing on stdout. When epubsana cannot run at all, there is
+  still no envelope, as before: a usage error, contradictory options, an output
+  that is the input or already exists, a prompt it cannot ask, or an `--apply`
+  selector that matches nothing. A plugin that reads stdout on exit `2` now
+  gets JSON for the first kind.
+
 ## [0.26.0] - 2026-10-14
 
 ### Added

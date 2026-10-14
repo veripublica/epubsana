@@ -11,7 +11,7 @@
 //! re-derived: one family, one parser, one set of surprises.
 //!
 //! Exit codes: `0` = the run's goal was met, `1` = it was not, `2` = the tool
-//! could not run.
+//! could not run, or could not process its input.
 
 #![forbid(unsafe_code)]
 
@@ -78,9 +78,11 @@ EXIT CODES:
                           code answers the question the invocation asked.
     1   the goal was not met: fixes were declined, or defects epubsana cannot
         fix remain.
-    2   epubsana could not run: a usage error, an unreadable EPUB, an output
-        path that is the input, an existing output file without -f, an
-        unanswerable prompt, or an I/O failure.
+    2   epubsana could not run: a usage error, an output path that is the
+        input, an existing output file without -f, or an unanswerable prompt.
+        Or it could not process the input: an unreadable EPUB, or an I/O
+        failure. With --format json, only the second kind prints an envelope
+        (the input has \"status\": \"error\").
 
 Conforms to veripublica conventions v0.7.";
 
@@ -313,10 +315,20 @@ fn main() -> ExitCode {
         }
         Cli::Run(run) => match execute(&run) {
             Ok(code) => code,
-            Err(e) => {
-                // A failure that leaves no verdict: no envelope, even in json
-                // mode (FORMATS.md §1 — the envelope describes runs that
-                // happened). One input, so there is nothing else to report on.
+            // The input could not be processed: in json mode that is described
+            // *inside* an envelope, `status: "error"` (FORMATS §1, its `c.epub`
+            // example), so a plugin can always parse stdout. epubveri does the
+            // same.
+            Err(Stop::Input(e)) if run.format == "json" => {
+                let input = envelope::input_error(run.input.clone(), e);
+                let env = envelope::envelope(input, run.dry_run);
+                println!("{}", serde_json::to_string_pretty(&env).unwrap());
+                ExitCode::from(2)
+            }
+            // The tool could not run at all (a refusal, a contradiction, a
+            // prompt it cannot ask): no envelope, even in json mode (FORMATS
+            // §1.1 `status`), like a usage error.
+            Err(Stop::Input(e) | Stop::Refused(e)) => {
                 eprintln!("error: {e}");
                 ExitCode::from(2)
             }
@@ -324,16 +336,36 @@ fn main() -> ExitCode {
     }
 }
 
+/// Why a run stopped without a verdict. Both exit `2`; they differ in whether
+/// a json run still prints an envelope.
+#[derive(Debug, PartialEq)]
+enum Stop {
+    /// The tool could not run at all — the file-safety refusals, contradictory
+    /// options, a prompt it cannot ask, a stale `--apply` selector. No envelope.
+    Refused(String),
+    /// The input could not be processed — unreadable, not an EPUB, or the
+    /// repaired copy could not be produced or written. In json mode this is an
+    /// envelope whose input has `status: "error"`.
+    Input(String),
+}
+
+impl From<String> for Stop {
+    fn from(e: String) -> Self {
+        Stop::Refused(e)
+    }
+}
+
 /// Repair the one input, report, and return the exit code: `0` if the run's goal
-/// was met, else `1`. Anything that stops the run from producing a verdict is an
-/// `Err` — exit `2`.
-fn execute(run: &Run) -> Result<ExitCode, String> {
+/// was met, else `1`. Anything that stops the run from producing a verdict is a
+/// [`Stop`] — exit `2`.
+fn execute(run: &Run) -> Result<ExitCode, Stop> {
     let input = Path::new(&run.input);
     let json = run.format == "json";
 
-    let bytes =
-        std::fs::read(input).map_err(|e| format!("cannot read {}: {e}", input.display()))?;
-    let mut ws = Workspace::load(&bytes).map_err(|e| format!("cannot read {}: {e}", run.input))?;
+    let bytes = std::fs::read(input)
+        .map_err(|e| Stop::Input(format!("cannot read {}: {e}", input.display())))?;
+    let mut ws = Workspace::load(&bytes)
+        .map_err(|e| Stop::Input(format!("cannot read {}: {e}", run.input)))?;
 
     // Resolve the output and enforce the file-safety rules *before* any work —
     // including under --dry-run, so `epubsana --dry-run … && epubsana …` never
@@ -343,14 +375,17 @@ fn execute(run: &Run) -> Result<ExitCode, String> {
         None => default_output(input),
     };
     if same_path(input, &out) {
-        return Err(format!(
+        return Err(Stop::Refused(format!(
             "output path is the input ({}); refusing to modify the original in place \
              — choose a different -o (-f does not lift this)",
             out.display()
-        ));
+        )));
     }
     if out.exists() && !run.force {
-        return Err(format!("'{}' exists; use -f to replace it", out.display()));
+        return Err(Stop::Refused(format!(
+            "'{}' exists; use -f to replace it",
+            out.display()
+        )));
     }
 
     // --apply states every decision up front, so it contradicts anything that
@@ -364,17 +399,18 @@ fn execute(run: &Run) -> Result<ExitCode, String> {
             ("--auto-safe", run.auto_safe),
         ] {
             if on {
-                return Err(format!(
+                return Err(Stop::Refused(format!(
                     "--apply and {flag} contradict each other: --apply already \
                      answers every prompt, and only for the fixes you listed"
-                ));
+                )));
             }
         }
         if sel.is_empty() {
             return Err(
                 "--apply was given no selectors; to apply nothing, simply do not run \
                  the repair, and to apply everything use --yes"
-                    .to_string(),
+                    .to_string()
+                    .into(),
             );
         }
     }
@@ -396,7 +432,8 @@ fn execute(run: &Run) -> Result<ExitCode, String> {
         return Err(
             "stdin is not a terminal, so epubsana cannot ask about each fix; \
              re-run with --yes to approve every proposed fix, or --dry-run to see them"
-                .to_string(),
+                .to_string()
+                .into(),
         );
     }
 
@@ -414,7 +451,7 @@ fn execute(run: &Run) -> Result<ExitCode, String> {
     // In json mode the human progress line would land on stdout and break the
     // "exactly one JSON object" guarantee — so it simply isn't printed.
     if !json {
-        let before = ws.detect().map_err(|e| e.to_string())?;
+        let before = ws.detect().map_err(|e| Stop::Input(e.to_string()))?;
         println!(
             "{}: {} before repair",
             run.input,
@@ -422,8 +459,8 @@ fn execute(run: &Run) -> Result<ExitCode, String> {
         );
     }
 
-    let report =
-        repair(&mut ws, run.goal, policy, confirmer.as_mut()).map_err(|e| e.to_string())?;
+    let report = repair(&mut ws, run.goal, policy, confirmer.as_mut())
+        .map_err(|e| Stop::Input(e.to_string()))?;
 
     // A selector that matched nothing means the caller was describing a plan we
     // did not produce — a stale index from an older dry run, a typo, a fixer that
@@ -444,13 +481,13 @@ fn execute(run: &Run) -> Result<ExitCode, String> {
             .map(String::as_str)
             .collect();
         if !unmatched.is_empty() {
-            return Err(format!(
+            return Err(Stop::Refused(format!(
                 "--apply selector(s) matched no proposed fix: {}. This run planned {} \
                  fix(es); re-run with --dry-run to see the current plan. Nothing was \
                  written.",
                 unmatched.join(", "),
                 report.fixes.len()
-            ));
+            )));
         }
     }
 
@@ -461,8 +498,11 @@ fn execute(run: &Run) -> Result<ExitCode, String> {
     let written = if run.dry_run {
         (!report.fixes.is_empty()).then(|| out.display().to_string())
     } else if report.changed() {
-        std::fs::write(&out, ws.serialize().map_err(|e| e.to_string())?)
-            .map_err(|e| format!("cannot write {}: {e}", out.display()))?;
+        std::fs::write(
+            &out,
+            ws.serialize().map_err(|e| Stop::Input(e.to_string()))?,
+        )
+        .map_err(|e| Stop::Input(format!("cannot write {}: {e}", out.display())))?;
         Some(out.display().to_string())
     } else {
         None
@@ -713,6 +753,82 @@ mod tests {
             Cli::Run(run) => run,
             other => panic!("expected Run, got {other:?}"),
         }
+    }
+
+    /// A scratch directory of this test's own, so parallel tests never share a
+    /// path.
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("epubsana-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// The smallest container `Workspace::load` accepts: enough to get past the
+    /// read, so the refusals after it are what stops the run.
+    fn loadable_zip(path: &Path) {
+        use zip::write::SimpleFileOptions;
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+        zip.start_file("mimetype", SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(b"application/epub+zip").unwrap();
+        zip.finish().unwrap();
+    }
+
+    fn stop_of(argv: &[&str]) -> Stop {
+        match execute(&run_of(argv)) {
+            Err(stop) => stop,
+            Ok(code) => panic!("expected a stop, got {code:?}"),
+        }
+    }
+
+    #[test]
+    fn a_missing_input_is_an_input_error_not_a_refusal() {
+        let dir = scratch("missing");
+        let p = dir.join("absent.epub");
+        let p = p.to_str().unwrap();
+        assert!(matches!(
+            stop_of(&["-i", p, "--format", "json", "--dry-run"]),
+            Stop::Input(_)
+        ));
+    }
+
+    #[test]
+    fn an_input_that_is_not_an_epub_is_an_input_error() {
+        let dir = scratch("notzip");
+        let p = dir.join("text.epub");
+        std::fs::write(&p, b"not a zip").unwrap();
+        let p = p.to_str().unwrap();
+        assert!(matches!(
+            stop_of(&["-i", p, "--format", "json", "--dry-run"]),
+            Stop::Input(_)
+        ));
+    }
+
+    #[test]
+    fn writing_over_the_input_is_a_refusal_not_an_input_error() {
+        let dir = scratch("inplace");
+        let p = dir.join("book.epub");
+        loadable_zip(&p);
+        let p = p.to_str().unwrap();
+        assert!(matches!(
+            stop_of(&["-i", p, "-o", p, "-f", "--format", "json", "-y"]),
+            Stop::Refused(_)
+        ));
+    }
+
+    #[test]
+    fn an_existing_output_without_force_is_a_refusal() {
+        let dir = scratch("exists");
+        let p = dir.join("book.epub");
+        loadable_zip(&p);
+        let o = dir.join("out.epub");
+        std::fs::write(&o, b"").unwrap();
+        let (p, o) = (p.to_str().unwrap(), o.to_str().unwrap());
+        assert!(matches!(
+            stop_of(&["-i", p, "-o", o, "--format", "json", "-y"]),
+            Stop::Refused(_)
+        ));
     }
 
     #[test]

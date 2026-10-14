@@ -93,9 +93,8 @@ pub fn input(path: String, output: Option<String>, report: &ChangeReport) -> Inp
 
 /// An input that could not be read at all: `error`, no verdict.
 ///
-/// epubsana has exactly one input, so in practice a CLI run that cannot read it
-/// prints a stderr message and exits `2` with no envelope at all. This exists
-/// for an embedder that batches books and still wants one envelope per run.
+/// A json CLI run whose input cannot be processed prints an envelope holding
+/// just this input, and exits `2` (FORMATS §1, the `c.epub` example).
 pub fn input_error(path: String, error: String) -> Input {
     Input {
         path,
