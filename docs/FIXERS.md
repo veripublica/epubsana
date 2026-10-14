@@ -62,6 +62,7 @@ grows one carefully-argued entry at a time.
 | `RSC-005` | `htm.epub2_dom.nested_anchor` | ConfirmNeeded | An `<a>` with only an `id` wraps a real link | [Unwrap it, moving the `id` to the child](#rsc-005--an-anchor-target-wrapped-around-a-link) |
 | `RSC-005` | `navdoc.ol.empty` | ConfirmNeeded | An optional `<nav>` in the navigation document holds an `<ol>` with no `<li>` | [Delete the whole `<nav>`](#rsc-005--an-optional-nav-whose-list-is-empty) |
 | `OPF-054` | *(none)* | ConfirmNeeded | A `<dc:date>` holds no date at all (EPUB 2) | [Drop the empty element; never touch a non-empty one](#opf-054--an-empty-dcdate-epub-2) |
+| `RSC-005` / `RSC-025` | `svg.attributes.attribute_not_allowed` (a lowercased camelCase name) | AutoSafe | An SVG attribute was lowercased by an HTML tool (`viewbox`), so an XML reading system ignores it | [Restore the name's case from the HTML standard's own table](#rsc-005--rsc-025--an-svg-attribute-whose-name-lost-its-case) |
 
 **A note on structural fixers.** Fixers that must locate an element (rather than
 match a token) parse the document with `roxmltree` using `allow_dtd: true`, the
@@ -2400,3 +2401,84 @@ population from a single producer, and the fully-valid book is fully valid
 because its *other* thirteen defects were already repairable — this one happened
 to be the last brick. The durable claim is narrower: `navdoc.ol.empty` was one of
 the error-severity rules with no fixer, and it no longer is.
+
+---
+
+## RSC-005 / RSC-025 — an SVG attribute whose name lost its case
+
+> **Written spec-first on 2026-10-14.** The finding shape below is what
+> epubveri 0.26.0 reported on the shelf before any code existed.
+
+**Finding.** `svg.attributes.attribute_not_allowed`, `RSC-005` (error) on EPUB 2,
+`RSC-025` (usage) on EPUB 3, `violation_kind` none. `params` =
+`[attribute, element]`, and `element_path` names the attribute itself:
+
+```
+/h:html[1]/h:body[1]/h:div[1]/svg:svg[1]/@viewbox      params ["viewbox", "svg"]
+```
+
+The rule key is new in epubveri 0.26.0; before it these findings carried no key,
+so no fixer could dispatch on them.
+
+**The shape.** SVG attribute names are case-sensitive, and many are camelCase:
+`viewBox`, `preserveAspectRatio`. A tool that treats XHTML as HTML lowercases
+them on the way through:
+
+```html
+<svg … preserveaspectratio="xMidYMid meet" viewbox="0 0 1207 1920" …>
+```
+
+An HTML parser would read those back as `viewBox` and `preserveAspectRatio`.
+The WHATWG parsing algorithm does exactly that, through the *adjust SVG
+attributes* table. An EPUB content document is XML, though, so a reading system
+looks for `viewBox`, does not find it, and the cover image loses its scaling.
+
+**Fix** (`fix.svg_attribute_case`, AutoSafe). Rename the attribute to the name
+the *adjust SVG attributes* table gives for it (58 rows, all lowercase →
+camelCase, taken verbatim from the HTML standard). Only the bytes of the name
+change. The value, the element and every other byte stay as they are. One
+proposal per book, because the decision is the same in every file.
+
+**Why it is safe.** The table is the HTML standard's own inverse of this damage.
+It is total and one-to-one on its rows: each lowercase name has exactly one
+camelCase form, and no two rows share one. So the repair makes the XML
+document say what the same markup already means to an HTML parser. Nothing is
+inferred about the author, and nothing is deleted.
+
+**When it declines.**
+
+- **A name not in the table.** `alt` on `<image>` (3 shelf books) is the common
+  case. It is not a case problem, and its repairs (deleting it, or moving the
+  text into `<title>` or `aria-label`) are choices, not one correct answer.
+- **The element already carries the camelCase name** (`viewBox` beside
+  `viewbox`). Then there are two values, and which one is right is a choice.
+- **An attribute in a namespace.** The table applies only to unprefixed
+  names, and `x:viewbox` would otherwise share the reported path of the
+  unprefixed `viewbox` beside it. (The element is always SVG: the rule is
+  only reported on SVG elements, and the fixer finds the node by that path.)
+- **A node whose path no finding names**, or a document that does not parse.
+  The fixer renames only what the detector reported, so it cannot outlive a
+  finding upstream stops making.
+
+**The restored name may itself be disallowed on that element.** No table of
+which element takes which attribute is kept here: that would be a second
+oracle. An HTML parser would restore the case on any SVG element, but on one
+that does not take, say, `viewBox`, the rename changes the file and lowers no
+count. So the detector decides. Every planned rename is applied to a copy of
+the book first, and **a rename epubveri still reports under its restored name is
+declined** (Baris, 2026-10-14). That costs one extra validation, and only for a
+book that has a candidate. If every rename is declined, nothing is proposed.
+
+**Measured (544 books, epubveri 0.26.0, before building).** 1 book, 2 findings,
+both in the table (`viewbox`, `preserveaspectratio` on the cover's `<svg>`).
+That is a thin population. It shows that the shape exists and that the
+repair fits it. It does not show how often the shape occurs.
+
+**Measured after building (544 books, epubveri 0.26.0, 2026-10-14).** One
+proposal, on that book. Errors 15,880 → **15,878** after repair and findings at
+every severity 18,297 → 18,295: both findings cleared, nothing authored at any
+severity. The whole-shelf plan digest gains exactly that line. The only other
+change is that this book's next proposal moves from `--apply` index 3 to 4. The
+trial validation never declined anything here; the guard is pinned by tests on a
+`<rect viewbox>`, which epubveri reports again as `viewBox`.
+

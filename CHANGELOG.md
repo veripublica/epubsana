@@ -10,6 +10,19 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`fix.svg_attribute_case` (AutoSafe): an SVG attribute whose name lost its
+  case.** A tool that treats XHTML as HTML writes `viewbox` for `viewBox`
+  and `preserveaspectratio` for `preserveAspectRatio`. An XML reading system
+  ignores those names, so a cover can lose its scaling. The fixer renames each
+  one to the spelling given by the HTML standard's own *adjust SVG attributes*
+  table, and changes nothing else. It dispatches on epubveri 0.26.0's new
+  `svg.attributes.attribute_not_allowed` rule. It declines a name the table
+  does not list, an element that already has the camelCase name, and any
+  rename the validator would still report, which it checks on a copy of the
+  book before proposing.
+
 ### Changed
 
 - **Requires epubveri 0.26.0.** On EPUB 2 books the validator now checks

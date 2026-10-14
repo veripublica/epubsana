@@ -87,6 +87,7 @@ pub fn plan(report: &Report, ws: &Workspace, _goal: Goal) -> Vec<ProposedFix> {
     fixes.extend(bare_text_in_body(report, ws));
     fixes.extend(anchor_name_attrs(report, ws));
     fixes.extend(adept_meta_value(report, ws));
+    fixes.extend(svg_attribute_case(report, ws));
     fixes.extend(empty_lang_attrs(report, ws));
     fixes.extend(lang_xmllang_mismatch(report, ws));
     fixes.extend(doctype_html5(report, ws));
@@ -183,6 +184,7 @@ pub fn handled_rules() -> &'static [&'static str] {
         "opf.package.unrecognized_version",
         "opf.spine.duplicate_itemref",
         "opf.spine.itemref_idref_not_in_manifest",
+        "svg.attributes.attribute_not_allowed",
     ]
 }
 
@@ -2550,6 +2552,328 @@ fn xhtml_element_path(node: roxmltree::Node) -> Option<String> {
     }
     steps.reverse();
     Some(steps.concat())
+}
+
+/// The rule an SVG attribute its element does not take is reported under
+/// (epubveri 0.26.0): `RSC-005` on EPUB 2, `RSC-025` (usage) on EPUB 3.
+const SVG_ATTRIBUTE_RULE: &str = "svg.attributes.attribute_not_allowed";
+
+/// The HTML standard's *adjust SVG attributes* table, verbatim (WHATWG HTML,
+/// "Parsing HTML documents", 58 rows; fetched 2026-10-14): the camelCase SVG
+/// attributes an HTML parser restores from their lowercased form. It is the
+/// inverse of exactly the damage this fixer repairs, total and one-to-one on
+/// its rows, so a name in the first column has one correct spelling.
+const SVG_ATTRIBUTE_CASE: [(&str, &str); 58] = [
+    ("attributename", "attributeName"),
+    ("attributetype", "attributeType"),
+    ("basefrequency", "baseFrequency"),
+    ("baseprofile", "baseProfile"),
+    ("calcmode", "calcMode"),
+    ("clippathunits", "clipPathUnits"),
+    ("diffuseconstant", "diffuseConstant"),
+    ("edgemode", "edgeMode"),
+    ("filterunits", "filterUnits"),
+    ("glyphref", "glyphRef"),
+    ("gradienttransform", "gradientTransform"),
+    ("gradientunits", "gradientUnits"),
+    ("kernelmatrix", "kernelMatrix"),
+    ("kernelunitlength", "kernelUnitLength"),
+    ("keypoints", "keyPoints"),
+    ("keysplines", "keySplines"),
+    ("keytimes", "keyTimes"),
+    ("lengthadjust", "lengthAdjust"),
+    ("limitingconeangle", "limitingConeAngle"),
+    ("markerheight", "markerHeight"),
+    ("markerunits", "markerUnits"),
+    ("markerwidth", "markerWidth"),
+    ("maskcontentunits", "maskContentUnits"),
+    ("maskunits", "maskUnits"),
+    ("numoctaves", "numOctaves"),
+    ("pathlength", "pathLength"),
+    ("patterncontentunits", "patternContentUnits"),
+    ("patterntransform", "patternTransform"),
+    ("patternunits", "patternUnits"),
+    ("pointsatx", "pointsAtX"),
+    ("pointsaty", "pointsAtY"),
+    ("pointsatz", "pointsAtZ"),
+    ("preservealpha", "preserveAlpha"),
+    ("preserveaspectratio", "preserveAspectRatio"),
+    ("primitiveunits", "primitiveUnits"),
+    ("refx", "refX"),
+    ("refy", "refY"),
+    ("repeatcount", "repeatCount"),
+    ("repeatdur", "repeatDur"),
+    ("requiredextensions", "requiredExtensions"),
+    ("requiredfeatures", "requiredFeatures"),
+    ("specularconstant", "specularConstant"),
+    ("specularexponent", "specularExponent"),
+    ("spreadmethod", "spreadMethod"),
+    ("startoffset", "startOffset"),
+    ("stddeviation", "stdDeviation"),
+    ("stitchtiles", "stitchTiles"),
+    ("surfacescale", "surfaceScale"),
+    ("systemlanguage", "systemLanguage"),
+    ("tablevalues", "tableValues"),
+    ("targetx", "targetX"),
+    ("targety", "targetY"),
+    ("textlength", "textLength"),
+    ("viewbox", "viewBox"),
+    ("viewtarget", "viewTarget"),
+    ("xchannelselector", "xChannelSelector"),
+    ("ychannelselector", "yChannelSelector"),
+    ("zoomandpan", "zoomAndPan"),
+];
+
+/// `RSC-005` / `RSC-025` / `svg.attributes.attribute_not_allowed`, where the
+/// attribute is a camelCase SVG name an HTML tool lowercased: `viewbox` for
+/// `viewBox`, `preserveaspectratio` for `preserveAspectRatio`. An XML reading
+/// system ignores the lowercased name, so a cover loses its scaling.
+///
+/// The repair **renames the attribute to the [`SVG_ATTRIBUTE_CASE`] spelling**,
+/// the one an HTML parser would give it. Only the name's bytes change.
+///
+/// **Acts only on what epubveri reported.** `element_path` names the attribute
+/// (`/h:html[1]/h:body[1]/h:div[1]/svg:svg[1]/@viewbox`), and a candidate is
+/// renamed only when its own path is in that set.
+///
+/// **And only where epubveri accepts the result.** No table of which element
+/// takes which attribute is kept here: that would be a second oracle. Instead
+/// every planned rename is tried on a copy of the book, and a rename the
+/// detector still reports under its restored name is declined, since it would
+/// change the file and fix nothing. That costs one extra validation, and only
+/// for a book that has a candidate.
+///
+/// **Declines:** a name not in the table (`alt` on `<image>` is the common
+/// one, and it has no single repair), an element that already carries the
+/// camelCase name (two values), an attribute in a namespace (the table is for
+/// unprefixed names; `x:viewbox` would otherwise share the reported path), and
+/// a document that does not parse.
+fn svg_attribute_case(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    // document -> the reported attribute paths (`…/@viewbox`)
+    let mut by_doc: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut ids: BTreeSet<&str> = BTreeSet::new();
+    for m in &report.messages {
+        if m.rule != Some(SVG_ATTRIBUTE_RULE) {
+            continue;
+        }
+        let (Some(doc), Some(np)) = (m.location.as_deref(), m.element_path.as_ref()) else {
+            continue;
+        };
+        ids.insert(m.id);
+        by_doc
+            .entry(doc.to_string())
+            .or_default()
+            .insert(np.path.clone());
+    }
+    // One book is one EPUB version, so every finding here has the same id.
+    let Some(&id) = ids.first() else {
+        return Vec::new();
+    };
+
+    let mut planned: BTreeMap<String, Vec<SvgRename>> = BTreeMap::new();
+    for (doc, reported) in &by_doc {
+        let Some(text) = ws.get_text(doc) else {
+            continue;
+        };
+        let Some(renames) = plan_svg_case_renames(&text, reported) else {
+            continue; // won't parse: decline
+        };
+        if !renames.is_empty() {
+            planned.insert(doc.clone(), renames);
+        }
+    }
+    if planned.is_empty() {
+        return Vec::new();
+    }
+
+    // Ask the detector about the result before proposing it.
+    let Some(still_reported) = svg_renames_still_reported(ws, &planned) else {
+        return Vec::new();
+    };
+    let mut accepted: Vec<(String, Vec<SvgRename>)> = Vec::new();
+    for (doc, renames) in planned {
+        let kept: Vec<SvgRename> = renames
+            .into_iter()
+            .filter(|r| !still_reported.contains(&(doc.clone(), r.restored_path())))
+            .collect();
+        if !kept.is_empty() {
+            accepted.push((doc, kept));
+        }
+    }
+    if accepted.is_empty() {
+        return Vec::new();
+    }
+
+    let n: usize = accepted.iter().map(|(_, k)| k.len()).sum();
+    let files = accepted.len();
+    let preview: Vec<Change> = accepted
+        .iter()
+        .take(6)
+        .map(|(doc, kept)| {
+            let distinct: BTreeSet<String> = kept
+                .iter()
+                .map(|r| format!("{}= to {}=", r.lower, r.camel))
+                .collect();
+            Change {
+                path: doc.clone(),
+                note: format!(
+                    "rename {}",
+                    distinct.into_iter().collect::<Vec<_>>().join(", ")
+                ),
+            }
+        })
+        .collect();
+    let docs_for_apply: Vec<(String, BTreeSet<String>)> = accepted
+        .into_iter()
+        .map(|(d, k)| (d, k.into_iter().map(|r| r.path).collect()))
+        .collect();
+
+    vec![ProposedFix {
+        fix_id: "fix.svg_attribute_case",
+        addresses_id: id.to_string(),
+        addresses_rule: Some(SVG_ATTRIBUTE_RULE),
+        addresses_severity: addressed_severity(report, id, Some(SVG_ATTRIBUTE_RULE)),
+        tier: Tier::AutoSafe,
+        title: format!(
+            "Restore the case of {n} SVG attribute name{} in {files} file{}",
+            if n == 1 { "" } else { "s" },
+            if files == 1 { "" } else { "s" }
+        ),
+        rationale: "SVG attribute names are case-sensitive, and a tool that treated this XHTML \
+                    as HTML lowercased some of them (`viewbox` for `viewBox`). An XML reading \
+                    system ignores the lowercased name. Each is renamed to the spelling the HTML \
+                    standard's own table gives it, which is what an HTML parser would read. Only \
+                    the name changes; its value and everything else stay as they are. A rename \
+                    the validator would still reject is left out."
+            .to_string(),
+        preview,
+        apply_fn: Box::new(move |ws: &mut Workspace| {
+            for (doc, paths) in &docs_for_apply {
+                if let Some(text) = ws.get_text(doc)
+                    && let Some(renames) = plan_svg_case_renames(&text, paths)
+                {
+                    ws.set_text(doc, apply_edits(&text, svg_rename_edits(renames)));
+                }
+            }
+        }),
+    }]
+}
+
+/// One planned rename: the reported attribute path, the name's byte range in
+/// the original text, and the two spellings.
+struct SvgRename {
+    path: String,
+    range: Range<usize>,
+    lower: &'static str,
+    camel: &'static str,
+}
+
+impl SvgRename {
+    /// The path epubveri would report the attribute under once renamed.
+    fn restored_path(&self) -> String {
+        let element = self.path.strip_suffix(self.lower).unwrap_or(&self.path);
+        format!("{element}{}", self.camel)
+    }
+}
+
+fn svg_rename_edits(renames: Vec<SvgRename>) -> Vec<MetaEdit> {
+    renames
+        .into_iter()
+        .map(|r| MetaEdit {
+            range: r.range,
+            replacement: r.camel.to_string(),
+        })
+        .collect()
+}
+
+/// The renames for every reported attribute path in `reported` that names an
+/// unprefixed table attribute on an SVG element without its camelCase twin.
+/// `None` (decline) if the document doesn't parse.
+fn plan_svg_case_renames(text: &str, reported: &BTreeSet<String>) -> Option<Vec<SvgRename>> {
+    let prepared = prepare_content_doc(text);
+    let doc = prepared.parse()?;
+    let mut renames = Vec::new();
+    for node in doc.descendants().filter(|n| n.is_element()) {
+        // Only an SVG element's path can be one this rule reported.
+        let Some(element) = svg_element_path(node) else {
+            continue;
+        };
+        for attr in node.attributes().filter(|a| a.namespace().is_none()) {
+            let Some((lower, camel)) = SVG_ATTRIBUTE_CASE
+                .iter()
+                .find(|(l, _)| *l == attr.name())
+                .copied()
+            else {
+                continue;
+            };
+            let path = format!("{element}/@{lower}");
+            if !reported.contains(&path) || node.attr_no_ns(camel).is_some() {
+                continue;
+            }
+            // An attribute's range starts at its name; the exact-output test
+            // pins that, so a roxmltree change would fail a test, not a book.
+            let r = prepared.unshift(attr.range());
+            renames.push(SvgRename {
+                path,
+                range: r.start..r.start + lower.len(),
+                lower,
+                camel,
+            });
+        }
+    }
+    Some(renames)
+}
+
+/// The path epubveri writes into `element_path` for an element whose ancestors
+/// are XHTML or SVG: `/h:html[1]/h:body[1]/svg:svg[1]`, 1-based among
+/// same-named siblings. `None` for any other namespace, which then matches no
+/// reported path and declines.
+fn svg_element_path(node: roxmltree::Node) -> Option<String> {
+    const XHTML: &str = "http://www.w3.org/1999/xhtml";
+    const SVG: &str = "http://www.w3.org/2000/svg";
+    let mut steps = Vec::new();
+    for n in node.ancestors().filter(|n| n.is_element()) {
+        let prefix = match n.tag_name().namespace() {
+            Some(XHTML) => "h",
+            Some(SVG) => "svg",
+            _ => return None,
+        };
+        let index = 1 + n
+            .prev_siblings()
+            .skip(1)
+            .filter(|s| s.is_element() && s.tag_name() == n.tag_name())
+            .count();
+        steps.push(format!("/{prefix}:{}[{index}]", n.tag_name().name()));
+    }
+    steps.reverse();
+    Some(steps.concat())
+}
+
+/// Apply every planned rename to a copy of the book and return the
+/// `(document, restored attribute path)` pairs the detector still reports.
+/// `None` if the copy cannot be built or read, and the caller then declines.
+fn svg_renames_still_reported(
+    ws: &Workspace,
+    planned: &BTreeMap<String, Vec<SvgRename>>,
+) -> Option<BTreeSet<(String, String)>> {
+    let mut trial = Workspace::load(&ws.serialize().ok()?).ok()?;
+    for doc in planned.keys() {
+        let text = trial.get_text(doc)?;
+        let renames = plan_svg_case_renames(
+            &text,
+            &planned[doc].iter().map(|r| r.path.clone()).collect(),
+        )?;
+        trial.set_text(doc, apply_edits(&text, svg_rename_edits(renames)));
+    }
+    let report = trial.detect().ok()?;
+    Some(
+        report
+            .messages
+            .iter()
+            .filter(|m| m.rule == Some(SVG_ATTRIBUTE_RULE))
+            .filter_map(|m| Some((m.location.clone()?, m.element_path.as_ref()?.path.clone())))
+            .collect(),
+    )
 }
 
 /// Is this finding "an empty `lang` / `xml:lang`"?
@@ -8917,6 +9241,165 @@ mod tests {
             let out = ws.get_text("s.css").unwrap();
             assert!(!out.contains("@font-face"), "{src}: {out}");
             assert!(out.contains("p { margin: 0 }"), "{src}: {out}");
+        }
+    }
+
+    // ---- fix.svg_attribute_case ------------------------------------
+
+    /// An EPUB 2 book whose one chapter has `svg` inside its `<body>`. Built
+    /// for the real detector: the fixer asks it about the result, so a test
+    /// with a hand-made report would never reach that guard.
+    fn svg_book(svg: &str) -> Workspace {
+        let chapter = format!(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:xlink="http://www.w3.org/1999/xlink"><head><title>t</title></head><body><div>{svg}</div></body></html>"#
+        );
+        container(&[
+            (
+                "META-INF/container.xml",
+                r#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#,
+            ),
+            (
+                "content.opf",
+                r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="id">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="id">x</dc:identifier><dc:title>t</dc:title><dc:language>en</dc:language></metadata>
+  <manifest><item href="c.xhtml" id="c" media-type="application/xhtml+xml"/></manifest>
+  <spine><itemref idref="c"/></spine>
+</package>"#,
+            ),
+            ("c.xhtml", &chapter),
+        ])
+    }
+
+    /// The `(attribute path)` of every finding under the SVG attribute rule.
+    fn svg_attribute_findings(ws: &Workspace) -> Vec<String> {
+        ws.detect()
+            .unwrap()
+            .messages
+            .iter()
+            .filter(|m| m.rule == Some(SVG_ATTRIBUTE_RULE))
+            .filter_map(|m| Some(m.element_path.as_ref()?.path.clone()))
+            .collect()
+    }
+
+    /// The shelf's shape: `viewbox` and `preserveaspectratio` on a cover's
+    /// `<svg>`. Both renamed, values kept, and the detector has nothing left
+    /// to say under the rule.
+    #[test]
+    fn a_lowercased_viewbox_gets_its_case_back() {
+        let mut ws = svg_book(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" height="100%" preserveaspectratio="xMidYMid meet" viewbox="0 0 10 20" width="100%"><rect width="1" height="1"/></svg>"#,
+        );
+        assert_eq!(
+            svg_attribute_findings(&ws).len(),
+            2,
+            "the fixture must carry both findings, or this test proves nothing"
+        );
+        let fixes = svg_attribute_case(&ws.detect().unwrap(), &ws);
+        assert_eq!(fixes.len(), 1);
+        assert_eq!(fixes[0].tier, Tier::AutoSafe);
+        assert_eq!(fixes[0].addresses_id, "RSC-005");
+        fixes.into_iter().next().unwrap().apply(&mut ws);
+        let out = ws.get_text("c.xhtml").unwrap();
+        assert!(
+            out.contains(r#"preserveAspectRatio="xMidYMid meet" viewBox="0 0 10 20""#),
+            "got: {out}"
+        );
+        assert!(svg_attribute_findings(&ws).is_empty());
+    }
+
+    /// The restored name is itself not allowed on `<rect>`: the rename would
+    /// change the file and fix nothing, so the detector's answer on a trial
+    /// copy declines it. The `<svg>` in the same document is still renamed.
+    #[test]
+    fn a_rename_the_detector_would_still_reject_is_declined() {
+        let mut ws = svg_book(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" viewbox="0 0 10 20"><rect viewbox="0 0 1 1" width="1" height="1"/></svg>"#,
+        );
+        let before = svg_attribute_findings(&ws);
+        assert!(
+            before.iter().any(|p| p.ends_with("svg:rect[1]/@viewbox")),
+            "the fixture must report the <rect>'s attribute: {before:?}"
+        );
+        let fixes = svg_attribute_case(&ws.detect().unwrap(), &ws);
+        assert_eq!(fixes.len(), 1);
+        fixes.into_iter().next().unwrap().apply(&mut ws);
+        let out = ws.get_text("c.xhtml").unwrap();
+        assert!(
+            out.contains(r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="#),
+            "got: {out}"
+        );
+        assert!(out.contains(r#"<rect viewbox="0 0 1 1""#), "got: {out}");
+    }
+
+    /// When the trial declines every rename, nothing is proposed at all.
+    #[test]
+    fn nothing_is_proposed_when_every_rename_would_still_be_rejected() {
+        let ws = svg_book(
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><rect viewbox="0 0 1 1" width="1" height="1"/></svg>"#,
+        );
+        assert_eq!(svg_attribute_findings(&ws).len(), 1);
+        assert!(svg_attribute_case(&ws.detect().unwrap(), &ws).is_empty());
+    }
+
+    /// Two values for one attribute: which one is right is a choice.
+    #[test]
+    fn an_svg_that_already_has_the_camel_case_name_is_declined() {
+        let ws = svg_book(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1" viewbox="0 0 10 20"/>"#,
+        );
+        assert_eq!(svg_attribute_findings(&ws).len(), 1);
+        assert!(svg_attribute_case(&ws.detect().unwrap(), &ws).is_empty());
+    }
+
+    /// A prefixed attribute with the same local name is someone else's: only
+    /// the unprefixed one the detector reported is renamed.
+    #[test]
+    fn a_namespaced_attribute_with_a_table_name_is_left_alone() {
+        let mut ws = svg_book(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:x="urn:x" x:viewbox="keep" viewbox="0 0 10 20"/>"#,
+        );
+        let fixes = svg_attribute_case(&ws.detect().unwrap(), &ws);
+        assert_eq!(fixes.len(), 1);
+        fixes.into_iter().next().unwrap().apply(&mut ws);
+        let out = ws.get_text("c.xhtml").unwrap();
+        assert!(
+            out.contains(r#"x:viewbox="keep" viewBox="0 0 10 20""#),
+            "got: {out}"
+        );
+    }
+
+    /// `alt` on `<image>` is not a case problem and has no single repair.
+    #[test]
+    fn an_attribute_outside_the_table_is_declined() {
+        let ws = svg_book(
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><image alt="cover" width="1" height="1" xlink:href="c.jpg"/></svg>"#,
+        );
+        assert_eq!(svg_attribute_findings(&ws).len(), 1);
+        assert!(svg_attribute_case(&ws.detect().unwrap(), &ws).is_empty());
+    }
+
+    /// Nothing reported, nothing touched: the attribute may be there and still
+    /// not be ours to change.
+    #[test]
+    fn an_unreported_lowercased_attribute_is_left_alone() {
+        let ws = svg_book(r#"<svg xmlns="http://www.w3.org/2000/svg" viewbox="0 0 10 20"/>"#);
+        assert!(svg_attribute_case(&Report::default(), &ws).is_empty());
+    }
+
+    /// The table is the standard's: 58 rows, every first column the lowercase
+    /// of its second, and no two rows sharing either spelling.
+    #[test]
+    fn the_svg_case_table_is_one_to_one_and_only_restores_case() {
+        let lowers: BTreeSet<&str> = SVG_ATTRIBUTE_CASE.iter().map(|(l, _)| *l).collect();
+        let camels: BTreeSet<&str> = SVG_ATTRIBUTE_CASE.iter().map(|(_, c)| *c).collect();
+        assert_eq!(lowers.len(), 58);
+        assert_eq!(camels.len(), 58);
+        for (l, c) in SVG_ATTRIBUTE_CASE {
+            assert_eq!(c.to_ascii_lowercase(), l);
+            assert_ne!(c, l);
         }
     }
 

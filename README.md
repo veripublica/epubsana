@@ -17,7 +17,7 @@ apply → check → report) is solid. The check re-validates the book after
 applying, and a fix that made any finding more frequent is undone and reported
 as reverted — unless the fix let the validator see part of the book it could not
 see before, in which case what appears was always there and the run says so.
-Forty-one fixers so far:
+Forty-two fixers so far:
 
 - **`RSC-016`** — undeclared HTML entities (`&nbsp;`, `&mdash;`, …) → the exact
   character each denotes.
@@ -102,6 +102,10 @@ Forty-one fixers so far:
   value="…">` that Adobe's DRM tooling writes into every chapter → `value`
   renamed to `content`, the attribute a named `<meta>` carries its value in. The
   identifier is kept exactly as it was. Any other `<meta>` is left alone.
+- **`RSC-005` / `RSC-025` / an SVG attribute that lost its case** — `viewbox`,
+  `preserveaspectratio` and the rest of the HTML standard's camelCase table →
+  `viewBox`, `preserveAspectRatio`, the names an XML reading system looks for.
+  Only the name changes. A rename the validator would still reject is left out.
 - **`RSC-005` / empty `lang`** — an empty `lang=""` / `xml:lang=""`, which EPUB 2
   doesn't allow → deleted, so the element inherits its parent's language. A
   malformed tag is never guessed at.
