@@ -19,8 +19,21 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
   id that did not exist, and NCX ids are labels rather than link targets, so
   no reference changes. It declines a finding that names another missing
   attribute besides `id`.
+- **`fix.missing_title` (ConfirmNeeded): a `<head>` with no `<title>`.** Word
+  processors and calibre's split files often leave the `<title>` out
+  altogether. The fixer adds one as the first child of `<head>`, with text from
+  the same sources as `fix.empty_title`, in the same order. It answers EPUB 2's
+  grammar error and EPUB 3's `RSC-017` warning alike.
 
 ### Changed
+
+- **`fix.empty_title` falls back to the book's title.** When neither the table
+  of contents nor a heading names a document, the empty `<title>` is now filled
+  with the book's own title (its first non-empty `dc:title`). Before, it was
+  declined. The table-of-contents label and the heading still come first. A
+  `<title>` is document metadata, not text a reader sees in the chapter, and the
+  proposal still shows the text before it goes in. Thanks to JSWolf on
+  MobileRead for the argument.
 
 - **Requires epubveri 0.27.0.** The validator now checks the encoding of
   every XML file in the book, not only the package document, as epubcheck

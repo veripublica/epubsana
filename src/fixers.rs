@@ -85,6 +85,7 @@ pub fn plan(report: &Report, ws: &Workspace, _goal: Goal) -> Vec<ProposedFix> {
     fixes.extend(ncx_content_src_spaces(report, ws));
     fixes.extend(content_properties(report, ws));
     fixes.extend(empty_titles(report, ws));
+    fixes.extend(missing_titles(report, ws));
     fixes.extend(bare_text_in_body(report, ws));
     fixes.extend(anchor_name_attrs(report, ws));
     fixes.extend(adept_meta_value(report, ws));
@@ -167,11 +168,12 @@ pub fn handled_rules() -> &'static [&'static str] {
         "opf.content_document.dangling_fragment",
         "opf.content_document.duplicate_id",
         "opf.content_document.empty_title",
+        "opf.content_document.head_missing_title",
         "opf.content_document.invalid_content_type_meta",
         "opf.content_document.lang_xmllang_mismatch",
         "opf.content_document.property_used_undeclared",
         "opf.content_document.reference_missing_resource",
-        // Two shapes inside it: stray text in <body>, and an empty lang.
+        // Several shapes inside it, each matched on its kind and params.
         "opf.content_document.schema_violation",
         "opf.guide.duplicate_reference",
         "opf.guide.reference_fragment_not_defined",
@@ -7362,13 +7364,12 @@ fn compute_properties_edit(
 /// defect in the corpus** — whole libraries ship generated documents whose title
 /// is `<title></title>`.
 ///
-/// The text is never invented: it comes from the book itself, in this order —
-/// the **TOC label** the book already gives this document (its NCX `navLabel`
-/// or nav `<a>` text), else the document's **own first heading**. When neither
-/// exists, the fixer **declines** and the finding stays reported. We do not fall
-/// back to the book's `dc:title`: stamping the book's name onto every chapter is
-/// a guess about intent, not a repair. `ConfirmNeeded` — it adds visible
-/// metadata, so the user sees the text before it goes in.
+/// The text is never invented: it comes from the book itself, in the order
+/// [`title_source`] gives — the **TOC label** for this document, else its **own
+/// first heading**, else the **book's title** (`dc:title`, added 2026-10-14 on
+/// JSWolf's argument; `docs/FIXERS.md` has the reasoning). With none, the fixer
+/// **declines** and the finding stays reported. `ConfirmNeeded` — it adds
+/// visible metadata, so the user sees the text before it goes in.
 fn empty_titles(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
     let mut docs: BTreeSet<String> = BTreeSet::new();
     for m in &report.messages {
@@ -7383,20 +7384,15 @@ fn empty_titles(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
     }
 
     let labels = toc_labels(ws);
+    let book = book_title(ws);
 
     let mut fixes = Vec::new();
     for doc in docs {
         let Some(text) = ws.get_text(&doc) else {
             continue;
         };
-        // The book's own name for this document first; its own first heading
-        // second; otherwise decline.
-        let (title, source) = match labels.get(&doc) {
-            Some(label) => (label.clone(), "the book's table of contents"),
-            None => match first_heading_text(&text) {
-                Some(h) => (h, "the document's first heading"),
-                None => continue, // nothing in the book names it — never invent
-            },
+        let Some((title, source)) = title_source(&labels, book.as_deref(), &doc, &text) else {
+            continue; // the book has no words for it — never invent
         };
         if plan_title_fill(&text, &title).is_none() {
             continue; // no empty <title> found (or it won't parse) — decline
@@ -7420,12 +7416,8 @@ fn empty_titles(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
             ),
             tier: Tier::ConfirmNeeded,
             title: format!("Fill the empty <title> in {doc} with \"{title}\""),
-            rationale: "An XHTML `<title>` must not be empty. The text is taken from the book \
-                 itself — the label its table of contents already gives this document, or, \
-                 failing that, the document's own first heading — so nothing is invented. When \
-                 the book names the document nowhere, the fix is declined and the finding stays \
-                 reported."
-                .to_string(),
+            rationale: TITLE_RATIONALE_SOURCES
+                .replace("{what}", "An XHTML `<title>` must not be empty."),
             preview,
             apply_fn: Box::new(move |ws: &mut Workspace| {
                 if let Some(text) = ws.get_text(&doc_for_apply)
@@ -7437,6 +7429,176 @@ fn empty_titles(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
         });
     }
     fixes
+}
+
+/// Where a title's text comes from, shared by [`empty_titles`] and
+/// [`missing_titles`]. `{what}` is the sentence naming the defect.
+const TITLE_RATIONALE_SOURCES: &str = "{what} The text is taken from the book itself: \
+     the label its table of contents gives this document, or failing that the \
+     document's own first heading, or failing both the book's title. Nothing is \
+     invented. The title is document metadata, not text a reader sees in the \
+     chapter. When the book has none of the three, the fix is declined and the \
+     finding stays reported.";
+
+/// The text for a document's title, and where it came from: the book's TOC label
+/// for `doc`, else the document's first heading, else the book's own title.
+/// `None` when the book has none of the three — the caller declines.
+fn title_source(
+    labels: &BTreeMap<String, String>,
+    book: Option<&str>,
+    doc: &str,
+    text: &str,
+) -> Option<(String, &'static str)> {
+    if let Some(label) = labels.get(doc) {
+        return Some((label.clone(), "the book's table of contents"));
+    }
+    if let Some(h) = first_heading_text(text) {
+        return Some((h, "the document's first heading"));
+    }
+    book.map(|t| (t.to_string(), "the book's title"))
+}
+
+/// The book's title: the first non-empty `<dc:title>` in the package metadata
+/// (EPUB 3.3: the first `dc:title` in document order is the main title),
+/// whitespace collapsed. `None` when there is none, or the OPF can't be read.
+fn book_title(ws: &Workspace) -> Option<String> {
+    const DC: &str = "http://purl.org/dc/elements/1.1/";
+    let opf = ws.get_text(&opf_path(ws)?)?;
+    let doc = parse_xml(&opf)?;
+    doc.descendants()
+        .filter(|n| n.is_element() && n.tag_name().namespace() == Some(DC))
+        .filter(|n| n.tag_name().name() == "title")
+        .map(|n| {
+            collapse_ws(
+                &n.descendants()
+                    .filter(|t| t.is_text())
+                    .filter_map(|t| t.text())
+                    .collect::<String>(),
+            )
+        })
+        .find(|t| !t.is_empty())
+}
+
+/// An XHTML `<head>` with no `<title>` at all. EPUB 2's grammar reports it as
+/// `RSC-005` / `opf.content_document.schema_violation`, `incomplete_content`,
+/// `params` = `["head", "title"]`; EPUB 3 as the warning `RSC-017` /
+/// `opf.content_document.head_missing_title`.
+/// Insert one right after `<head>`'s start tag, its text from [`title_source`]
+/// (the same three sources, in the same order, as [`empty_titles`]).
+/// `ConfirmNeeded`, one proposal per document, as for an empty title.
+///
+/// **Declines:** a finding other than exactly `["head", "title"]`, a `<head>`
+/// that already has a `<title>`, a self-closing `<head/>`, a document that
+/// doesn't parse, and a book with no source.
+fn missing_titles(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    // document -> the (id, rule) of the finding it carries
+    let mut docs: BTreeMap<String, (String, &'static str)> = BTreeMap::new();
+    for m in &report.messages {
+        let rule = if is_schema_violation(
+            m,
+            "opf.content_document.schema_violation",
+            ViolationKind::IncompleteContent,
+        ) && m.params == ["head", "title"]
+        {
+            "opf.content_document.schema_violation"
+        } else if m.rule == Some("opf.content_document.head_missing_title") {
+            "opf.content_document.head_missing_title"
+        } else {
+            continue;
+        };
+        if let Some(loc) = m.location.as_deref() {
+            docs.entry(loc.to_string())
+                .or_insert_with(|| (m.id.to_string(), rule));
+        }
+    }
+    if docs.is_empty() {
+        return Vec::new();
+    }
+
+    let labels = toc_labels(ws);
+    let book = book_title(ws);
+
+    let mut fixes = Vec::new();
+    for (doc, (id, rule)) in docs {
+        let Some(text) = ws.get_text(&doc) else {
+            continue;
+        };
+        let Some((title, source)) = title_source(&labels, book.as_deref(), &doc, &text) else {
+            continue; // the book has no words for it — never invent
+        };
+        if plan_title_insert(&text, &title).is_none() {
+            continue;
+        }
+        let doc_for_apply = doc.clone();
+        let title_for_apply = title.clone();
+        fixes.push(ProposedFix {
+            fix_id: "fix.missing_title",
+            addresses_severity: addressed_severity(report, &id, Some(rule)),
+            addresses_id: id,
+            addresses_rule: Some(rule),
+            tier: Tier::ConfirmNeeded,
+            title: format!("Add a <title> to {doc}: \"{title}\""),
+            rationale: TITLE_RATIONALE_SOURCES.replace(
+                "{what}",
+                "An XHTML `<head>` must contain a `<title>`, and this one has none.",
+            ),
+            preview: vec![Change {
+                path: doc.clone(),
+                note: format!("add <title>{title}</title> (from {source})"),
+            }],
+            apply_fn: Box::new(move |ws: &mut Workspace| {
+                if let Some(text) = ws.get_text(&doc_for_apply)
+                    && let Some(edit) = plan_title_insert(&text, &title_for_apply)
+                {
+                    ws.set_text(&doc_for_apply, apply_edits(&text, vec![edit]));
+                }
+            }),
+        });
+    }
+    fixes
+}
+
+/// The insertion of `<title>…</title>` right after the start tag of the
+/// document's `<head>`. `None` (decline) when it won't parse, there is no
+/// `<head>`, it already holds a `<title>`, or it is self-closing. (Both findings
+/// are only ever made on an XHTML `<head>`, so the namespace is not re-checked.)
+fn plan_title_insert(text: &str, title: &str) -> Option<MetaEdit> {
+    let prepared = prepare_content_doc(text);
+    let doc = prepared.parse()?;
+    let head = doc
+        .root_element()
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "head")?;
+    if head
+        .children()
+        .any(|n| n.is_element() && n.tag_name().name() == "title")
+    {
+        return None; // stale: it has one
+    }
+    let range = prepared.unshift(head.range());
+    let at = range.start + start_tag_len(text.get(range.clone())?)?;
+    if text.get(at - 2..at) == Some("/>") {
+        return None; // `<head/>`: nothing to insert into without rewriting it
+    }
+    Some(MetaEdit {
+        range: at..at,
+        replacement: format!("<title>{}</title>", escape_xml_text(title)),
+    })
+}
+
+/// The byte length of the start tag `element` opens with, through its `>`,
+/// skipping any `>` inside a quoted attribute value.
+fn start_tag_len(element: &str) -> Option<usize> {
+    let mut quote = None;
+    for (i, c) in element.char_indices() {
+        match (quote, c) {
+            (None, '"' | '\'') => quote = Some(c),
+            (Some(q), _) if c == q => quote = None,
+            (None, '>') => return Some(i + 1),
+            _ => {}
+        }
+    }
+    None
 }
 
 /// The edit that replaces an empty `<title>` element with one carrying `title`.
@@ -9712,6 +9874,308 @@ mod tests {
             assert_eq!(c.to_ascii_lowercase(), l);
             assert_ne!(c, l);
         }
+    }
+
+    // ---- fix.empty_title / fix.missing_title: the three sources ----------
+
+    /// An EPUB 2 book whose package title is `dc_title` (no `<dc:title>` when
+    /// `None`), whose one chapter has `<head>{head}</head>` and `body`, and whose
+    /// NCX names the chapter `label` (no entry for it when `None`).
+    fn title_book(
+        dc_title: Option<&str>,
+        head: &str,
+        body: &str,
+        label: Option<&str>,
+    ) -> Workspace {
+        title_book_v("2.0", dc_title, head, body, label)
+    }
+
+    /// [`title_book`] with the package `version` given: the detector reports an
+    /// empty `<title>` on EPUB 3 only.
+    fn title_book_v(
+        version: &str,
+        dc_title: Option<&str>,
+        head: &str,
+        body: &str,
+        label: Option<&str>,
+    ) -> Workspace {
+        let dc = dc_title.map_or(String::new(), |t| format!("<dc:title>{t}</dc:title>"));
+        let opf = format!(
+            r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="{version}" unique-identifier="id">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="id">x</dc:identifier>{dc}<dc:language>en</dc:language></metadata>
+  <manifest><item href="toc.ncx" id="ncx" media-type="application/x-dtbncx+xml"/><item href="c.xhtml" id="c" media-type="application/xhtml+xml"/><item href="d.xhtml" id="d" media-type="application/xhtml+xml"/></manifest>
+  <spine toc="ncx"><itemref idref="c"/><itemref idref="d"/></spine>
+</package>"#
+        );
+        let (src, text) = match label {
+            Some(l) => ("c.xhtml", l),
+            None => ("d.xhtml", "Other"),
+        };
+        let ncx = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1"><head><meta name="dtb:uid" content="x"/></head><docTitle><text>t</text></docTitle>
+<navMap><navPoint id="p1" playOrder="1"><navLabel><text>{text}</text></navLabel><content src="{src}"/></navPoint></navMap></ncx>"#
+        );
+        let chapter = format!(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml"><head>{head}</head><body>{body}</body></html>"#
+        );
+        let other = r#"<?xml version="1.0" encoding="utf-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Other</title></head><body><p>y</p></body></html>"#;
+        container(&[
+            (
+                "META-INF/container.xml",
+                r#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#,
+            ),
+            ("content.opf", &opf),
+            ("toc.ncx", &ncx),
+            ("c.xhtml", &chapter),
+            ("d.xhtml", other),
+        ])
+    }
+
+    /// Apply the one proposal `fixer` makes and return the chapter's text.
+    fn titled(
+        mut ws: Workspace,
+        fixer: fn(&Report, &Workspace) -> Vec<ProposedFix>,
+    ) -> (String, String) {
+        let fixes = fixer(&ws.detect().unwrap(), &ws);
+        assert_eq!(fixes.len(), 1, "expected exactly one proposal");
+        assert_eq!(fixes[0].tier, Tier::ConfirmNeeded);
+        let note = fixes[0].preview[0].note.clone();
+        fixes.into_iter().next().unwrap().apply(&mut ws);
+        (ws.get_text("c.xhtml").unwrap(), note)
+    }
+
+    #[test]
+    fn an_empty_title_with_no_toc_entry_or_heading_takes_the_books_title() {
+        let ws = title_book_v(
+            "3.0",
+            Some("The  Book"),
+            "<title></title>",
+            "<p>x</p>",
+            None,
+        );
+        let (out, note) = titled(ws, empty_titles);
+        assert!(out.contains("<title>The Book</title>"), "got: {out}");
+        assert!(note.contains("the book's title"), "got: {note}");
+    }
+
+    #[test]
+    fn an_empty_title_prefers_a_heading_to_the_books_title() {
+        let ws = title_book_v(
+            "3.0",
+            Some("The Book"),
+            "<title></title>",
+            "<h1>Two</h1>",
+            None,
+        );
+        let (out, _) = titled(ws, empty_titles);
+        assert!(out.contains("<title>Two</title>"), "got: {out}");
+    }
+
+    #[test]
+    fn an_empty_title_prefers_the_toc_label_to_the_books_title() {
+        let ws = title_book_v(
+            "3.0",
+            Some("The Book"),
+            "<title></title>",
+            "<p>x</p>",
+            Some("One"),
+        );
+        let (out, _) = titled(ws, empty_titles);
+        assert!(out.contains("<title>One</title>"), "got: {out}");
+    }
+
+    #[test]
+    fn an_empty_title_with_no_source_at_all_is_declined() {
+        let ws = title_book_v("3.0", None, "<title></title>", "<p>x</p>", None);
+        let report = ws.detect().unwrap();
+        assert!(
+            report
+                .messages
+                .iter()
+                .any(|m| m.rule == Some("opf.content_document.empty_title")),
+            "the fixture must carry the finding"
+        );
+        assert!(empty_titles(&report, &ws).is_empty());
+    }
+
+    #[test]
+    fn the_books_title_skips_an_empty_dc_title() {
+        let ws = title_book(
+            Some("</dc:title><dc:title>  Second\n Title "),
+            "<title></title>",
+            "<p>x</p>",
+            None,
+        );
+        assert_eq!(book_title(&ws).as_deref(), Some("Second Title"));
+    }
+
+    /// Extension metadata in another namespace may also be called `title`;
+    /// only `dc:title` is the book's title.
+    #[test]
+    fn the_books_title_is_dc_title_not_another_title() {
+        let ws = title_book(
+            Some(r#"Real</dc:title><x:title xmlns:x="urn:x">Wrong</x:title><dc:title>Also"#),
+            "<title></title>",
+            "<p>x</p>",
+            None,
+        );
+        assert_eq!(book_title(&ws).as_deref(), Some("Real"));
+        let ws = title_book(
+            Some(r#"</dc:title><x:title xmlns:x="urn:x">Wrong</x:title><dc:title>Real"#),
+            "<title></title>",
+            "<p>x</p>",
+            None,
+        );
+        assert_eq!(book_title(&ws).as_deref(), Some("Real"));
+    }
+
+    /// The `["head", "title"]` findings the detector makes on the chapter.
+    fn missing_title_findings(ws: &Workspace) -> usize {
+        ws.detect()
+            .unwrap()
+            .messages
+            .iter()
+            .filter(|m| m.location.as_deref() == Some("c.xhtml") && m.params == ["head", "title"])
+            .count()
+    }
+
+    /// The shelf's shape: a `<head>` of `<meta>`s and no `<title>`. One goes in
+    /// first, and the detector has nothing left to say about it.
+    #[test]
+    fn a_head_with_no_title_gets_one_from_the_books_title() {
+        let book = || {
+            title_book(
+                Some("A &amp; B"),
+                r#"<meta name="Generator" content="x"/>"#,
+                "<p>x</p>",
+                None,
+            )
+        };
+        assert_eq!(
+            missing_title_findings(&book()),
+            1,
+            "the fixture must carry the finding"
+        );
+        let (out, note) = titled(book(), missing_titles);
+        assert!(
+            out.contains(
+                r#"<head><title>A &amp; B</title><meta name="Generator" content="x"/></head>"#
+            ),
+            "got: {out}"
+        );
+        assert!(note.contains("the book's title"), "got: {note}");
+        let mut ws = book();
+        missing_titles(&ws.detect().unwrap(), &ws)
+            .into_iter()
+            .next()
+            .unwrap()
+            .apply(&mut ws);
+        assert_eq!(missing_title_findings(&ws), 0);
+    }
+
+    #[test]
+    fn a_head_with_no_title_prefers_the_toc_label() {
+        let ws = title_book(
+            Some("Book"),
+            r#"<meta name="a" content="b"/>"#,
+            "<h1>H</h1>",
+            Some("One"),
+        );
+        let (out, _) = titled(ws, missing_titles);
+        assert!(out.contains("<head><title>One</title>"), "got: {out}");
+    }
+
+    #[test]
+    fn a_head_with_no_title_and_no_source_is_declined() {
+        let ws = title_book(None, r#"<meta name="a" content="b"/>"#, "<p>x</p>", None);
+        assert_eq!(missing_title_findings(&ws), 1);
+        assert!(missing_titles(&ws.detect().unwrap(), &ws).is_empty());
+    }
+
+    /// EPUB 3 reports the same absence as the warning `RSC-017`; the same
+    /// repair answers it, and the proposal says which finding it addresses.
+    #[test]
+    fn an_epub3_head_with_no_title_is_answered_too() {
+        let book = || {
+            title_book_v(
+                "3.0",
+                Some("Book"),
+                r#"<meta name="a" content="b"/>"#,
+                "<p>x</p>",
+                None,
+            )
+        };
+        let ws = book();
+        let fixes = missing_titles(&ws.detect().unwrap(), &ws);
+        assert_eq!(fixes.len(), 1);
+        assert_eq!(fixes[0].addresses_id, "RSC-017");
+        assert_eq!(
+            fixes[0].addresses_rule,
+            Some("opf.content_document.head_missing_title")
+        );
+        let (out, _) = titled(book(), missing_titles);
+        assert!(out.contains("<head><title>Book</title>"), "got: {out}");
+    }
+
+    /// A stale finding: the `<head>` it names already has a `<title>`.
+    #[test]
+    fn a_head_that_already_has_a_title_is_left_alone() {
+        let bare = title_book(
+            Some("Book"),
+            r#"<meta name="a" content="b"/>"#,
+            "<p>x</p>",
+            None,
+        );
+        let report = bare.detect().unwrap();
+        let ws = title_book(Some("Book"), "<title>T</title>", "<p>x</p>", None);
+        assert!(missing_titles(&report, &ws).is_empty());
+    }
+
+    /// Another incomplete `<head>` is not this finding.
+    #[test]
+    fn a_head_finding_naming_more_than_title_is_declined() {
+        let ws = title_book(
+            Some("Book"),
+            r#"<meta name="a" content="b"/>"#,
+            "<p>x</p>",
+            None,
+        );
+        let mut report = ws.detect().unwrap();
+        for m in &mut report.messages {
+            if m.params == ["head", "title"] {
+                m.params.push("base".to_string());
+            }
+        }
+        assert!(missing_titles(&report, &ws).is_empty());
+    }
+
+    #[test]
+    fn a_self_closing_head_is_declined() {
+        let ws = title_book(Some("Book"), "", "<p>x</p>", None);
+        let mut text = ws.get_text("c.xhtml").unwrap();
+        text = text.replace("<head></head>", "<head/>");
+        let mut ws = ws;
+        ws.set_text("c.xhtml", text);
+        assert_eq!(
+            missing_title_findings(&ws),
+            1,
+            "the fixture must carry the finding"
+        );
+        assert!(missing_titles(&ws.detect().unwrap(), &ws).is_empty());
+    }
+
+    #[test]
+    fn a_title_goes_after_a_start_tag_whose_attribute_holds_a_gt() {
+        let doc = r#"<html xmlns="http://www.w3.org/1999/xhtml"><head profile="a>b"><meta name="a" content="b"/></head><body/></html>"#;
+        let edit = plan_title_insert(doc, "T").unwrap();
+        assert_eq!(
+            apply_edits(doc, vec![edit]),
+            r#"<html xmlns="http://www.w3.org/1999/xhtml"><head profile="a>b"><title>T</title><meta name="a" content="b"/></head><body/></html>"#
+        );
     }
 
     // ---- fix.ncx_navpoint_id ------------------------------------------

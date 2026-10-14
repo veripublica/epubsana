@@ -17,7 +17,7 @@ apply → check → report) is solid. The check re-validates the book after
 applying, and a fix that made any finding more frequent is undone and reported
 as reverted — unless the fix let the validator see part of the book it could not
 see before, in which case what appears was always there and the run says so.
-Forty-four fixers so far:
+Forty-five fixers so far:
 
 - **`RSC-016`** — undeclared HTML entities (`&nbsp;`, `&mdash;`, …) → the exact
   character each denotes.
@@ -29,7 +29,9 @@ Forty-four fixers so far:
   the HTML5 `<meta charset="utf-8">`.
 - **`NCX-001`** — NCX `dtb:uid` synced to the package's unique identifier.
 - **`RSC-005` / `empty_title`** — an empty `<title>` filled from the book's own
-  TOC label (or its first heading); never invented.
+  TOC label, else its first heading, else the book's title; never invented.
+- **`RSC-005` / `RSC-017` / a `<head>` with no `<title>`** — one added, from the
+  same three sources in the same order.
 - **`RSC-005` / `navdoc.ol.empty`** — an optional `<nav>` in the navigation
   document whose list holds no entries → the whole `<nav>` dropped. Never the
   `toc`, never a list nested inside an `<li>`, never a nav carrying a heading or

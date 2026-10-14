@@ -28,7 +28,8 @@ grows one carefully-argued entry at a time.
 | `RSC-005` | `ncx.ids.invalid_ncname` | ConfirmNeeded | An NCX `id` isn't a valid XML NCName | [Sanitize it to a valid, unique NCName](#rsc-005--invalid-ncx-id-ncname) |
 | `RSC-005` | `opf.content_document.invalid_content_type_meta` | ConfirmNeeded | A legacy `<meta http-equiv="Content-Type">` has the wrong value | [Normalize to a single HTML5 `<meta charset="utf-8">`](#rsc-005--content-type-encoding-declaration) |
 | `NCX-001` | *(none)* | ConfirmNeeded | The NCX `dtb:uid` disagrees with the package identifier | [Set `dtb:uid` to the package's unique identifier](#ncx-001--ncx-dtbuid-mismatch) |
-| `RSC-005` | `opf.content_document.empty_title` | ConfirmNeeded | An XHTML `<title>` element is empty | [Fill it from the book's own TOC label, else its first heading](#rsc-005--empty-title) |
+| `RSC-005` | `opf.content_document.empty_title` | ConfirmNeeded | An XHTML `<title>` element is empty | [Fill it from the book's own TOC label, else its first heading, else the book's title](#rsc-005--empty-title) |
+| `RSC-005` | `opf.content_document.schema_violation` (`incomplete_content`, `params` = `["head", "title"]`) | ConfirmNeeded | An XHTML `<head>` has no `<title>` at all | [Add one, from the same three sources](#rsc-005--a-head-with-no-title) |
 | `RSC-020` | `opf.manifest_item.unencoded_space_in_href` | AutoSafe | A manifest `href` contains a raw space | [Percent-encode the space as `%20`](#rsc-020--unencoded-space-in-a-manifest-href) |
 | `RSC-020` | `opf.ncx.content_src_unencoded_space` | AutoSafe | An NCX `<content src>` contains a raw space | [Percent-encode the space as `%20`](#rsc-020--unencoded-space-in-an-ncx-content-src) |
 | `OPF-014` | `opf.content_document.property_used_undeclared` | AutoSafe | A content document uses a feature its manifest item doesn't declare | [Add the token to that item's `properties`](#opf-014--undeclared-content-property) |
@@ -271,24 +272,97 @@ the book itself**, in this order:
    target resolves to this document (the fragment is ignored: an entry pointing
    *into* a document still names it);
 2. failing that, the **document's own first heading** (`h1`–`h6`), whitespace
-   collapsed to one line.
+   collapsed to one line;
+3. failing both, the **book's title**: the first non-empty `<dc:title>` in the
+   package metadata (EPUB 3.3: the first `dc:title` is the main title),
+   whitespace collapsed. *Added 2026-10-14, see below.*
 
 The text is XML-escaped and only the empty `<title>` element is rewritten.
 
-**Why it's safe.** The title is never *invented*: both sources are the book's own
-words for that document, authored by whoever made the book. The title element is
+**Why it's safe.** The title is never *invented*: every source is the book's own
+words, authored by whoever made the book. The first two name the document; the
+third names the work the document belongs to. The title element is
 document metadata — it is not part of the rendered text — so filling it changes
 nothing a reader sees in the content, and it clears a genuine content-model
 violation. It is `ConfirmNeeded` rather than `AutoSafe` precisely because it adds
 visible metadata: the user sees the exact text before approving it.
 
-**When it declines.** When the book names the document **nowhere** — no TOC entry
-and no heading (measured: ~7% of the corpus's empty titles, typically image-only
-cover and divider pages) — the fixer leaves it alone and the finding stays
-reported. epubsana deliberately does **not** fall back to the book's `dc:title`:
-stamping the book's name onto every chapter is a guess about intent, not a
-repair. It also declines a document that won't parse, or whose title turns out
-not to be empty after all (a stale finding never overwrites real text).
+**When it declines.** When the book has **no** source: no TOC entry, no heading
+and no non-empty `dc:title`. It also declines a document that won't parse, or
+whose title turns out not to be empty after all (a stale finding never
+overwrites real text).
+
+**The `dc:title` fallback (2026-10-14), and the decision it reverses.** Until
+0.27.0 the fixer declined when neither the TOC nor a heading named the document
+(on the shelf: image-only covers, dividers, and calibre's split continuations).
+We called the book's title "a guess about intent". JSWolf (MobileRead 374799
+#53) answered that the book's title is what to use when nothing else names the
+document, and that this is how EPUB 2 documents are commonly titled. On
+reflection the fallback meets our rule. `<title>` is document metadata, not
+rendered text. `dc:title` is the book's own words, not ours. And the user sees
+the text before approving it (ConfirmNeeded). It stays last: the document's own
+name, where the book gives one, is the better title, so the first two sources
+keep their order.
+
+
+---
+
+## RSC-005 — a `<head>` with no `<title>`
+
+> **Written spec-first on 2026-10-14.** The finding shape below is what
+> epubveri 0.27.0 reported on the shelf before any code existed.
+
+**Finding.** `opf.content_document.schema_violation`, kind `incomplete_content`,
+`params` = `["head", "title"]`, `element_path` = `/h:html[1]/h:head[1]`. The
+document's `<head>` has no `<title>` element at all, which both XHTML 1.1 and
+HTML require. (An *empty* `<title>` is the previous section's finding.)
+
+**The shape.** On the shelf, word-processor and calibre output, most of it
+split continuations:
+
+```html
+<head>
+<meta name="Generator" content="Atlantis Word Processor 1.6.5.2"/>
+<meta content="http://www.w3.org/1999/xhtml; charset=utf-8" http-equiv="Content-Type"/>
+…
+</head>
+```
+
+**Fix** (`fix.missing_title`, ConfirmNeeded). Insert `<title>…</title>` as the
+first thing inside `<head>`, right after its start tag. The text comes from the
+same three sources as `fix.empty_title`, in the same order: the book's TOC label
+for this document, else its first heading, else the book's `dc:title`. The text
+is XML-escaped. Nothing else in the document changes. One proposal per document,
+as for `fix.empty_title`.
+
+**Why it is safe.** The same argument as `fix.empty_title`: the text is the
+book's own, and `<title>` is metadata, not rendered text. Placing it first is
+valid in both grammars: XHTML 1.1 lets `<title>` sit anywhere among the other
+head elements, and HTML puts no order on them.
+
+**When it declines.**
+
+- **No source**: no TOC entry, no heading, no non-empty `dc:title`.
+- **A finding other than exactly `["head", "title"]`**, or a `<head>` that
+  already has a `<title>` (a stale finding).
+- **A self-closing `<head/>`**, or a document that does not parse.
+
+**Measured (562 books, epubveri 0.27.0, before building).** 8 books, 98
+findings, all at `/h:html[1]/h:head[1]`. Seven are the Atlantis/calibre shape
+above; one (40 findings) is an EPUB 2 package whose generated pages open with
+`<head><style>`.
+
+**EPUB 3 says it differently, and the fix answers both.** On EPUB 3 the same
+absence is the *warning* `RSC-017` / `opf.content_document.head_missing_title`
+(epubcheck's schematron), not a grammar error. Same element, same repair; the
+proposal names whichever finding it addresses. On the shelf: 3 books, each an
+InDesign `navigation.xhtml`.
+
+**Measured after building (562 books, epubveri 0.27.0, 2026-10-14).**
+`fix.missing_title` makes 101 proposals (98 EPUB 2, 3 EPUB 3) and
+`fix.empty_title` 198, up from 191: the 7 it used to decline now take the
+book's title. Fully valid after an approve-all repair: 103 → 110 books. No
+regression at any severity.
 
 ---
 
