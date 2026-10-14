@@ -8,7 +8,7 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
-## [Unreleased]
+## [0.27.0] - 2026-10-14
 
 ### Added
 
@@ -34,16 +34,14 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
   `<title>` is document metadata, not text a reader sees in the chapter, and the
   proposal still shows the text before it goes in. Thanks to JSWolf on
   MobileRead for the argument.
-
 - **Requires epubveri 0.27.0.** The validator now checks the encoding of
   every XML file in the book, not only the package document, as epubcheck
   does. A chapter declared as Latin-1, or a UTF-16 SVG, no longer passes as
   valid after repair. A package document declaring an encoding epubcheck's
   parser accepts (Shift_JIS, windows-1254, …) is no longer a fatal error
-  that hid the rest of the book. epubsana does not repair encodings yet.
-  Across the 562-book test shelf, every proposal and every result after
-  repair is the same as under 0.26.0.
-
+  that hid the rest of the book. epubsana does not repair encodings yet. On
+  the 562-book test shelf, the dependency change alone leaves every proposal
+  and every result after repair as it was.
 - **`--format json` now prints an envelope when the input cannot be
   processed.** An unreadable file, a file that is not an EPUB, or a repaired
   copy that cannot be written now gives an envelope whose input has
