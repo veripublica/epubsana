@@ -23,7 +23,7 @@ members = ["epubsana-wasm"]
 # into an error) and the `rule`/`params` sub-codes epubsana's fixers dispatch on
 # both arrived on the 0.5 line, the conventions-v0.4 one.
 #
-# **The floor is 0.26.** Most raises have been *correctness* floors, made for the
+# **The floor is 0.27.** Most raises have been *correctness* floors, made for the
 # same reason each time: below them, a detector false positive makes some fixer
 # here repair a book that was not broken. The last two are different classes —
 # 0.9.26 is completeness and 0.10.0 is capability — and each says which it is.
@@ -176,6 +176,20 @@ members = ["epubsana-wasm"]
 #   regressions). Not a vacuous null — this fixer carries 10 of those proposals
 #   and 50 renames, so a `params` answer that failed to arrive would have deleted
 #   every one of them.
+#
+#   **0.27.0 (2026-10-14) is a CORRECTNESS floor for our verdict, not for a
+#   fixer.** epubveri now grades the encoding of every XML resource, not only
+#   the OPF: below it, `--goal valid` could exit `0` on a Latin-1 chapter or a
+#   UTF-16 SVG that epubcheck rejects. It also stops calling 186
+#   parser-accepted OPF encodings a fatal RSC-016 that hid the rest of the
+#   book. Four new `xml.encoding.*` keys; HTM_058 now carries
+#   `xml.encoding.utf16`. No rule we dispatch on moved; no source change.
+#   Measured on 562 books (0.26.0 vs 0.27.0, lock checked on both arms): plan
+#   digest, `regression_audit`, `pos_ab` (56,733 findings) and the census all
+#   byte-identical. That null is real, not a dead instrument: a probe book
+#   declaring `utf8` gives 0 findings on 0.26.0 and RSC-028 + fatal RSC-016 on
+#   0.27.0, and a scan of the shelf's 26,387 XML entries finds every one
+#   UTF-8. The shelf simply has no non-UTF-8 XML.
 #
 #   **0.26.0 (2026-10-14) is a CORRECTNESS floor for our verdict, not for a
 #   fixer.** It spans 0.25.0 and 0.26.0. 0.25.0 checks EPUB 2 `<style>`,
@@ -336,7 +350,7 @@ members = ["epubsana-wasm"]
 #
 # For local co-development of epubveri, add an uncommitted override:
 #   [patch.crates-io] epubveri = { path = "../epubveri" }
-epubveri = "0.26.0"
+epubveri = "0.27.0"
 # Pure-Rust only (no C deps), same philosophy as epubveri: zip's "deflate"
 # feature uses zlib-rs (Rust) on the 8.x line; bzip2/zstd (C) stay disabled.
 # Aligned to epubveri's zip major — the family shares one zip version because

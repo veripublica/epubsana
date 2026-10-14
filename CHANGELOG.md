@@ -8,6 +8,19 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Requires epubveri 0.27.0.** The validator now checks the encoding of
+  every XML file in the book, not only the package document, as epubcheck
+  does. A chapter declared as Latin-1, or a UTF-16 SVG, no longer passes as
+  valid after repair. A package document declaring an encoding epubcheck's
+  parser accepts (Shift_JIS, windows-1254, …) is no longer a fatal error
+  that hid the rest of the book. epubsana does not repair encodings yet.
+  Across the 562-book test shelf, every proposal and every result after
+  repair is the same as under 0.26.0.
+
 ## [0.26.0] - 2026-10-14
 
 ### Added
