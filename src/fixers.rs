@@ -78,6 +78,7 @@ pub fn plan(report: &Report, ws: &Workspace, _goal: Goal) -> Vec<ProposedFix> {
     fixes.extend(ncx_ncnames(report, ws));
     fixes.extend(ncx_duplicate_ids(report, ws));
     fixes.extend(ncx_play_order(report, ws));
+    fixes.extend(ncx_navpoint_ids(report, ws));
     fixes.extend(content_type_meta(report, ws));
     fixes.extend(ncx_dtb_uid(report, ws));
     fixes.extend(manifest_href_spaces(report, ws));
@@ -159,6 +160,8 @@ pub fn handled_rules() -> &'static [&'static str] {
         "ncx.play_order.gap",
         "ncx.play_order.no_origin",
         "ncx.play_order.target_mismatch",
+        // One shape inside it: a `navPoint` with no `id`.
+        "ncx.schema_violation",
         "ncx.uid.package_identifier_mismatch",
         "ocf.mimetype.not_first_entry",
         "opf.content_document.dangling_fragment",
@@ -1075,6 +1078,158 @@ fn ncx_play_order(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
         });
     }
     fixes
+}
+
+/// `RSC-005` / `ncx.schema_violation`, kind `missing_attribute`, `params` =
+/// `[element, "id"]`: an NCX element the grammar requires an `id` on has none
+/// (on the shelf, every `navPoint` of a hand-built NCX). Give each reported
+/// element `id="<element>-<n>"`, unique in the NCX. Nothing can refer to an id
+/// that does not exist, and NCX ids are labels, not link targets, so no
+/// reference changes. `ConfirmNeeded`, as in [`ncx_duplicate_ids`]: the value
+/// is ours.
+///
+/// **Declines:** a finding that names any attribute besides `id`, an element
+/// that already has an `id`, a path no finding names, and an NCX that does not
+/// parse.
+fn ncx_navpoint_ids(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    // NCX -> reported element paths
+    let mut by_file: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for m in &report.messages {
+        if !is_schema_violation(m, "ncx.schema_violation", ViolationKind::MissingAttribute) {
+            continue;
+        }
+        if m.params.get(1..) != Some(&["id".to_string()][..]) {
+            continue;
+        }
+        let (Some(file), Some(np)) = (m.location.as_deref(), m.element_path.as_ref()) else {
+            continue;
+        };
+        by_file
+            .entry(file.to_string())
+            .or_default()
+            .insert(np.path.clone());
+    }
+
+    let mut fixes = Vec::new();
+    for (file, reported) in by_file {
+        let Some(text) = ws.get_text(&file) else {
+            continue;
+        };
+        let Some(edits) = plan_ncx_ids(&text, &reported) else {
+            continue; // won't parse: decline
+        };
+        if edits.is_empty() {
+            continue;
+        }
+        let n = edits.len();
+        let ids: Vec<&str> = edits
+            .iter()
+            .map(|e| {
+                e.replacement
+                    .trim_start_matches(" id=\"")
+                    .trim_end_matches('"')
+            })
+            .collect();
+        let shown = if n <= 3 {
+            ids.join(", ")
+        } else {
+            format!("{}, …, {}", ids[..2].join(", "), ids[n - 1])
+        };
+        let file_for_apply = file.clone();
+        let reported_for_apply = reported.clone();
+        fixes.push(ProposedFix {
+            fix_id: "fix.ncx_navpoint_id",
+            addresses_id: "RSC-005".to_string(),
+            addresses_rule: Some("ncx.schema_violation"),
+            addresses_severity: addressed_severity(report, "RSC-005", Some("ncx.schema_violation")),
+            tier: Tier::ConfirmNeeded,
+            title: format!(
+                "Give {n} NCX navPoint{} the required id in {file}",
+                if n == 1 { "" } else { "s" },
+            ),
+            rationale: "The NCX grammar requires an id on every navPoint, and these have none. \
+                        Each gets a new id, unique in the NCX. Nothing can refer to an id that \
+                        does not exist yet, and NCX ids are labels rather than link targets, so \
+                        no reference changes. Nothing else in the file is touched."
+                .to_string(),
+            preview: vec![Change {
+                path: file.clone(),
+                note: format!("add id to {n} element(s): {shown}"),
+            }],
+            apply_fn: Box::new(move |ws: &mut Workspace| {
+                if let Some(text) = ws.get_text(&file_for_apply)
+                    && let Some(edits) = plan_ncx_ids(&text, &reported_for_apply)
+                {
+                    ws.set_text(&file_for_apply, apply_edits(&text, edits));
+                }
+            }),
+        });
+    }
+    fixes
+}
+
+/// One insertion of ` id="<element>-<n>"` right after the element name, for
+/// each element whose path is in `reported` and which has no `id`. `n` is the
+/// element's 1-based position among same-named elements in document order,
+/// made unique against every id already in the file. `None` (decline) if the
+/// NCX doesn't parse.
+fn plan_ncx_ids(text: &str, reported: &BTreeSet<String>) -> Option<Vec<MetaEdit>> {
+    let doc = parse_xml(text)?;
+    // Minted values never collide with each other (`<element>-<n>` is distinct
+    // per element), so only the file's own ids need checking.
+    let used = existing_ids(text);
+    let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut edits = Vec::new();
+    for node in doc.descendants().filter(|n| n.is_element()) {
+        let name = node.tag_name().name();
+        let position = {
+            let c = seen.entry(name).or_default();
+            *c += 1;
+            *c
+        };
+        if !ncx_element_path(node).is_some_and(|p| reported.contains(&p)) {
+            continue;
+        }
+        if node
+            .attributes()
+            .any(|a| a.namespace().is_none() && a.name() == "id")
+        {
+            continue; // stale: it has one
+        }
+        // The start tag is `<` + qualified name; insert right after the name.
+        let start = node.range().start;
+        let tag = text.get(start..)?;
+        let name_len = tag[1..].find(|c: char| c.is_whitespace() || c == '/' || c == '>')?;
+        let at = start + 1 + name_len;
+        let id = make_unique(format!("{name}-{position}"), &used);
+        edits.push(MetaEdit {
+            range: at..at,
+            replacement: format!(" id=\"{id}\""),
+        });
+    }
+    Some(edits)
+}
+
+/// The path epubveri writes into `element_path` for an element whose every
+/// ancestor is in the NCX namespace: `/ncx:ncx[1]/ncx:navMap[1]/ncx:navPoint[3]`,
+/// 1-based among same-named siblings. `None` for any other namespace, which
+/// then matches no reported path and declines.
+fn ncx_element_path(node: roxmltree::Node) -> Option<String> {
+    const NCX: &str = "http://www.daisy.org/z3986/2005/ncx/";
+    let mut steps = Vec::new();
+    for n in node.ancestors().filter(|n| n.is_element()) {
+        if n.tag_name().namespace() != Some(NCX) {
+            return None;
+        }
+        let index = 1 + n
+            .prev_siblings()
+            .skip(1)
+            .filter(|s| s.is_element() && s.tag_name() == n.tag_name())
+            .count();
+        steps.push(format!("/ncx:{}[{index}]", n.tag_name().name()));
+    }
+    steps.reverse();
+    Some(steps.concat())
 }
 
 /// Replace each `playOrder="…"` value with its 1-based position in document
@@ -9557,6 +9712,184 @@ mod tests {
             assert_eq!(c.to_ascii_lowercase(), l);
             assert_ne!(c, l);
         }
+    }
+
+    // ---- fix.ncx_navpoint_id ------------------------------------------
+
+    /// An EPUB 2 book with two chapters and an NCX whose `<navMap>` holds
+    /// `nav_map`, for the real detector.
+    fn navpoint_book(nav_map: &str) -> Workspace {
+        let ncx = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
+  <head><meta name="dtb:uid" content="x"/></head>
+  <docTitle><text>t</text></docTitle>
+  <navMap>{nav_map}</navMap>
+</ncx>"#
+        );
+        let chapter = r#"<?xml version="1.0" encoding="utf-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml"><head><title>t</title></head><body><p>x</p></body></html>"#;
+        container(&[
+            (
+                "META-INF/container.xml",
+                r#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#,
+            ),
+            (
+                "content.opf",
+                r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="id">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="id">x</dc:identifier><dc:title>t</dc:title><dc:language>en</dc:language></metadata>
+  <manifest><item href="toc.ncx" id="ncx" media-type="application/x-dtbncx+xml"/><item href="a.xhtml" id="a" media-type="application/xhtml+xml"/><item href="b.xhtml" id="b" media-type="application/xhtml+xml"/></manifest>
+  <spine toc="ncx"><itemref idref="a"/><itemref idref="b"/></spine>
+</package>"#,
+            ),
+            ("toc.ncx", &ncx),
+            ("a.xhtml", chapter),
+            ("b.xhtml", chapter),
+        ])
+    }
+
+    fn np(attrs: &str, label: &str, src: &str, inner: &str) -> String {
+        format!(
+            r#"<navPoint{attrs}><navLabel><text>{label}</text></navLabel><content src="{src}"/>{inner}</navPoint>"#
+        )
+    }
+
+    /// The `params` of every NCX schema finding the detector makes on the book.
+    fn ncx_schema_findings(ws: &Workspace) -> Vec<Vec<String>> {
+        ws.detect()
+            .unwrap()
+            .messages
+            .iter()
+            .filter(|m| m.rule == Some("ncx.schema_violation"))
+            .map(|m| m.params.clone())
+            .collect()
+    }
+
+    /// The shelf's shape, with one nested `navPoint`: each gets an id, nothing
+    /// else moves, and the detector has no NCX schema finding left.
+    #[test]
+    fn a_navpoint_with_no_id_gets_one() {
+        let map = np(
+            r#" playOrder="1""#,
+            "A",
+            "a.xhtml",
+            &np(r#" playOrder="2""#, "B", "b.xhtml", ""),
+        );
+        let mut ws = navpoint_book(&map);
+        assert_eq!(
+            ncx_schema_findings(&ws).len(),
+            2,
+            "the fixture must carry both findings, or this test proves nothing"
+        );
+        let fixes = ncx_navpoint_ids(&ws.detect().unwrap(), &ws);
+        assert_eq!(fixes.len(), 1);
+        assert_eq!(fixes[0].tier, Tier::ConfirmNeeded);
+        fixes.into_iter().next().unwrap().apply(&mut ws);
+        let out = ws.get_text("toc.ncx").unwrap();
+        let want = np(
+            r#" id="navPoint-1" playOrder="1""#,
+            "A",
+            "a.xhtml",
+            &np(r#" id="navPoint-2" playOrder="2""#, "B", "b.xhtml", ""),
+        );
+        assert!(out.contains(&want), "got: {out}");
+        assert!(ncx_schema_findings(&ws).is_empty());
+    }
+
+    /// The value we would mint is already taken: it is made unique instead.
+    #[test]
+    fn a_new_navpoint_id_avoids_an_existing_one() {
+        let map = format!(
+            "{}{}",
+            np(r#" playOrder="1""#, "A", "a.xhtml", ""),
+            np(r#" id="navPoint-1" playOrder="2""#, "B", "b.xhtml", ""),
+        );
+        let mut ws = navpoint_book(&map);
+        let fixes = ncx_navpoint_ids(&ws.detect().unwrap(), &ws);
+        fixes.into_iter().next().unwrap().apply(&mut ws);
+        let out = ws.get_text("toc.ncx").unwrap();
+        assert!(
+            out.contains(r#"<navPoint id="navPoint-1-2" playOrder="1">"#),
+            "got: {out}"
+        );
+        assert!(ncx_schema_findings(&ws).is_empty());
+    }
+
+    /// A finding that also names another missing attribute is a different
+    /// defect: declined.
+    #[test]
+    fn a_navpoint_missing_more_than_id_is_declined() {
+        let ws = navpoint_book(&np(r#" playOrder="1""#, "A", "a.xhtml", ""));
+        let mut report = ws.detect().unwrap();
+        let mut seen = 0;
+        for m in &mut report.messages {
+            if m.rule == Some("ncx.schema_violation") {
+                m.params.push("class".to_string());
+                seen += 1;
+            }
+        }
+        assert_eq!(seen, 1, "the fixture must carry the finding");
+        assert!(ncx_navpoint_ids(&report, &ws).is_empty());
+    }
+
+    /// A stale finding: the element it names already has an id.
+    #[test]
+    fn a_navpoint_that_already_has_an_id_is_left_alone() {
+        let bare = navpoint_book(&np(r#" playOrder="1""#, "A", "a.xhtml", ""));
+        let report = bare.detect().unwrap();
+        let ws = navpoint_book(&np(r#" id="p1" playOrder="1""#, "A", "a.xhtml", ""));
+        assert!(ncx_navpoint_ids(&report, &ws).is_empty());
+    }
+
+    /// Reported on one element, missing on two: only the reported one moves.
+    #[test]
+    fn only_the_reported_navpoint_gets_an_id() {
+        let map = format!(
+            "{}{}",
+            np(r#" playOrder="1""#, "A", "a.xhtml", ""),
+            np(r#" playOrder="2""#, "B", "b.xhtml", ""),
+        );
+        let mut ws = navpoint_book(&map);
+        let mut report = ws.detect().unwrap();
+        report.messages.retain(|m| {
+            m.rule != Some("ncx.schema_violation")
+                || m.element_path
+                    .as_ref()
+                    .is_some_and(|n| n.path.ends_with("navPoint[2]"))
+        });
+        let fixes = ncx_navpoint_ids(&report, &ws);
+        fixes.into_iter().next().unwrap().apply(&mut ws);
+        let out = ws.get_text("toc.ncx").unwrap();
+        assert!(
+            out.contains(r#"<navPoint playOrder="1">"#)
+                && out.contains(r#"<navPoint id="navPoint-2" playOrder="2">"#),
+            "got: {out}"
+        );
+    }
+
+    /// epubveri keeps an authored prefix in the path, so an NCX-shaped file
+    /// whose `ncx:` prefix is bound to another namespace yields the same path
+    /// string. It is not an NCX element, so it is left alone.
+    #[test]
+    fn an_ncx_prefix_bound_to_another_namespace_is_left_alone() {
+        let report = navpoint_book(&np(r#" playOrder="1""#, "A", "a.xhtml", ""))
+            .detect()
+            .unwrap();
+        let mut ws = navpoint_book("");
+        ws.set_text(
+            "toc.ncx",
+            r#"<ncx:ncx xmlns:ncx="urn:x"><ncx:navMap><ncx:navPoint playOrder="1"/></ncx:navMap></ncx:ncx>"#
+                .to_string(),
+        );
+        assert!(ncx_navpoint_ids(&report, &ws).is_empty());
+    }
+
+    /// Nothing reported, nothing touched.
+    #[test]
+    fn an_unreported_navpoint_without_id_is_left_alone() {
+        let ws = navpoint_book(&np(r#" playOrder="1""#, "A", "a.xhtml", ""));
+        assert!(ncx_navpoint_ids(&Report::default(), &ws).is_empty());
     }
 
     // ---- fix.dir_case ------------------------------------------------

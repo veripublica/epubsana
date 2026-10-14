@@ -64,6 +64,7 @@ grows one carefully-argued entry at a time.
 | `OPF-054` | *(none)* | ConfirmNeeded | A `<dc:date>` holds no date at all (EPUB 2) | [Drop the empty element; never touch a non-empty one](#opf-054--an-empty-dcdate-epub-2) |
 | `RSC-005` / `RSC-025` | `svg.attributes.attribute_not_allowed` (a lowercased camelCase name) | AutoSafe | An SVG attribute was lowercased by an HTML tool (`viewbox`), so an XML reading system ignores it | [Restore the name's case from the HTML standard's own table](#rsc-005--rsc-025--an-svg-attribute-whose-name-lost-its-case) |
 | `RSC-005` | `opf.content_document.schema_violation` (`params[0] == "dir"`, an uppercase `LTR`/`RTL`) | AutoSafe | A `dir` value written in capitals, which the grammar does not accept | [Lowercase it to `ltr` / `rtl`](#rsc-005--a-dir-value-in-capitals) |
+| `RSC-005` | `ncx.schema_violation` (`missing_attribute`, `params` = `[element, "id"]`) | ConfirmNeeded | An NCX `navPoint` has no `id`, which the NCX grammar requires | [Give it a new id, unique in the NCX](#rsc-005--an-ncx-navpoint-with-no-id) |
 
 **A note on structural fixers.** Fixers that must locate an element (rather than
 match a token) parse the document with `roxmltree` using `allow_dtd: true`, the
@@ -2539,3 +2540,61 @@ enter `regression_audit`'s touched set at 24 errors before and 12 after; the
 12 that stay are the `text` attributes. No regression at any severity, and
 the whole-shelf plan digest gains exactly those two lines.
 
+## RSC-005 — an NCX `navPoint` with no `id`
+
+> **Written spec-first on 2026-10-14.** The finding shape below is what
+> epubveri 0.27.0 reported on the shelf before any code existed.
+
+**Finding.** `ncx.schema_violation`, kind `missing_attribute`, `params` =
+`["navPoint", "id"]` (the element, then the one attribute it still needs), and
+`element_path` names the element:
+
+```
+/ncx:ncx[1]/ncx:navMap[1]/ncx:navPoint[1]      params ["navPoint", "id"]
+```
+
+**The shape.** The NCX grammar requires an `id` on every `navPoint`. On the
+shelf the shape is a hand-built NCX in which no `navPoint` has one:
+
+```xml
+<navPoint playOrder="1">
+  <navLabel><text>Kapak</text></navLabel>
+  <content src="Text/kapak.xhtml"/>
+</navPoint>
+```
+
+**Fix** (`fix.ncx_navpoint_id`, ConfirmNeeded). Add `id="<element>-<n>"`
+(`navPoint-1`, `navPoint-2`, …) to each reported element, right after its name
+in the start tag. `n` is the element's 1-based position among same-named
+elements in document order. If that value is already used in the NCX, it is
+made unique with the suffix `-2`, `-3`, … as in `fix.ncx_duplicate_id`. Nothing
+else in the file changes. One proposal per NCX.
+
+**Why it is safe.** The element has no id, so nothing can refer to one; adding
+it cannot break a reference. NCX ids are labels, not link targets (see the NCX
+internal-consistency section), so the value chosen carries no meaning beyond
+being valid and unique. Every value is an NCName and is checked against all
+ids already in the file. This is the same argument `fix.ncx_duplicate_id`
+rests on, where the value is also ours. ConfirmNeeded for the same reason: the
+id is a value we chose, and the user sees it.
+
+**When it declines.**
+
+- **A finding that names more than `id`** in `params[1..]`. Another missing
+  attribute is a different defect with no value we could supply.
+- **An element that already has an `id`** (a stale finding), or a node whose
+  path no finding names.
+- **An NCX that does not parse**, or an element outside the NCX namespace.
+
+**Measured (562 books, epubveri 0.27.0, before building).** 1 book, 22
+findings, every `navPoint` in its NCX (*Algernon'a Çiçekler*, one of the 18
+books added to the shelf on 2026-10-14). The same NCX also has every
+`playOrder` at `1`, which `fix.ncx_play_order` already repairs. One book shows
+that the shape exists. It does not show how often it occurs.
+
+**Measured after building (562 books, epubveri 0.27.0, 2026-10-14).** One
+proposal, on that book, and all 22 findings cleared. Errors after an
+approve-all repair fall from 16,757 to 16,735 across the shelf. No regression
+at any severity, and the whole-shelf plan digest gains exactly that one line.
+The book is still not valid: its NCX names a `Text/kapak.xhtml` the book does
+not contain, which is not this fixer's to repair.

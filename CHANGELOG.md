@@ -10,6 +10,16 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`fix.ncx_navpoint_id` (ConfirmNeeded): an NCX `navPoint` with no `id`.**
+  The NCX grammar requires an `id` on every `navPoint`. A hand-built NCX can
+  leave them all out. The fixer gives each reported `navPoint` a new id,
+  unique in the NCX (`navPoint-1`, `navPoint-2`, …). Nothing can refer to an
+  id that did not exist, and NCX ids are labels rather than link targets, so
+  no reference changes. It declines a finding that names another missing
+  attribute besides `id`.
+
 ### Changed
 
 - **Requires epubveri 0.27.0.** The validator now checks the encoding of

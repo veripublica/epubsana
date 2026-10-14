@@ -17,7 +17,7 @@ apply → check → report) is solid. The check re-validates the book after
 applying, and a fix that made any finding more frequent is undone and reported
 as reverted — unless the fix let the validator see part of the book it could not
 see before, in which case what appears was always there and the run says so.
-Forty-three fixers so far:
+Forty-four fixers so far:
 
 - **`RSC-016`** — undeclared HTML entities (`&nbsp;`, `&mdash;`, …) → the exact
   character each denotes.
@@ -83,6 +83,9 @@ Forty-three fixers so far:
 - **`RSC-005` / `ncx.play_order.duplicate`** — repeated NCX `playOrder` values →
   renumbered by document order. Together with the NCName and `dtb:uid` fixers,
   this closes the NCX internal-consistency defects epubsana can determine.
+- **`RSC-005` / an NCX `navPoint` with no `id`** → a new id, unique in the NCX
+  (`navPoint-1`, …). Nothing can refer to an id that did not exist, so nothing
+  else moves.
 - **`RSC-007` / `opf.guide.reference_missing_resource`** — an EPUB 2 `<guide>`
   reference pointing at a resource that doesn't exist → dropped (and the `<guide>`
   itself if that empties it).
