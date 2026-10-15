@@ -90,6 +90,7 @@ pub fn plan(report: &Report, ws: &Workspace, _goal: Goal) -> Vec<ProposedFix> {
     fixes.extend(anchor_name_attrs(report, ws));
     fixes.extend(adept_meta_value(report, ws));
     fixes.extend(svg_attribute_case(report, ws));
+    fixes.extend(svg_element_case(report, ws));
     fixes.extend(dir_case(report, ws));
     fixes.extend(empty_lang_attrs(report, ws));
     fixes.extend(lang_xmllang_mismatch(report, ws));
@@ -191,6 +192,7 @@ pub fn handled_rules() -> &'static [&'static str] {
         "opf.spine.duplicate_itemref",
         "opf.spine.itemref_idref_not_in_manifest",
         "svg.attributes.attribute_not_allowed",
+        "svg.elements.element_not_allowed",
     ]
 }
 
@@ -2817,11 +2819,11 @@ fn svg_attribute_case(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
         let (Some(doc), Some(np)) = (m.location.as_deref(), m.element_path.as_ref()) else {
             continue;
         };
+        let Some(path) = svg_reported_path(np) else {
+            continue;
+        };
         ids.insert(m.id);
-        by_doc
-            .entry(doc.to_string())
-            .or_default()
-            .insert(np.path.clone());
+        by_doc.entry(doc.to_string()).or_default().insert(path);
     }
     // One book is one EPUB version, so every finding here has the same id.
     let Some(&id) = ids.first() else {
@@ -2982,6 +2984,35 @@ fn plan_svg_case_renames(text: &str, reported: &BTreeSet<String>) -> Option<Vec<
     Some(renames)
 }
 
+/// A reported `element_path`, with each element step's prefix replaced by the
+/// one [`svg_element_path`] writes for its namespace: `h` for XHTML, `svg` for
+/// SVG. epubveri prefers the prefix the document itself uses, so an SVG written
+/// as `<s:svg>` is reported as `/…/s:svg[1]`; only the `namespaces` map says
+/// what `s` means. `None` if a prefix is unbound or names another namespace
+/// (the step could then match nothing we write). Attribute steps stay as they
+/// are.
+fn svg_reported_path(np: &epubveri::xmlext::NodePath) -> Option<String> {
+    const XHTML: &str = "http://www.w3.org/1999/xhtml";
+    const SVG: &str = "http://www.w3.org/2000/svg";
+    let mut out = String::with_capacity(np.path.len());
+    for step in np.path.split('/').skip(1) {
+        out.push('/');
+        if step.starts_with('@') {
+            out.push_str(step);
+            continue;
+        }
+        let (prefix, rest) = step.split_once(':')?;
+        out.push_str(match np.namespaces.get(prefix).map(String::as_str) {
+            Some(XHTML) => "h",
+            Some(SVG) => "svg",
+            _ => return None,
+        });
+        out.push(':');
+        out.push_str(rest);
+    }
+    Some(out)
+}
+
 /// The path epubveri writes into `element_path` for an element whose ancestors
 /// are XHTML or SVG: `/h:html[1]/h:body[1]/svg:svg[1]`, 1-based among
 /// same-named siblings. `None` for any other namespace, which then matches no
@@ -3029,9 +3060,370 @@ fn svg_renames_still_reported(
             .messages
             .iter()
             .filter(|m| m.rule == Some(SVG_ATTRIBUTE_RULE))
-            .filter_map(|m| Some((m.location.clone()?, m.element_path.as_ref()?.path.clone())))
+            .filter_map(|m| {
+                Some((
+                    m.location.clone()?,
+                    svg_reported_path(m.element_path.as_ref()?)?,
+                ))
+            })
             .collect(),
     )
+}
+
+/// The rule an SVG element name the SVG vocabulary does not know is reported
+/// under (epubveri 0.28.0): `RSC-005` on EPUB 2, `RSC-025` (usage) on EPUB 3.
+const SVG_ELEMENT_RULE: &str = "svg.elements.element_not_allowed";
+
+/// The HTML standard's *adjust SVG tag names* table, verbatim (WHATWG HTML,
+/// "Parsing HTML documents", 37 rows; fetched 2026-10-15): the camelCase SVG
+/// elements an HTML parser restores from their lowercased form. The sibling of
+/// [`SVG_ATTRIBUTE_CASE`], and one-to-one on its rows in the same way.
+const SVG_ELEMENT_CASE: [(&str, &str); 37] = [
+    ("altglyph", "altGlyph"),
+    ("altglyphdef", "altGlyphDef"),
+    ("altglyphitem", "altGlyphItem"),
+    ("animatecolor", "animateColor"),
+    ("animatemotion", "animateMotion"),
+    ("animatetransform", "animateTransform"),
+    ("clippath", "clipPath"),
+    ("feblend", "feBlend"),
+    ("fecolormatrix", "feColorMatrix"),
+    ("fecomponenttransfer", "feComponentTransfer"),
+    ("fecomposite", "feComposite"),
+    ("feconvolvematrix", "feConvolveMatrix"),
+    ("fediffuselighting", "feDiffuseLighting"),
+    ("fedisplacementmap", "feDisplacementMap"),
+    ("fedistantlight", "feDistantLight"),
+    ("fedropshadow", "feDropShadow"),
+    ("feflood", "feFlood"),
+    ("fefunca", "feFuncA"),
+    ("fefuncb", "feFuncB"),
+    ("fefuncg", "feFuncG"),
+    ("fefuncr", "feFuncR"),
+    ("fegaussianblur", "feGaussianBlur"),
+    ("feimage", "feImage"),
+    ("femerge", "feMerge"),
+    ("femergenode", "feMergeNode"),
+    ("femorphology", "feMorphology"),
+    ("feoffset", "feOffset"),
+    ("fepointlight", "fePointLight"),
+    ("fespecularlighting", "feSpecularLighting"),
+    ("fespotlight", "feSpotLight"),
+    ("fetile", "feTile"),
+    ("feturbulence", "feTurbulence"),
+    ("foreignobject", "foreignObject"),
+    ("glyphref", "glyphRef"),
+    ("lineargradient", "linearGradient"),
+    ("radialgradient", "radialGradient"),
+    ("textpath", "textPath"),
+];
+
+/// `RSC-005` / `RSC-025` / `svg.elements.element_not_allowed`, where the
+/// element is a camelCase SVG name an HTML tool lowercased: `lineargradient`
+/// for `linearGradient`, `clippath` for `clipPath`. An XML reading system does
+/// not know the lowercased element, so a cover loses its gradient or clipping.
+///
+/// The repair **renames the element, in its start and end tag, to the
+/// [`SVG_ELEMENT_CASE`] spelling**. Only the local name's bytes change; a
+/// prefix stays. A case-only rename keeps every byte offset in the file.
+///
+/// **Acts only on what epubveri reported** (`element_path` names the element),
+/// **and only where epubveri accepts the result**: every planned rename is
+/// tried on a copy of the book first, as in [`svg_attribute_case`].
+///
+/// **Planned after [`svg_attribute_case`]:** a lowercased element's
+/// lowercased attributes are reported at a path that runs through the
+/// element's name, and that fixer finds them by it at apply time.
+///
+/// **Declines:** a name not in the table (the rule also fires on a real typo,
+/// which has no single spelling), a tag whose name cannot be found where the
+/// parser put it, and a document that does not parse.
+fn svg_element_case(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    // document -> the reported element paths
+    let mut by_doc: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut ids: BTreeSet<&str> = BTreeSet::new();
+    for m in &report.messages {
+        if m.rule != Some(SVG_ELEMENT_RULE) {
+            continue;
+        }
+        let (Some(doc), Some(np)) = (m.location.as_deref(), m.element_path.as_ref()) else {
+            continue;
+        };
+        let Some(path) = svg_reported_path(np) else {
+            continue;
+        };
+        ids.insert(m.id);
+        by_doc.entry(doc.to_string()).or_default().insert(path);
+    }
+    // One book is one EPUB version, so every finding here has the same id.
+    let Some(&id) = ids.first() else {
+        return Vec::new();
+    };
+
+    let mut planned: BTreeMap<String, Vec<SvgElementRename>> = BTreeMap::new();
+    for (doc, reported) in &by_doc {
+        let Some(text) = ws.get_text(doc) else {
+            continue;
+        };
+        let Some(renames) = plan_svg_element_renames(&text, reported) else {
+            continue; // won't parse: decline
+        };
+        if !renames.is_empty() {
+            planned.insert(doc.clone(), renames);
+        }
+    }
+    if planned.is_empty() {
+        return Vec::new();
+    }
+
+    // Ask the detector about the result before proposing it.
+    let Some((still_reported, worse)) = svg_element_renames_trial(report, ws, &planned) else {
+        return Vec::new();
+    };
+    let mut accepted: Vec<(String, Vec<SvgElementRename>)> = Vec::new();
+    for (doc, renames) in planned {
+        if worse.contains(&doc) {
+            continue;
+        }
+        let kept: Vec<SvgElementRename> = renames
+            .into_iter()
+            .filter(|r| !still_reported.contains(&(doc.clone(), r.start)))
+            .collect();
+        if !kept.is_empty() {
+            accepted.push((doc, kept));
+        }
+    }
+    if accepted.is_empty() {
+        return Vec::new();
+    }
+
+    let n: usize = accepted.iter().map(|(_, k)| k.len()).sum();
+    let files = accepted.len();
+    let preview: Vec<Change> = accepted
+        .iter()
+        .take(6)
+        .map(|(doc, kept)| {
+            let distinct: BTreeSet<String> = kept
+                .iter()
+                .map(|r| format!("<{}> to <{}>", r.lower, r.camel))
+                .collect();
+            Change {
+                path: doc.clone(),
+                note: format!(
+                    "rename {}",
+                    distinct.into_iter().collect::<Vec<_>>().join(", ")
+                ),
+            }
+        })
+        .collect();
+    let docs_for_apply: Vec<(String, BTreeSet<String>)> = accepted
+        .into_iter()
+        .map(|(d, k)| (d, k.into_iter().map(|r| r.path).collect()))
+        .collect();
+
+    vec![ProposedFix {
+        fix_id: "fix.svg_element_case",
+        addresses_id: id.to_string(),
+        addresses_rule: Some(SVG_ELEMENT_RULE),
+        addresses_severity: addressed_severity(report, id, Some(SVG_ELEMENT_RULE)),
+        tier: Tier::AutoSafe,
+        title: format!(
+            "Restore the case of {n} SVG element name{} in {files} file{}",
+            if n == 1 { "" } else { "s" },
+            if files == 1 { "" } else { "s" }
+        ),
+        rationale: "SVG element names are case-sensitive, and a tool that treated this XHTML \
+                    as HTML lowercased some of them (`lineargradient` for `linearGradient`). An \
+                    XML reading system does not know the lowercased element. Each is renamed, in \
+                    its start and end tag, to the spelling the HTML standard's own table gives \
+                    it, which is what an HTML parser would read. Only the name changes; its \
+                    attributes and content stay as they are. A rename the validator would still \
+                    reject is left out."
+            .to_string(),
+        preview,
+        apply_fn: Box::new(move |ws: &mut Workspace| {
+            for (doc, paths) in &docs_for_apply {
+                if let Some(text) = ws.get_text(doc)
+                    && let Some(renames) = plan_svg_element_renames(&text, paths)
+                {
+                    ws.set_text(doc, apply_edits(&text, svg_element_rename_edits(renames)));
+                }
+            }
+        }),
+    }]
+}
+
+/// One planned element rename: the reported path, the byte offset of the
+/// element's `<` in the original text (unchanged by a case-only rename, so it
+/// finds the element again in a renamed copy), the local name's byte range in
+/// the start tag and, unless the element is self-closing, in the end tag.
+struct SvgElementRename {
+    path: String,
+    start: usize,
+    names: Vec<Range<usize>>,
+    lower: &'static str,
+    camel: &'static str,
+}
+
+fn svg_element_rename_edits(renames: Vec<SvgElementRename>) -> Vec<MetaEdit> {
+    renames
+        .into_iter()
+        .flat_map(|r| {
+            r.names.into_iter().map(move |range| MetaEdit {
+                range,
+                replacement: r.camel.to_string(),
+            })
+        })
+        .collect()
+}
+
+/// The renames for every reported element path in `reported` that names an
+/// SVG element whose local name is in the table. `None` (decline) if the
+/// document doesn't parse; an element whose tag names cannot be located in the
+/// text is skipped.
+fn plan_svg_element_renames(
+    text: &str,
+    reported: &BTreeSet<String>,
+) -> Option<Vec<SvgElementRename>> {
+    let prepared = prepare_content_doc(text);
+    let doc = prepared.parse()?;
+    let mut renames = Vec::new();
+    for node in doc.descendants().filter(|n| n.is_element()) {
+        // Only an SVG element's path can be one this rule reported, so the
+        // `reported` check below is also the namespace check.
+        let Some((lower, camel)) = SVG_ELEMENT_CASE
+            .iter()
+            .find(|(l, _)| *l == node.tag_name().name())
+            .copied()
+        else {
+            continue;
+        };
+        let Some(path) = svg_element_path(node) else {
+            continue;
+        };
+        if !reported.contains(&path) {
+            continue;
+        }
+        let Some(local) = tag_local_name_ranges(&prepared.working, node.range(), lower) else {
+            continue;
+        };
+        renames.push(SvgElementRename {
+            path,
+            start: prepared.unshift(node.range()).start,
+            names: local.into_iter().map(|r| prepared.unshift(r)).collect(),
+            lower,
+            camel,
+        });
+    }
+    Some(renames)
+}
+
+/// The byte ranges of an element's local name `local` in its start tag and,
+/// unless it is self-closing, in its end tag, given the element's whole range
+/// (`<` to the final `>`) in a document that parsed. `None` if the start tag's
+/// local name is not `local`, which the caller treats as a decline.
+fn tag_local_name_ranges(
+    text: &str,
+    element: Range<usize>,
+    local: &str,
+) -> Option<Vec<Range<usize>>> {
+    let s = text.get(element.clone())?;
+    let after = s.strip_prefix('<')?;
+    let qname_len = after.find(|c: char| c.is_ascii_whitespace() || c == '/' || c == '>')?;
+    let qname = &after[..qname_len];
+    if qname.rsplit(':').next() != Some(local) {
+        return None;
+    }
+    let in_qname = qname_len - local.len();
+    let mut out = Vec::with_capacity(2);
+    out.push(element.start + 1 + in_qname..element.start + 1 + qname_len);
+    if !s.ends_with("/>") {
+        // The document parsed, so the end tag is the last `</` and names the
+        // same qname: well-formedness, not a check that could decline.
+        let close = s.rfind("</")?;
+        debug_assert!(s[close + 2..].starts_with(qname));
+        let at = element.start + close + 2 + in_qname;
+        out.push(at..at + local.len());
+    }
+    Some(out)
+}
+
+/// What the trial validation of the element renames found: the `(document,
+/// element start)` pairs still reported, and the documents made worse.
+type SvgElementTrial = (BTreeSet<(String, usize)>, BTreeSet<String>);
+
+/// Apply every planned element rename to a copy of the book and ask the
+/// detector two things. First, the `(document, element start)` pairs whose
+/// renamed element it still reports under the rule. Second, the documents in
+/// which any other `(id, rule)` count rose: a restored name is a known element,
+/// so the content model now applies to it (`<svg><textpath>` becomes a
+/// misplaced `textPath`), and that finding carries no path to blame one element
+/// by. Every rename in such a document is declined, since `repair()` would undo
+/// it anyway. `None` if the copy cannot be built or read, and the caller then
+/// declines.
+fn svg_element_renames_trial(
+    report: &Report,
+    ws: &Workspace,
+    planned: &BTreeMap<String, Vec<SvgElementRename>>,
+) -> Option<SvgElementTrial> {
+    let mut trial = Workspace::load(&ws.serialize().ok()?).ok()?;
+    for (doc, renames) in planned {
+        let text = trial.get_text(doc)?;
+        let renames =
+            plan_svg_element_renames(&text, &renames.iter().map(|r| r.path.clone()).collect())?;
+        trial.set_text(doc, apply_edits(&text, svg_element_rename_edits(renames)));
+    }
+    let report_after = trial.detect().ok()?;
+    let mut reported: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for m in &report_after.messages {
+        if m.rule != Some(SVG_ELEMENT_RULE) {
+            continue;
+        }
+        if let (Some(doc), Some(path)) = (
+            m.location.clone(),
+            m.element_path.as_ref().and_then(svg_reported_path),
+        ) {
+            reported.entry(doc).or_default().insert(path);
+        }
+    }
+    // A case-only rename moves no byte, so each renamed element is found in
+    // the copy at the offset it had, and its new path read from there.
+    let mut still = BTreeSet::new();
+    for (doc, renames) in planned {
+        let Some(paths) = reported.get(doc) else {
+            continue;
+        };
+        let text = trial.get_text(doc)?;
+        let prepared = prepare_content_doc(&text);
+        let parsed = prepared.parse()?;
+        for r in renames {
+            let node = parsed
+                .descendants()
+                .find(|n| n.is_element() && prepared.unshift(n.range()).start == r.start)?;
+            if svg_element_path(node).is_some_and(|p| paths.contains(&p)) {
+                still.insert((doc.clone(), r.start));
+            }
+        }
+    }
+    let counts = |r: &Report| {
+        let mut c: BTreeMap<(String, &str, Option<&str>), usize> = BTreeMap::new();
+        for m in &r.messages {
+            if let Some(doc) = m.location.as_deref()
+                && planned.contains_key(doc)
+                && m.rule != Some(SVG_ELEMENT_RULE)
+            {
+                *c.entry((doc.to_string(), m.id, m.rule)).or_default() += 1;
+            }
+        }
+        c
+    };
+    let before = counts(report);
+    let worse: BTreeSet<String> = counts(&report_after)
+        .into_iter()
+        .filter(|(k, n)| *n > before.get(k).copied().unwrap_or(0))
+        .map(|((doc, _, _), _)| doc)
+        .collect();
+    Some((still, worse))
 }
 
 /// `RSC-005` / `opf.content_document.schema_violation`, kind
@@ -9844,6 +10236,28 @@ mod tests {
         );
     }
 
+    /// epubveri reports a prefixed SVG under the document's own prefix
+    /// (`/…/s:svg[1]/@viewbox`); the fixer reads the prefix through the
+    /// path's `namespaces`, not by its spelling.
+    #[test]
+    fn a_lowercased_attribute_on_a_prefixed_svg_gets_its_case_back() {
+        let mut ws = svg_book(
+            r#"<s:svg xmlns:s="http://www.w3.org/2000/svg" viewbox="0 0 10 20"><s:rect width="1" height="1"/></s:svg>"#,
+        );
+        assert!(
+            svg_attribute_findings(&ws)
+                .iter()
+                .any(|p| p.ends_with("/s:svg[1]/@viewbox")),
+            "the fixture must be reported under its own prefix"
+        );
+        let fixes = svg_attribute_case(&ws.detect().unwrap(), &ws);
+        assert_eq!(fixes.len(), 1);
+        fixes.into_iter().next().unwrap().apply(&mut ws);
+        let out = ws.get_text("c.xhtml").unwrap();
+        assert!(out.contains(r#"viewBox="0 0 10 20""#), "got: {out}");
+        assert!(svg_attribute_findings(&ws).is_empty());
+    }
+
     /// `alt` on `<image>` is not a case problem and has no single repair.
     #[test]
     fn an_attribute_outside_the_table_is_declined() {
@@ -9874,6 +10288,222 @@ mod tests {
             assert_eq!(c.to_ascii_lowercase(), l);
             assert_ne!(c, l);
         }
+    }
+
+    // ---- fix.svg_element_case --------------------------------------
+
+    /// The element path of every finding under the SVG element rule.
+    fn svg_element_findings(ws: &Workspace) -> Vec<String> {
+        ws.detect()
+            .unwrap()
+            .messages
+            .iter()
+            .filter(|m| m.rule == Some(SVG_ELEMENT_RULE))
+            .filter_map(|m| Some(m.element_path.as_ref()?.path.clone()))
+            .collect()
+    }
+
+    /// Apply one element-case fix, asserting there is exactly one.
+    fn apply_svg_element_case(ws: &mut Workspace) {
+        let fixes = svg_element_case(&ws.detect().unwrap(), ws);
+        assert_eq!(fixes.len(), 1);
+        assert_eq!(fixes[0].tier, Tier::AutoSafe);
+        fixes.into_iter().next().unwrap().apply(ws);
+    }
+
+    /// The common shape: a gradient, a clip path and a text path, each renamed
+    /// in both tags, attributes and content untouched, and nothing left to
+    /// report under the rule.
+    #[test]
+    fn lowercased_svg_elements_get_their_case_back() {
+        let mut ws = svg_book(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"><defs><lineargradient id="g" x2="1"><stop offset="0"/></lineargradient ></defs><clippath id="c"><rect width="1" height="1"/></clippath><path id="p" d="M0 0L1 1"/><text><textpath xlink:href="#p">lineargradient&nbsp;</textpath></text></svg>"##,
+        );
+        assert_eq!(
+            svg_element_findings(&ws).len(),
+            3,
+            "the fixture must carry all three findings, or this test proves nothing"
+        );
+        assert_eq!(
+            svg_element_case(&ws.detect().unwrap(), &ws)[0].addresses_id,
+            "RSC-005"
+        );
+        apply_svg_element_case(&mut ws);
+        let out = ws.get_text("c.xhtml").unwrap();
+        assert!(
+            out.contains(r##"<defs><linearGradient id="g" x2="1"><stop offset="0"/></linearGradient ></defs><clipPath id="c"><rect width="1" height="1"/></clipPath>"##),
+            "got: {out}"
+        );
+        assert!(
+            out.contains(
+                r##"<text><textPath xlink:href="#p">lineargradient&nbsp;</textPath></text>"##
+            ),
+            "the text content is not a name, and the entity stays: {out}"
+        );
+        assert!(svg_element_findings(&ws).is_empty());
+    }
+
+    /// A prefix stays; only the local name changes, in both tags. A
+    /// self-closing element has one tag to rename.
+    #[test]
+    fn a_prefixed_or_self_closing_svg_element_keeps_its_form() {
+        let mut ws = svg_book(
+            r##"<s:svg xmlns:s="http://www.w3.org/2000/svg"><s:defs><s:lineargradient id="g"><s:stop offset="0"/></s:lineargradient></s:defs><s:clippath id="c"/></s:svg>"##,
+        );
+        assert_eq!(svg_element_findings(&ws).len(), 2);
+        apply_svg_element_case(&mut ws);
+        let out = ws.get_text("c.xhtml").unwrap();
+        assert!(
+            out.contains(r##"<s:linearGradient id="g"><s:stop offset="0"/></s:linearGradient></s:defs><s:clipPath id="c"/>"##),
+            "got: {out}"
+        );
+        assert!(svg_element_findings(&ws).is_empty());
+    }
+
+    /// Nested renames: each element is found again in the trial copy by its
+    /// offset, so a renamed parent does not hide its renamed child.
+    #[test]
+    fn nested_lowercased_svg_elements_are_all_renamed() {
+        let mut ws = svg_book(
+            r##"<svg xmlns="http://www.w3.org/2000/svg"><filter id="f"><femerge><femergenode in="SourceGraphic"/></femerge></filter></svg>"##,
+        );
+        assert_eq!(svg_element_findings(&ws).len(), 2);
+        apply_svg_element_case(&mut ws);
+        let out = ws.get_text("c.xhtml").unwrap();
+        assert!(
+            out.contains(r##"<feMerge><feMergeNode in="SourceGraphic"/></feMerge>"##),
+            "got: {out}"
+        );
+        assert!(svg_element_findings(&ws).is_empty());
+    }
+
+    /// The element fixer runs after the attribute fixer, so a lowercased
+    /// element's lowercased attribute is renamed too: applying the whole plan
+    /// in order clears both rules. In the other order the attribute fixer
+    /// would look for `lineargradient[1]/@gradientunits` and find nothing.
+    #[test]
+    fn a_lowercased_element_and_its_lowercased_attribute_are_both_restored() {
+        let mut ws = svg_book(
+            r##"<svg xmlns="http://www.w3.org/2000/svg"><defs><lineargradient id="g" gradientunits="userSpaceOnUse"><stop offset="0"/></lineargradient></defs></svg>"##,
+        );
+        assert_eq!(svg_element_findings(&ws).len(), 1);
+        assert_eq!(svg_attribute_findings(&ws).len(), 1);
+        let plan = plan(&ws.detect().unwrap(), &ws, Goal::Valid);
+        let ids: Vec<&str> = plan.iter().map(|f| f.fix_id).collect();
+        let at = |id| ids.iter().position(|f| *f == id).unwrap();
+        assert!(at("fix.svg_attribute_case") < at("fix.svg_element_case"));
+        for fix in plan {
+            fix.apply(&mut ws);
+        }
+        let out = ws.get_text("c.xhtml").unwrap();
+        assert!(
+            out.contains(r##"<linearGradient id="g" gradientUnits="userSpaceOnUse">"##),
+            "got: {out}"
+        );
+        assert!(svg_element_findings(&ws).is_empty());
+        assert!(svg_attribute_findings(&ws).is_empty());
+    }
+
+    /// `feDropShadow` is SVG 2; EPUB 2's SVG 1.1 does not know it either way,
+    /// so the detector still reports the restored name and the rename is
+    /// declined. The gradient in the same document is still renamed.
+    #[test]
+    fn an_element_rename_the_detector_would_still_reject_is_declined() {
+        let mut ws = svg_book(
+            r##"<svg xmlns="http://www.w3.org/2000/svg"><defs><lineargradient id="g"/></defs><filter id="f"><fedropshadow dx="1"/></filter></svg>"##,
+        );
+        assert_eq!(svg_element_findings(&ws).len(), 2);
+        apply_svg_element_case(&mut ws);
+        let out = ws.get_text("c.xhtml").unwrap();
+        assert!(out.contains("<linearGradient "), "got: {out}");
+        assert!(out.contains("<fedropshadow "), "got: {out}");
+    }
+
+    /// A restored name is a known element, so the content model applies to it:
+    /// `textPath` straight under `<svg>` is misplaced, a keyless finding that
+    /// did not exist before. `repair()` would undo the rename, so it is not
+    /// proposed.
+    #[test]
+    fn an_element_rename_that_raises_another_finding_is_declined() {
+        let ws =
+            svg_book(r##"<svg xmlns="http://www.w3.org/2000/svg"><textpath>a</textpath></svg>"##);
+        assert_eq!(svg_element_findings(&ws).len(), 1);
+        assert!(svg_element_case(&ws.detect().unwrap(), &ws).is_empty());
+    }
+
+    /// The rule fires on a real typo too, and a typo has no one spelling.
+    #[test]
+    fn an_svg_element_outside_the_table_is_declined() {
+        let ws = svg_book(
+            r##"<svg xmlns="http://www.w3.org/2000/svg"><rectt width="1" height="1"/></svg>"##,
+        );
+        assert_eq!(svg_element_findings(&ws).len(), 1);
+        assert!(svg_element_case(&ws.detect().unwrap(), &ws).is_empty());
+    }
+
+    /// Only the element a finding names is renamed: with one of two findings
+    /// taken out of the report, the other element stays as it is.
+    #[test]
+    fn only_the_reported_svg_element_is_renamed() {
+        let mut ws = svg_book(
+            r##"<svg xmlns="http://www.w3.org/2000/svg"><clippath id="a"/><clippath id="b"/></svg>"##,
+        );
+        let mut report = ws.detect().unwrap();
+        let before = report.messages.len();
+        report.messages.retain(|m| {
+            m.element_path
+                .as_ref()
+                .is_none_or(|p| !p.path.ends_with("svg:clippath[2]"))
+        });
+        assert_eq!(report.messages.len(), before - 1);
+        let fixes = svg_element_case(&report, &ws);
+        assert_eq!(fixes.len(), 1);
+        fixes.into_iter().next().unwrap().apply(&mut ws);
+        let out = ws.get_text("c.xhtml").unwrap();
+        assert!(
+            out.contains(r##"<clipPath id="a"/><clippath id="b"/>"##),
+            "got: {out}"
+        );
+    }
+
+    /// Nothing reported, nothing touched.
+    #[test]
+    fn an_unreported_lowercased_element_is_left_alone() {
+        let ws = svg_book(r##"<svg xmlns="http://www.w3.org/2000/svg"><clippath id="c"/></svg>"##);
+        assert!(svg_element_case(&Report::default(), &ws).is_empty());
+    }
+
+    /// The table is the standard's: 37 rows, every first column the lowercase
+    /// of its second, and no two rows sharing either spelling.
+    #[test]
+    fn the_svg_element_case_table_is_one_to_one_and_only_restores_case() {
+        let lowers: BTreeSet<&str> = SVG_ELEMENT_CASE.iter().map(|(l, _)| *l).collect();
+        let camels: BTreeSet<&str> = SVG_ELEMENT_CASE.iter().map(|(_, c)| *c).collect();
+        assert_eq!(lowers.len(), 37);
+        assert_eq!(camels.len(), 37);
+        for (l, c) in SVG_ELEMENT_CASE {
+            assert_eq!(c.to_ascii_lowercase(), l);
+            assert_ne!(c, l);
+        }
+    }
+
+    /// The tag-name locator: start and end tag, a prefix, whitespace before
+    /// the end tag's `>`, a self-closing tag, and a start tag naming another
+    /// element.
+    #[test]
+    fn tag_local_name_ranges_finds_both_tags() {
+        let t = "<a:clippath id='x'>y</a:clippath >";
+        assert_eq!(
+            tag_local_name_ranges(t, 0..t.len(), "clippath"),
+            Some(vec![3..11, 24..32])
+        );
+        let t = "<clippath/>";
+        assert_eq!(
+            tag_local_name_ranges(t, 0..t.len(), "clippath"),
+            Some(vec![Range { start: 1, end: 9 }])
+        );
+        let t = "<clippathx>y</clippathx>";
+        assert_eq!(tag_local_name_ranges(t, 0..t.len(), "clippath"), None);
     }
 
     // ---- fix.empty_title / fix.missing_title: the three sources ----------

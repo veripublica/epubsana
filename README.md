@@ -111,6 +111,12 @@ Forty-five fixers so far:
   `preserveaspectratio` and the rest of the HTML standard's camelCase table →
   `viewBox`, `preserveAspectRatio`, the names an XML reading system looks for.
   Only the name changes. A rename the validator would still reject is left out.
+- **`RSC-005` / `RSC-025` / an SVG element that lost its case** —
+  `lineargradient`, `clippath`, `textpath` and the rest of the HTML standard's
+  camelCase element table → `linearGradient`, `clipPath`, `textPath`, renamed
+  in both the start and end tag. A name not in the table (a typo) and a rename
+  the validator would still reject, or that makes the document worse, are left
+  out.
 - **`RSC-005` / an uppercase `dir`** — `dir="LTR"` / `dir="RTL"` → `ltr` / `rtl`,
   which is how a browser already reads them. Any other value is left alone.
 - **`RSC-005` / empty `lang`** — an empty `lang=""` / `xml:lang=""`, which EPUB 2

@@ -8,6 +8,39 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [Unreleased]
+
+### Added
+
+- **`fix.svg_element_case` (AutoSafe): an SVG element whose name lost its
+  case.** A tool that treats XHTML as HTML writes `lineargradient`,
+  `clippath` or `textpath` for the camelCase SVG element names, and an XML
+  reading system does not know them, so a cover can lose its gradient or
+  clipping path. The fixer renames each reported element, in its start and end
+  tag, to the spelling in the HTML standard's own *adjust SVG tag names* table
+  (37 rows), which is what an HTML parser reads. It declines a name the table
+  does not list, which is how a real typo arrives. Like `fix.svg_attribute_case`
+  it tries every rename on a copy of the book first. It drops a rename the
+  validator still reports, and every rename in a document where the trial
+  raises any other finding: a restored element is checked where it stands, so
+  `<svg><textpath>` becomes a misplaced `textPath`. Verified on test books
+  only; none of the 562 books on our shelf has the shape.
+
+### Changed
+
+- **Requires epubveri 0.28.0.** It gives a lowercased SVG element name the rule
+  key the new fixer acts on, and checks MathML attribute names as epubcheck
+  does, so a book with MathML that epubcheck rejects no longer passes as valid
+  after repair.
+
+### Fixed
+
+- **`fix.svg_attribute_case` now repairs an SVG written with a prefix**
+  (`<s:svg viewbox="…">`). The validator reports such an element under the
+  document's own prefix, and the fixer compared that prefix by its spelling,
+  so it declined the attribute without saying so. It now reads what the prefix
+  means.
+
 ## [0.27.0] - 2026-10-14
 
 ### Added

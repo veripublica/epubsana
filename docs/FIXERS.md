@@ -64,6 +64,7 @@ grows one carefully-argued entry at a time.
 | `RSC-005` | `navdoc.ol.empty` | ConfirmNeeded | An optional `<nav>` in the navigation document holds an `<ol>` with no `<li>` | [Delete the whole `<nav>`](#rsc-005--an-optional-nav-whose-list-is-empty) |
 | `OPF-054` | *(none)* | ConfirmNeeded | A `<dc:date>` holds no date at all (EPUB 2) | [Drop the empty element; never touch a non-empty one](#opf-054--an-empty-dcdate-epub-2) |
 | `RSC-005` / `RSC-025` | `svg.attributes.attribute_not_allowed` (a lowercased camelCase name) | AutoSafe | An SVG attribute was lowercased by an HTML tool (`viewbox`), so an XML reading system ignores it | [Restore the name's case from the HTML standard's own table](#rsc-005--rsc-025--an-svg-attribute-whose-name-lost-its-case) |
+| `RSC-005` / `RSC-025` | `svg.elements.element_not_allowed` (a lowercased camelCase name) | AutoSafe | An SVG element was lowercased by an HTML tool (`lineargradient`), so an XML reading system does not know it | [Restore the name's case from the HTML standard's own table](#rsc-005--rsc-025--an-svg-element-whose-name-lost-its-case) |
 | `RSC-005` | `opf.content_document.schema_violation` (`params[0] == "dir"`, an uppercase `LTR`/`RTL`) | AutoSafe | A `dir` value written in capitals, which the grammar does not accept | [Lowercase it to `ltr` / `rtl`](#rsc-005--a-dir-value-in-capitals) |
 | `RSC-005` | `ncx.schema_violation` (`missing_attribute`, `params` = `[element, "id"]`) | ConfirmNeeded | An NCX `navPoint` has no `id`, which the NCX grammar requires | [Give it a new id, unique in the NCX](#rsc-005--an-ncx-navpoint-with-no-id) |
 
@@ -2557,6 +2558,83 @@ severity. The whole-shelf plan digest gains exactly that line. The only other
 change is that this book's next proposal moves from `--apply` index 3 to 4. The
 trial validation never declined anything here; the guard is pinned by tests on a
 `<rect viewbox>`, which epubveri reports again as `viewBox`.
+
+---
+
+## RSC-005 / RSC-025 — an SVG element whose name lost its case
+
+> **Written spec-first on 2026-10-15.** The finding shape below is what
+> epubveri 0.28.0 reported on probe books before any code existed. **The shelf
+> holds none** (562 books, 0 findings under the rule), so this fixer is
+> verified on fixtures only.
+
+**Finding.** `svg.elements.element_not_allowed`, `RSC-005` (error) on EPUB 2,
+`RSC-025` (usage) on EPUB 3, `violation_kind` none. `params` =
+`[element as written, parent's local name]`, and `element_path` names the
+element:
+
+```
+…/svg:svg[1]/svg:defs[1]/svg:lineargradient[1]      params ["lineargradient", "defs"]
+```
+
+The rule key is new in epubveri 0.28.0, added for this repair after the
+attribute twin shipped. Before it the finding carried no key, no `params` and
+no path.
+
+**The shape.** The same damage as the attribute case, on element names: a tool
+that treats XHTML as HTML writes `lineargradient`, `clippath`, `textpath`,
+`foreignobject`. An HTML parser reads them back through the *adjust SVG tag
+names* table. An XML reading system does not know the lowercased element, so a
+cover loses its gradient, its clipping or its text path.
+
+**Fix** (`fix.svg_element_case`, AutoSafe). Rename the element, in its start
+tag and its end tag, to the name the *adjust SVG tag names* table gives (37
+rows, all lowercase → camelCase, verbatim from the HTML standard, fetched
+2026-10-15). Only the local name's bytes change; a prefix (`s:lineargradient`),
+the attributes and the content stay as they are. One proposal per book.
+
+**Why it is safe.** As for the attribute table: it is the HTML standard's own
+inverse of this damage, total and one-to-one on its rows. And a case-only
+rename keeps every byte offset in the file, so nothing else moves.
+
+**When it declines.**
+
+- **A name not in the table.** The rule fires for any SVG element name the
+  vocabulary does not know, so a real typo (`rectt`) arrives under the same
+  key. It has no single correct spelling.
+- **An element whose path no finding names**, or a document that does not
+  parse.
+- **A rename epubveri still reports under the restored name**, found the same
+  way as for the attribute case: the renames are applied to a copy of the book
+  first, and the detector decides. No table of which element may sit where is
+  kept here.
+- **Every rename in a document where the trial raises any other `(id, rule)`
+  count.** A restored name is a known element, so the content model applies to
+  it where it stands: `<svg><textpath>` becomes a `textPath` directly under
+  `<svg>`, which draws a keyless `RSC-005` that was not there before (probe,
+  EPUB 2 and 3). `repair()` would count that as a rise and undo the fix, so it
+  is not proposed. The new finding has no path, so it cannot be pinned on one
+  element; the whole document is declined, which is the conservative side.
+
+A camelCase sibling of the same name (`linearGradient` beside a lowercased
+`lineargradient`) is **not** a reason to decline: they are two elements, not two
+values for one, and the rename makes the second one what an HTML parser already
+reads it as.
+
+**Order with the attribute fixer.** A lowercased element usually carries
+lowercased attributes too (`<lineargradient gradientunits>`), and epubveri
+reports those under the attribute rule at a path that runs through the
+element's name. Renaming the element changes that path, so
+`fix.svg_attribute_case` is planned (and applied) first. The probe confirms the
+rename reveals nothing: the attribute finding exists before it, and only its
+path changes.
+
+**Prefixes.** epubveri writes `element_path` with the document's own prefix
+where there is one (`/…/s:svg[1]/s:lineargradient[1]` for `<s:svg>`), and
+binds it in the path's `namespaces`. Both SVG fixers read a reported path
+through that map before comparing it with the path they compute. Until
+2026-10-15 `fix.svg_attribute_case` compared the prefix by its spelling and so
+declined every prefixed SVG silently; found while testing this fixer.
 
 ---
 
