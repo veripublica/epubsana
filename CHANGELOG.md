@@ -8,7 +8,12 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
-## [Unreleased]
+## [0.30.0] - 2026-10-16
+
+Three new fixers (49 in all); `fix.nested_anchor` now repairs EPUB 3 books
+too, and both entity fixers know every XHTML 1.x entity. The `epubveri` floor
+is unchanged (0.28.0), and so is the WASM package's wasm-bindgen glue
+(0.2.126).
 
 ### Changed
 
