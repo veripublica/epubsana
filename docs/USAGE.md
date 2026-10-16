@@ -647,7 +647,7 @@ carries `error` (the reason), no `summary`, and no items:
 ```json
 {
   "tool": "epubsana",
-  "tool_version": "0.28.0",
+  "tool_version": "0.29.0",
   "convention": "0.7",
   "status": "error",
   "inputs": [
