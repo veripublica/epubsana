@@ -85,6 +85,7 @@ pub fn plan(report: &Report, ws: &Workspace, _goal: Goal) -> Vec<ProposedFix> {
     fixes.extend(ncx_content_src_spaces(report, ws));
     fixes.extend(content_url_spaces(report, ws));
     fixes.extend(content_properties(report, ws));
+    fixes.extend(missing_scripts(report, ws));
     fixes.extend(empty_titles(report, ws));
     fixes.extend(missing_titles(report, ws));
     fixes.extend(bare_text_in_body(report, ws));
@@ -8271,6 +8272,276 @@ fn compute_properties_edit(
     ))
 }
 
+/// The rule a dead `<script src>` is reported under, shared with the other
+/// content-document references to a missing resource.
+const MISSING_RESOURCE_RULE: &str = "opf.content_document.reference_missing_resource";
+
+/// `RSC-007` / `opf.content_document.reference_missing_resource` on a
+/// `<script src>`: the script names a file the book does not contain. On the
+/// shelf, a Kobo `kobo.js` left behind in four EPUB 3 books.
+///
+/// Deletes the element, and — when the document then needs no `scripted`
+/// property — removes that token from its manifest item, whether the book
+/// declared it or [`content_properties`] has just done so. One proposal per
+/// document.
+///
+/// **What makes a document scripted is the detector's answer**, not a list
+/// kept here: the deletion is tried on a copy of the book with the token
+/// removed, and if the copy still reports the document as using `scripted`,
+/// the token stays. The proposal is made only if no `(id, rule)` count rises
+/// anywhere in that copy.
+///
+/// `ConfirmNeeded`: in a reading system that resolves the URL inside the book
+/// the script has never run, but whether a Kobo device supplies its own
+/// `kobo.js` is not something we can measure.
+fn missing_scripts(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    // document -> reported element paths
+    let mut by_doc: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for m in &report.messages {
+        if m.rule != Some(MISSING_RESOURCE_RULE) {
+            continue;
+        }
+        let (Some(doc), Some(path)) = (
+            m.location.as_deref(),
+            m.element_path.as_ref().and_then(svg_reported_path),
+        ) else {
+            continue;
+        };
+        by_doc.entry(doc.to_string()).or_default().insert(path);
+    }
+    if by_doc.is_empty() {
+        return Vec::new();
+    }
+    let opf = opf_path(ws);
+
+    let mut fixes = Vec::new();
+    for (doc, reported) in by_doc {
+        let Some(text) = ws.get_text(&doc) else {
+            continue;
+        };
+        let Some(ranges) = plan_script_deletions(ws, &doc, &text, &reported) else {
+            continue;
+        };
+        if ranges.is_empty() {
+            continue;
+        }
+        let Some(strip) = script_deletion_trial(report, ws, opf.as_deref(), &doc, &reported) else {
+            continue;
+        };
+        let n = ranges.len();
+        let opf_for_apply = opf.clone();
+        let doc_for_apply = doc.clone();
+        let mut preview = vec![Change {
+            path: doc.clone(),
+            note: format!("delete {n} <script> element(s) whose src is not in the book"),
+        }];
+        if strip && let Some(opf) = &opf {
+            preview.push(Change {
+                path: opf.clone(),
+                note: format!("manifest item for {doc}: no \"scripted\" property"),
+            });
+        }
+
+        fixes.push(ProposedFix {
+            fix_id: "fix.missing_script",
+            addresses_id: "RSC-007".to_string(),
+            addresses_rule: Some(MISSING_RESOURCE_RULE),
+            addresses_severity: addressed_severity(report, "RSC-007", Some(MISSING_RESOURCE_RULE)),
+            tier: Tier::ConfirmNeeded,
+            title: format!(
+                "Delete {n} <script> element(s) naming a file not in the book, in {doc}"
+            ),
+            rationale: "The script's file is not in the book, so a reading system that resolves \
+                        the reference inside the book has never run it, and the element has no \
+                        content of its own: deleting it changes nothing a reader sees. If nothing \
+                        else in the document is a script, the manifest item stops declaring \
+                        \"scripted\"; epubveri, asked on a copy of the book, decides that. These \
+                        references are Kobo's kobo.js, and whether a Kobo device supplies that \
+                        file itself is not known to us, so you decide."
+                .to_string(),
+            preview,
+            apply_fn: Box::new(move |ws: &mut Workspace| {
+                apply_script_deletion(
+                    ws,
+                    opf_for_apply.as_deref(),
+                    &doc_for_apply,
+                    &reported,
+                    strip,
+                );
+            }),
+        });
+    }
+    fixes
+}
+
+/// The byte ranges (with the whitespace before each) of every reported
+/// `<script>` that is safe to delete: a `script` with a `src` at a reported
+/// path, with nothing but whitespace inside, and whose file's name is nowhere
+/// in the container (then the reference may be stale, not dead). `None` if the
+/// document won't parse.
+fn plan_script_deletions(
+    ws: &Workspace,
+    doc: &str,
+    text: &str,
+    reported: &BTreeSet<String>,
+) -> Option<Vec<Range<usize>>> {
+    let prepared = prepare_content_doc(text);
+    let parsed = prepared.parse()?;
+    let names: BTreeSet<String> = ws
+        .names()
+        .filter_map(|n| n.rsplit('/').next())
+        .map(nfc)
+        .collect();
+    let mut out = Vec::new();
+    for node in parsed
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "script")
+    {
+        if !svg_element_path(node).is_some_and(|p| reported.contains(&p)) {
+            continue;
+        }
+        let Some(src) = node.attr_no_ns("src") else {
+            continue;
+        };
+        let empty = node
+            .children()
+            .all(|c| c.is_text() && c.text().is_some_and(epubveri::xmlext::is_xml_blank));
+        if !empty {
+            continue; // inline code too: deleting it would drop code
+        }
+        let target = resolve(&dir_of(doc), src);
+        let base = target.rsplit('/').next().unwrap_or(&target);
+        if names.contains(&nfc(base)) {
+            continue; // the file is in the book under another path
+        }
+        out.push(with_leading_whitespace(
+            text,
+            prepared.unshift(node.range()),
+        ));
+    }
+    Some(out)
+}
+
+/// Try the deletion on a copy of the book, with `scripted` removed from the
+/// document's manifest item. `Some(true)` when the copy reports nothing that
+/// still makes the document scripted, `Some(false)` when something does (the
+/// token must stay), and in both cases no `(id, rule)` count rose against
+/// `report`. `None` (decline) if a count rose or the copy cannot be built.
+fn script_deletion_trial(
+    report: &Report,
+    ws: &Workspace,
+    opf: Option<&str>,
+    doc: &str,
+    reported: &BTreeSet<String>,
+) -> Option<bool> {
+    let counts = |r: &Report| {
+        let mut c: BTreeMap<(&str, Option<&str>), usize> = BTreeMap::new();
+        for m in &r.messages {
+            *c.entry((m.id, m.rule)).or_default() += 1;
+        }
+        c
+    };
+    let before = counts(report);
+    let rose = |r: &Report| {
+        counts(r)
+            .iter()
+            .any(|(k, n)| *n > before.get(k).copied().unwrap_or(0))
+    };
+    let still_scripted = |r: &Report| {
+        r.messages.iter().any(|m| {
+            m.rule == Some("opf.content_document.property_used_undeclared")
+                && m.location.as_deref() == Some(doc)
+                && m.params.first().map(String::as_str) == Some("scripted")
+        })
+    };
+    for strip in [true, false] {
+        let mut trial = Workspace::load(&ws.serialize().ok()?).ok()?;
+        apply_script_deletion(&mut trial, opf, doc, reported, strip);
+        let after = trial.detect().ok()?;
+        if strip && still_scripted(&after) {
+            continue; // something else needs the token: keep it, and ask again
+        }
+        return (!rose(&after)).then_some(strip);
+    }
+    None
+}
+
+/// Delete the reported dead scripts in `doc` and, with `strip`, remove the
+/// `scripted` token from its manifest item. Recomputed from the current bytes,
+/// because an earlier fix may have moved them.
+fn apply_script_deletion(
+    ws: &mut Workspace,
+    opf: Option<&str>,
+    doc: &str,
+    reported: &BTreeSet<String>,
+    strip: bool,
+) {
+    if let Some(text) = ws.get_text(doc)
+        && let Some(ranges) = plan_script_deletions(ws, doc, &text, reported)
+        && !ranges.is_empty()
+    {
+        let edits = ranges
+            .into_iter()
+            .map(|range| MetaEdit {
+                range,
+                replacement: String::new(),
+            })
+            .collect();
+        ws.set_text(doc, apply_edits(&text, edits));
+    }
+    if strip
+        && let Some(opf) = opf
+        && let Some(text) = ws.get_text(opf)
+        && let Some(edit) = drop_property_edit(ws, opf, &text, doc, "scripted")
+    {
+        ws.set_text(opf, apply_edits(&text, vec![edit]));
+    }
+}
+
+/// The edit removing `prop` from the `properties` of the manifest item for
+/// `doc`, and the attribute itself when `prop` was its only token. `None` when
+/// the package won't parse, no item resolves to `doc`, or the token is absent.
+fn drop_property_edit(
+    ws: &Workspace,
+    opf_path: &str,
+    opf: &str,
+    doc: &str,
+    prop: &str,
+) -> Option<MetaEdit> {
+    let parsed = parse_xml(opf)?;
+    let base = dir_of(opf_path);
+    let item = parsed
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "item")
+        .find(|n| {
+            n.attr_no_ns("href")
+                .is_some_and(|h| to_entry(ws, resolve(&base, h)) == doc)
+        })?;
+    let attr = item
+        .attributes()
+        .find(|a| a.namespace().is_none() && a.name() == "properties")?;
+    let tokens: Vec<&str> = attr
+        .value()
+        .split(is_xml_space)
+        .filter(|t| !t.is_empty())
+        .collect();
+    if !tokens.contains(&prop) {
+        return None;
+    }
+    let kept: Vec<&str> = tokens.into_iter().filter(|t| *t != prop).collect();
+    Some(if kept.is_empty() {
+        MetaEdit {
+            range: with_leading_whitespace(opf, attr.range()),
+            replacement: String::new(),
+        }
+    } else {
+        MetaEdit {
+            range: attr.range_value(),
+            replacement: kept.join(" "),
+        }
+    })
+}
+
 /// `RSC-005` / `opf.content_document.empty_title`: an XHTML `<title>` element
 /// with no text. HTML requires a non-empty title, and it is the **most common
 /// defect in the corpus** — whole libraries ship generated documents whose title
@@ -11694,6 +11965,249 @@ mod tests {
     fn an_unreported_navpoint_without_id_is_left_alone() {
         let ws = navpoint_book(&np(r#" playOrder="1""#, "A", "a.xhtml", ""));
         assert!(ncx_navpoint_ids(&Report::default(), &ws).is_empty());
+    }
+
+    // ---- fix.missing_script -------------------------------------------
+
+    /// An EPUB 3 book whose chapter `c.xhtml` has `head_extra` in its `<head>`
+    /// and `body` in its body, declared with `props` (if any), plus `extra`
+    /// entries, for the real detector.
+    fn script_book(
+        props: Option<&str>,
+        head_extra: &str,
+        body: &str,
+        extra: &[(&str, &str)],
+    ) -> Workspace {
+        let props = props
+            .map(|p| format!(r#" properties="{p}""#))
+            .unwrap_or_default();
+        let opf = format!(
+            r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="id">x</dc:identifier><dc:title>t</dc:title><dc:language>en</dc:language><meta property="dcterms:modified">2026-01-01T00:00:00Z</meta></metadata>
+  <manifest><item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/><item href="c.xhtml" id="c" media-type="application/xhtml+xml"{props}/>{items}</manifest>
+  <spine><itemref idref="c"/></spine>
+</package>"#,
+            items = extra
+                .iter()
+                .filter(|(n, _)| n.ends_with(".xhtml"))
+                .map(|(n, _)| format!(
+                    r#"<item href="{n}" id="x-{}" media-type="application/xhtml+xml"/>"#,
+                    n.len()
+                ))
+                .collect::<String>()
+        );
+        let chapter = format!(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml"><head><title>t</title>
+  {head_extra}
+</head><body>{body}</body></html>"#
+        );
+        let mut files = vec![
+            (
+                "META-INF/container.xml",
+                r#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#,
+            ),
+            ("content.opf", opf.as_str()),
+            (
+                "nav.xhtml",
+                r#"<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><head><title>n</title></head><body><nav epub:type="toc"><ol><li><a href="c.xhtml">c</a></li></ol></nav></body></html>"#,
+            ),
+            ("c.xhtml", chapter.as_str()),
+        ];
+        files.extend_from_slice(extra);
+        container(&files)
+    }
+
+    const DEAD_SCRIPT: &str = r#"<script type="text/javascript" src="js/kobo.js"></script>"#;
+
+    fn opf_item_c(ws: &Workspace) -> String {
+        let opf = ws.get_text("content.opf").unwrap();
+        let at = opf.find(r#"<item href="c.xhtml""#).unwrap();
+        opf[at..at + opf[at..].find("/>").unwrap() + 2].to_string()
+    }
+
+    /// The shelf's shape, run through `repair()` with every fix approved:
+    /// `fix.content_properties` declares `scripted` for the dead script, this
+    /// fixer deletes the script and takes the token back out, and the book
+    /// validates.
+    #[test]
+    fn a_dead_script_is_deleted_and_scripted_goes_with_it() {
+        let mut ws = script_book(None, DEAD_SCRIPT, "<p>x</p>", &[]);
+        let r0 = ws.detect().unwrap();
+        assert!(
+            r0.messages
+                .iter()
+                .any(|m| m.rule == Some(MISSING_RESOURCE_RULE))
+        );
+        assert!(
+            r0.messages
+                .iter()
+                .any(|m| m.rule == Some("opf.content_document.property_used_undeclared")),
+            "the fixture must carry the shelf's OPF-014 too"
+        );
+        let fixes = missing_scripts(&r0, &ws);
+        assert_eq!(fixes.len(), 1);
+        assert_eq!(fixes[0].tier, Tier::ConfirmNeeded);
+        let r = crate::repair(
+            &mut ws,
+            crate::Goal::Valid,
+            crate::Policy::AskEach,
+            &mut crate::tests::ApproveAll,
+        )
+        .unwrap();
+        assert!(r.fixes.iter().all(|f| f.outcome == crate::Outcome::Applied));
+        assert!(!ws.get_text("c.xhtml").unwrap().contains("<script"));
+        assert_eq!(
+            opf_item_c(&ws),
+            r#"<item href="c.xhtml" id="c" media-type="application/xhtml+xml"/>"#
+        );
+        // The fixture's own container draws PKG-007; nothing else is left.
+        let left: Vec<_> = ws
+            .detect()
+            .unwrap()
+            .messages
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        assert_eq!(left, ["PKG-007"]);
+    }
+
+    /// A book that declares `scripted` beside another token keeps the other.
+    #[test]
+    fn a_declared_scripted_token_is_removed_and_the_others_kept() {
+        let mut ws = script_book(Some("scripted svg"), DEAD_SCRIPT, "<p>x</p>", &[]);
+        let fixes = missing_scripts(&ws.detect().unwrap(), &ws);
+        assert_eq!(fixes.len(), 1);
+        fixes.into_iter().next().unwrap().apply(&mut ws);
+        assert!(
+            opf_item_c(&ws).contains(r#"properties="svg""#),
+            "{}",
+            opf_item_c(&ws)
+        );
+    }
+
+    /// Another script in the document still needs `scripted`: the dead one
+    /// goes, the token stays. The detector says so, on a copy.
+    #[test]
+    fn scripted_stays_when_another_script_needs_it() {
+        let mut ws = script_book(
+            Some("scripted"),
+            &format!("{DEAD_SCRIPT}<script>var a = 1;</script>"),
+            "<p>x</p>",
+            &[],
+        );
+        let fixes = missing_scripts(&ws.detect().unwrap(), &ws);
+        assert_eq!(fixes.len(), 1);
+        fixes.into_iter().next().unwrap().apply(&mut ws);
+        let out = ws.get_text("c.xhtml").unwrap();
+        assert!(
+            !out.contains("kobo.js") && out.contains("var a = 1;"),
+            "{out}"
+        );
+        assert!(opf_item_c(&ws).contains(r#"properties="scripted""#));
+    }
+
+    /// Code inside the element as well as a dead `src`: deleting it drops code.
+    #[test]
+    fn a_dead_script_with_inline_code_is_declined() {
+        let ws = script_book(
+            Some("scripted"),
+            r#"<script src="js/kobo.js">var a = 1;</script>"#,
+            "<p>x</p>",
+            &[],
+        );
+        let r = ws.detect().unwrap();
+        assert!(
+            r.messages
+                .iter()
+                .any(|m| m.rule == Some(MISSING_RESOURCE_RULE))
+        );
+        assert!(missing_scripts(&r, &ws).is_empty());
+    }
+
+    /// The file is in the book under another path: the reference is stale, not
+    /// dead, and repointing it is another fixer's.
+    #[test]
+    fn a_script_whose_file_is_elsewhere_in_the_book_is_declined() {
+        let ws = script_book(
+            Some("scripted"),
+            DEAD_SCRIPT,
+            "<p>x</p>",
+            &[("Misc/kobo.js", "var k;")],
+        );
+        let r = ws.detect().unwrap();
+        assert!(
+            r.messages
+                .iter()
+                .any(|m| m.rule == Some(MISSING_RESOURCE_RULE))
+        );
+        assert!(missing_scripts(&r, &ws).is_empty());
+    }
+
+    /// Another document links to the script's `id`: deleting it would leave
+    /// that link dangling, and the trial copy shows the rise.
+    #[test]
+    fn a_dead_script_another_document_links_to_is_declined() {
+        let ws = script_book(
+            Some("scripted"),
+            r#"<script id="s" src="js/kobo.js"></script>"#,
+            "<p>x</p>",
+            &[(
+                "d.xhtml",
+                r#"<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>d</title></head><body><p><a href="c.xhtml#s">s</a></p></body></html>"#,
+            )],
+        );
+        let r = ws.detect().unwrap();
+        assert!(
+            r.messages
+                .iter()
+                .any(|m| m.rule == Some(MISSING_RESOURCE_RULE))
+        );
+        assert!(missing_scripts(&r, &ws).is_empty());
+    }
+
+    /// Only the reported script goes: a remote one beside it is not dead, and
+    /// no finding names it.
+    #[test]
+    fn an_unreported_script_beside_a_dead_one_is_kept() {
+        let mut ws = script_book(
+            Some("scripted remote-resources"),
+            &format!(r#"{DEAD_SCRIPT}<script src="https://example.com/a.js"></script>"#),
+            "<p>x</p>",
+            &[],
+        );
+        let fixes = missing_scripts(&ws.detect().unwrap(), &ws);
+        assert_eq!(fixes.len(), 1);
+        fixes.into_iter().next().unwrap().apply(&mut ws);
+        let out = ws.get_text("c.xhtml").unwrap();
+        assert!(
+            !out.contains("kobo.js") && out.contains("example.com/a.js"),
+            "{out}"
+        );
+    }
+
+    /// No `scripted` token to remove means no edit at all, so the package is
+    /// never rewritten for nothing.
+    #[test]
+    fn no_property_edit_when_the_token_is_absent() {
+        let ws = script_book(Some("svg"), "", "<p>x</p>", &[]);
+        let opf = ws.get_text("content.opf").unwrap();
+        assert!(drop_property_edit(&ws, "content.opf", &opf, "c.xhtml", "scripted").is_none());
+        assert!(drop_property_edit(&ws, "content.opf", &opf, "c.xhtml", "svg").is_some());
+    }
+
+    /// The rule covers every reference; an `<img>` is not a script.
+    #[test]
+    fn a_missing_image_is_not_a_dead_script() {
+        let ws = script_book(None, "", r#"<p><img src="js/kobo.js" alt=""/></p>"#, &[]);
+        let r = ws.detect().unwrap();
+        assert!(
+            r.messages
+                .iter()
+                .any(|m| m.rule == Some(MISSING_RESOURCE_RULE))
+        );
+        assert!(missing_scripts(&r, &ws).is_empty());
     }
 
     // ---- fix.html_media_type ------------------------------------------

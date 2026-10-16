@@ -692,7 +692,7 @@ pub(crate) mod tests {
     use crate::envelope::tests::fixture_epub;
     use std::cell::Cell;
 
-    struct ApproveAll;
+    pub(crate) struct ApproveAll;
     impl Confirmer for ApproveAll {
         fn decide(&mut self, _: &ProposedFix) -> Decision {
             Decision::Approve

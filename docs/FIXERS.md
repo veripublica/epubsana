@@ -58,6 +58,7 @@ grows one carefully-argued entry at a time.
 | `RSC-005` | `opf.content_document.duplicate_id` | ConfirmNeeded | Two or more elements in one document share an `id` | [Keep the first, rename the later ones](#rsc-005--a-duplicate-id-in-a-content-document) |
 | `RSC-007` | `opf.content_document.reference_missing_resource` | ConfirmNeeded | A link's path is stale, but the file it names is still in the book | [Repoint the path, carry the fragment across](#rsc-007--a-reference-whose-path-is-wrong-but-whose-target-is-in-the-book) |
 | `RSC-007` | `css.font_face.missing_target` | ConfirmNeeded | A `@font-face` sources a font file the book does not contain | [Drop the whole rule; decline one with a second source](#rsc-007--a-font-face-whose-font-file-is-not-in-the-book) |
+| `RSC-007` | `opf.content_document.reference_missing_resource` (a `<script src>`) | ConfirmNeeded | A script element names a file the book does not contain | [Delete the element; drop `scripted` if nothing else needs it](#rsc-007--a-script-src-whose-file-is-not-in-the-book) |
 | `RSC-005` | `opf.package.opf_identifier_not_empty` (an extra one) | ConfirmNeeded | An empty `<dc:identifier>` with no `id`, beside a real one | [Drop it; never the unique-identifier anchor](#rsc-005--an-empty-extra-dcidentifier) |
 | `OPF-001` | `opf.package.unrecognized_version` | ConfirmNeeded | The package declares a `version` that is not an EPUB version, so the book has never been validated | [Set it to `2.0` when only EPUB 2 fits](#opf-001--a-package-version-that-is-not-an-epub-version) |
 | `OPF-035` / `OPF-043` | *(none)* | ConfirmNeeded | An XHTML file is declared `text/html` (a warning in EPUB 2, an error in EPUB 3; either way the file is never fully checked) | [Declare it `application/xhtml+xml`, once the file is shown to be XHTML](#opf-035--opf-043--an-xhtml-file-declared-texthtml) |
@@ -1867,6 +1868,70 @@ checked, and the book's count can rise. The title says so.
 inputs: 126 `OPF-035` in 5 books. The same 5 books after epublift's upgrade
 (`4.0.0+64375f5`) and an epubsana repair: 126 `OPF-043`, every one on a
 `text/html` item. One book holds 91 of them.
+
+## RSC-007 — a `<script src>` whose file is not in the book
+
+> **Written spec-first on 2026-10-16**, on epublift's report. The finding shape
+> is what epubveri 0.28.0 reports on the shelf inputs.
+
+**Finding.** `opf.content_document.reference_missing_resource`, with
+`params[0]` = the `src` value as written and `element_path` naming the
+`<script>`:
+
+```
+OEBPS/toc.xhtml   /h:html[1]/h:head[1]/h:script[1]   params ["../js/kobo.js"]
+```
+
+**The shape.** On the shelf it is one thing in four books: a Kobo reference left
+behind in an EPUB 3 `toc.xhtml` whose `js/kobo.js` is not in the container.
+
+```xml
+<script type="text/javascript" src="../js/kobo.js"></script>
+```
+
+The same document also draws `OPF-014` (it uses `scripted` but its manifest
+item does not declare it), which `fix.content_properties` answers by declaring
+`scripted`. The document has no other script.
+
+**Fix** (`fix.missing_script`, ConfirmNeeded). Delete the `<script>` element,
+with the whitespace before it. If the document then needs no `scripted`
+property, remove that token from its manifest item (and the `properties`
+attribute, if it was the only token), whether the book declared it or
+`fix.content_properties` just did. One proposal per document.
+
+**Why it is one repair.** The file is not in the book, so in any reading system
+that resolves the URL inside the container the script has never run. An element
+with an empty body and an unresolvable `src` contributes nothing a reader sees.
+Repointing it is `fix.reference_wrong_path`'s job, and only when the file is in
+the book under another path; here it is in the book under no path.
+
+**Whether the document still needs `scripted` is the detector's answer.**
+epubveri decides what makes a document scripted, and this crate does not keep a
+copy of that rule. The fix is tried on a copy of the book: delete the
+element(s), remove the token if declared, validate. If the copy still reports
+the document as using `scripted`, something else needs it, and the token is
+left alone. The proposal is made only if, in the copy, no `(id, rule)` count
+rises anywhere in the book.
+
+**When it declines.**
+
+- The reported element is not a `<script>` with a `src` (the rule covers every
+  reference: an `<img>`, a link).
+- The element has content other than whitespace: deleting it would drop code.
+- A file with the same name is in the container under another path. Then the
+  reference may be stale rather than dead, and that is a different repair.
+- In the trial copy, any `(id, rule)` count rises.
+
+**Why ConfirmNeeded, not AutoSafe.** The "never ran" argument holds for a
+reading system that resolves the reference inside the book. These are Kobo
+references, and whether a Kobo device supplies its own `kobo.js` to a book
+that names it is not something we can measure here. The user decides.
+
+**Measured (562 books, epubveri 0.28.0, 2026-10-16, before building).** 4 shelf
+inputs, one dead `kobo.js` each, all EPUB 3 (*Kendime Düşünceler*, *İslamın
+Siyasallaşması*, *İmparatorluğun En Uzun Yüzyılı*, *Türklerin Tarihi 2*). Each
+has three errors: this one, `OPF-014` (`scripted`) and `NCX-001`. epubsana
+already repairs the other two, so after repair this is each book's last error.
 
 ## RSC-007 — a `@font-face` whose font file is not in the book
 

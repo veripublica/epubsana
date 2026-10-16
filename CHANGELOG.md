@@ -70,6 +70,19 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
   errors, all cleared; the first run reveals 223 findings, among them 126 empty
   titles and 91 broken references in one book. A second run brings *Ölümün
   Sonu* from 30 errors to valid. No other edit was reverted.
+- **`fix.missing_script`: a `<script src>` whose file is not in the book**
+  (`RSC-007`, `opf.content_document.reference_missing_resource`). The element
+  is deleted, and `scripted` is removed from its manifest item when nothing
+  else in the document needs it, which epubveri decides on a copy of the book.
+  This also takes back a `scripted` that `fix.content_properties` declared for
+  the same dead script. ConfirmNeeded: on our shelf these are Kobo `kobo.js`
+  references, and whether a Kobo device supplies that file itself is not known.
+  A script with code inside, one whose file is in the book under another path,
+  and a deletion after which any finding rises are declined.
+  Measured on our shelf (562 books, 2026-10-16): 4 books, one dead `kobo.js`
+  each; it was each book's last error after repair, and all 4 now validate.
+  After an EPUB 2 → 3 upgrade by epublift the same 4 books validate, with no
+  other finding rising and no edit reverted.
 
 ### Fixed
 

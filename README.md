@@ -17,7 +17,7 @@ apply → check → report) is solid. The check re-validates the book after
 applying, and a fix that made any finding more frequent is undone and reported
 as reverted — unless the fix let the validator see part of the book it could not
 see before, in which case what appears was always there and the run says so.
-Forty-eight fixers so far:
+Forty-nine fixers so far:
 
 - **`RSC-016`** — undeclared HTML entities (`&nbsp;`, `&mdash;`, …) → the exact
   character each denotes, for every name in the XHTML 1.x entity sets (the same
@@ -206,6 +206,12 @@ Forty-eight fixers so far:
   XHTML; the file itself is not changed. epubveri never fully checks a file
   declared `text/html` (in EPUB 3 it does not open it at all), so the file is
   then checked for the first time and may show defects that were always in it.
+
+- **`RSC-007` / a `<script src>` naming a file not in the book** → the element
+  deleted, and `scripted` dropped from its manifest item when nothing else in
+  the document needs it (epubveri decides that, on a copy of the book). An
+  element with code inside, or whose file is in the book under another path, is
+  left alone.
 
 - **`RSC-007` / `css.font_face.missing_target`** — a `@font-face` rule sourcing a
   font file the book doesn't contain → the whole rule dropped. The font cannot
