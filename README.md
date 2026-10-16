@@ -181,11 +181,13 @@ Forty-five fixers so far:
   date and `dc:date` is optional. A malformed but non-empty date (`March 2019`)
   is left exactly as it is: it carries a date the author wrote, and deciding
   which characters are stray would be a guess.
-- **`OPF-072` / `opf.metadata.empty_element`** — an empty *optional* Dublin Core
-  element (`dc:coverage`, `dc:source`, `dc:rights`, …) → dropped; it states
-  nothing and its absence is valid. The required three (`dc:title`,
-  `dc:identifier`, `dc:language`) are never touched, since deleting an empty one
-  would trade "empty" for "missing".
+- **`OPF-072` / `opf.metadata.empty_element`** (EPUB 2) and **`RSC-005` /
+  `opf.package.dc_value_not_empty`** (EPUB 3) — an empty *optional* Dublin Core
+  element (`dc:coverage`, `dc:source`, `dc:rights`, …; on EPUB 3 `dc:date` too)
+  → dropped; it states nothing and its absence is valid. The required three
+  (`dc:title`, `dc:identifier`, `dc:language`) are never touched, since deleting
+  an empty one would trade "empty" for "missing". On EPUB 3 only the elements
+  epubveri reported are dropped.
 - **`OPF-090` / `opf.manifest_item.non_preferred_media_type`** — a manifest item
   declaring a superseded Core Media Type name → renamed to the current one for
   the same format (`application/vnd.ms-opentype` → `font/otf`,

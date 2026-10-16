@@ -185,6 +185,7 @@ pub fn handled_rules() -> &'static [&'static str] {
         "opf.metadata.empty_element",
         "opf.ncx.content_src_missing_resource",
         "opf.ncx.content_src_unencoded_space",
+        "opf.package.dc_value_not_empty",
         "opf.package.opf_identifier_not_empty",
         "opf.package.schema_violation",
         "opf.package.unique_identifier_unresolved",
@@ -6682,49 +6683,67 @@ fn compute_empty_dc_date_edits(opf: &str) -> Option<Vec<MetaEdit>> {
     (!edits.is_empty()).then_some(edits)
 }
 
-/// `OPF-072` / `opf.metadata.empty_element`: an optional Dublin Core element in
+/// `OPF-072` / `opf.metadata.empty_element` (EPUB 2) and `RSC-005` /
+/// `opf.package.dc_value_not_empty` (EPUB 3): a Dublin Core element in
 /// `<metadata>` with no content. The sibling of [`empty_dc_date`], generalised to
-/// the rest of the optional DC set, and safe for the identical reason: an empty
-/// element states nothing, so there is no value in it to lose.
+/// the rest of the DC set, and safe for the identical reason: an empty element
+/// states nothing, so there is no value in it to lose.
 ///
-/// **Most of the safety lives upstream, deliberately.** epubveri emits this rule
-/// on EPUB 2 only and excludes `identifier`, `date`, `title` and `language` by
-/// name, so the three required elements can never reach here and `dc:date` —
-/// which has its own rule and its own fixer — cannot draw two proposals for one
-/// element. The exclusion is re-stated below anyway: a fixer that deletes things
-/// and depends silently on an upstream list breaks quietly the day that list
-/// moves.
+/// **One fixer for both rules**, because the defect and the repair are the same
+/// and only epubveri's version split differs. The rule reported for the file
+/// picks the set: on EPUB 2 `dc:date` is left to [`empty_dc_date`] (its
+/// `OPF-054` fires there too); on EPUB 3 nothing else drops an empty date, so
+/// this does. The required three are never touched on either: deleting one
+/// would trade "it is empty" for "it is missing".
+///
+/// **On EPUB 3 it drops only what was reported.** The findings name the element
+/// in `params[0]`; if this fixer would drop more of a name than epubveri
+/// reported in the file, the two disagree about what is empty and it declines.
+/// It cannot fire while the predicates agree; it is there for the day one moves,
+/// since a file-dispatched fixer otherwise deletes what nobody reported.
 ///
 /// `ConfirmNeeded`, matching its sibling: the edit is a deletion, however empty
 /// the thing deleted.
 fn empty_metadata_element(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
-    let files: BTreeSet<&str> = report
-        .messages
-        .iter()
-        .filter(|m| m.rule == Some("opf.metadata.empty_element"))
-        .filter_map(|m| m.location.as_deref())
-        .collect();
+    // file -> (the rule reported there, how often each element name was reported)
+    let mut by_file: BTreeMap<&str, (DcEmptyRule, BTreeMap<&str, usize>)> = BTreeMap::new();
+    for m in &report.messages {
+        let rule = match m.rule {
+            Some("opf.metadata.empty_element") => DcEmptyRule::Epub2,
+            Some("opf.package.dc_value_not_empty") => DcEmptyRule::Epub3,
+            _ => continue,
+        };
+        let Some(file) = m.location.as_deref() else {
+            continue;
+        };
+        let (_, names) = by_file
+            .entry(file)
+            .or_insert_with(|| (rule, BTreeMap::new()));
+        if let Some(name) = m.params.first() {
+            *names.entry(name.as_str()).or_default() += 1;
+        }
+    }
 
     let mut fixes = Vec::new();
-    for file in files {
+    for (file, (rule, reported)) in by_file {
         let Some(text) = ws.get_text(file) else {
             continue;
         };
-        let Some(edits) = compute_empty_metadata_edits(&text) else {
+        let Some(drops) = empty_metadata_drops(&text, rule.kept()) else {
             continue;
         };
-        let n = edits.len();
+        if rule == DcEmptyRule::Epub3 && !all_reported(&drops, &reported) {
+            continue;
+        }
+        let n = drops.len();
+        let (id, rule_key) = rule.addresses();
 
         let file_for_apply = file.to_string();
         fixes.push(ProposedFix {
             fix_id: "fix.empty_metadata_element",
-            addresses_id: "OPF-072".to_string(),
-            addresses_rule: Some("opf.metadata.empty_element"),
-            addresses_severity: addressed_severity(
-                report,
-                "OPF-072",
-                Some("opf.metadata.empty_element"),
-            ),
+            addresses_id: id.to_string(),
+            addresses_rule: Some(rule_key),
+            addresses_severity: addressed_severity(report, id, Some(rule_key)),
             tier: Tier::ConfirmNeeded,
             title: format!("Drop {n} empty optional metadata element(s) in {file}"),
             rationale:
@@ -6740,14 +6759,52 @@ fn empty_metadata_element(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
             }],
             apply_fn: Box::new(move |ws: &mut Workspace| {
                 if let Some(text) = ws.get_text(&file_for_apply)
-                    && let Some(edits) = compute_empty_metadata_edits(&text)
+                    && let Some(drops) = empty_metadata_drops(&text, rule.kept())
                 {
+                    let edits = drops.into_iter().map(|(_, e)| e).collect();
                     ws.set_text(&file_for_apply, apply_edits(&text, edits));
                 }
             }),
         });
     }
     fixes
+}
+
+/// Which of epubveri's two empty-DC rules a package document drew.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DcEmptyRule {
+    /// `OPF-072` / `opf.metadata.empty_element`, usage.
+    Epub2,
+    /// `RSC-005` / `opf.package.dc_value_not_empty`, error.
+    Epub3,
+}
+
+impl DcEmptyRule {
+    fn addresses(self) -> (&'static str, &'static str) {
+        match self {
+            DcEmptyRule::Epub2 => ("OPF-072", "opf.metadata.empty_element"),
+            DcEmptyRule::Epub3 => ("RSC-005", "opf.package.dc_value_not_empty"),
+        }
+    }
+
+    /// The local names never dropped under this rule.
+    fn kept(self) -> &'static [&'static str] {
+        match self {
+            DcEmptyRule::Epub2 => &NEVER_DROPPED_METADATA,
+            DcEmptyRule::Epub3 => &REQUIRED_METADATA,
+        }
+    }
+}
+
+/// Whether every element in `drops` was reported: per qualified name, no more
+/// drops than findings.
+fn all_reported(drops: &[(String, MetaEdit)], reported: &BTreeMap<&str, usize>) -> bool {
+    let mut ours: BTreeMap<&str, usize> = BTreeMap::new();
+    for (name, _) in drops {
+        *ours.entry(name.as_str()).or_default() += 1;
+    }
+    ours.iter()
+        .all(|(name, n)| reported.get(name).is_some_and(|r| r >= n))
 }
 
 /// `RSC-007` / `css.font_face.missing_target`: a `@font-face` rule sources a font
@@ -7075,10 +7132,22 @@ const DC_ELEMENTS_NS: &str = "http://purl.org/dc/elements/1.1/";
 /// two edits to the same range.
 const NEVER_DROPPED_METADATA: [&str; 4] = ["identifier", "date", "title", "language"];
 
-/// Edits dropping every empty optional DC element, with the whitespace that
-/// preceded it. `None` (decline) if the package document won't parse or nothing
-/// is droppable.
+/// The three DC elements EPUB 3.3 requires (§5.5.3.2.1), never dropped on EPUB 3.
+/// `date` is not among them: there it is optional and no other fixer drops it.
+const REQUIRED_METADATA: [&str; 3] = ["identifier", "title", "language"];
+
+/// [`empty_metadata_drops`] under the EPUB 2 set, as bare edits.
+#[cfg(test)]
 fn compute_empty_metadata_edits(opf: &str) -> Option<Vec<MetaEdit>> {
+    empty_metadata_drops(opf, &NEVER_DROPPED_METADATA)
+        .map(|drops| drops.into_iter().map(|(_, e)| e).collect())
+}
+
+/// Every empty DC element in `<metadata>` whose local name is not in `kept`, as
+/// its qualified name (`dc:rights`, the spelling epubveri's `params` use) and the
+/// edit dropping it with the whitespace that preceded it. `None` (decline) if the
+/// package document won't parse or nothing is droppable.
+fn empty_metadata_drops(opf: &str, kept: &[&str]) -> Option<Vec<(String, MetaEdit)>> {
     let doc = parse_xml(opf)?;
     let metadata = doc
         .descendants()
@@ -7094,7 +7163,7 @@ fn compute_empty_metadata_edits(opf: &str) -> Option<Vec<MetaEdit>> {
     for n in metadata.children().filter(|n| {
         n.is_element()
             && n.tag_name().namespace() == Some(DC_ELEMENTS_NS)
-            && !NEVER_DROPPED_METADATA.contains(&n.tag_name().name())
+            && !kept.contains(&n.tag_name().name())
     }) {
         let text: String = n
             .descendants()
@@ -7107,10 +7176,13 @@ fn compute_empty_metadata_edits(opf: &str) -> Option<Vec<MetaEdit>> {
         if n.attribute("id").is_some_and(|id| refined.contains(id)) {
             continue;
         }
-        edits.push(MetaEdit {
-            range: with_leading_whitespace(opf, n.range()),
-            replacement: String::new(),
-        });
+        edits.push((
+            format!("dc:{}", n.tag_name().name()),
+            MetaEdit {
+                range: with_leading_whitespace(opf, n.range()),
+                replacement: String::new(),
+            },
+        ));
     }
     (!edits.is_empty()).then_some(edits)
 }
@@ -11423,6 +11495,108 @@ mod tests {
             !out.contains("\n\n"),
             "the whitespace before the element goes with it"
         );
+    }
+
+    // ---- fix.empty_metadata_element on EPUB 3 -------------------------
+
+    /// One finding per name, of `rule`, located at the package document — the
+    /// shape epubveri emits (`params[0]` = the qualified name).
+    fn dc_findings(id: &'static str, rule: &'static str, names: &[&str]) -> Report {
+        let mut r = Report::default();
+        for name in names {
+            let mut m = fixture(id, rule);
+            m.location = Some("OEBPS/package.opf".to_string());
+            m.params = vec![name.to_string()];
+            r.messages.push(m);
+        }
+        r
+    }
+
+    fn epub3_dc(names: &[&str]) -> Report {
+        dc_findings("RSC-005", "opf.package.dc_value_not_empty", names)
+    }
+
+    fn dc_package(metadata: &str) -> String {
+        format!(
+            r#"<package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>T</dc:title>{metadata}
+  </metadata></package>"#
+        )
+    }
+
+    /// Applies the one proposal, or `None` when the fixer declined.
+    fn empty_metadata_fix(report: &Report, opf: &str) -> Option<(String, String)> {
+        let mut ws = container(&[("OEBPS/package.opf", opf)]);
+        let fix = empty_metadata_element(report, &ws).into_iter().next()?;
+        let addresses = fix.addresses_id.clone();
+        fix.apply(&mut ws);
+        Some((addresses, ws.get_text("OEBPS/package.opf")?))
+    }
+
+    /// epublift's upgrade output: the same empty elements that were `OPF-072`
+    /// on EPUB 2 are an error on EPUB 3, and an empty date goes too — on EPUB 3
+    /// no other fixer drops it.
+    #[test]
+    fn on_epub3_the_reported_elements_go_and_the_date_with_them() {
+        let opf =
+            dc_package("\n    <dc:rights/>\n    <dc:date></dc:date>\n    <dc:source>s</dc:source>");
+        let (addresses, out) =
+            empty_metadata_fix(&epub3_dc(&["dc:rights", "dc:date"]), &opf).expect("proposed");
+        assert_eq!(addresses, "RSC-005");
+        assert!(
+            !out.contains("dc:rights") && !out.contains("dc:date"),
+            "{out}"
+        );
+        assert!(out.contains("<dc:source>s</dc:source>"), "{out}");
+    }
+
+    /// On EPUB 2 the date still belongs to `fix.empty_dc_date`: the rule picks
+    /// the set, not the element.
+    #[test]
+    fn on_epub2_the_date_is_still_left_to_its_own_fixer() {
+        let opf = dc_package("\n    <dc:source/>\n    <dc:date/>");
+        let report = dc_findings("OPF-072", "opf.metadata.empty_element", &["dc:source"]);
+        let (addresses, out) = empty_metadata_fix(&report, &opf).expect("proposed");
+        assert_eq!(addresses, "OPF-072");
+        assert!(!out.contains("dc:source"), "{out}");
+        assert!(out.contains("<dc:date/>"), "{out}");
+    }
+
+    /// epubveri reports one empty `dc:source` and the file holds two: the two
+    /// disagree about what is empty, so nothing is dropped.
+    #[test]
+    fn on_epub3_a_drop_nobody_reported_declines_the_proposal() {
+        let opf = dc_package("\n    <dc:source/>\n    <dc:source/>");
+        assert!(empty_metadata_fix(&epub3_dc(&["dc:source"]), &opf).is_none());
+        assert!(
+            empty_metadata_fix(&epub3_dc(&["dc:source", "dc:source"]), &opf).is_some(),
+            "with both reported it proposes, so the decline above is the guard's"
+        );
+    }
+
+    #[test]
+    fn on_epub3_the_required_three_are_never_dropped() {
+        let opf = dc_package(
+            "\n    <dc:identifier/>\n    <dc:language/>\n    <dc:title/>\n    <dc:rights/>",
+        );
+        let (_, out) = empty_metadata_fix(&epub3_dc(&["dc:rights"]), &opf).expect("proposed");
+        assert!(!out.contains("dc:rights"), "{out}");
+        for kept in ["<dc:identifier/>", "<dc:language/>", "<dc:title/>"] {
+            assert!(out.contains(kept), "{kept} must stay: {out}");
+        }
+    }
+
+    /// Live on EPUB 3, where epublift's upgrade writes `<meta refines>` for
+    /// `opf:role`: the refined creator stays, the unrefined rights goes.
+    #[test]
+    fn on_epub3_a_refined_element_stays() {
+        let opf = dc_package(
+            "\n    <dc:creator id=\"cre\"/>\n    <meta refines=\"#cre\" property=\"role\">aut</meta>\n    <dc:rights/>",
+        );
+        let (_, out) =
+            empty_metadata_fix(&epub3_dc(&["dc:creator", "dc:rights"]), &opf).expect("proposed");
+        assert!(out.contains(r#"<dc:creator id="cre"/>"#), "{out}");
+        assert!(!out.contains("dc:rights"), "{out}");
     }
 
     #[test]

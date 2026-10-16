@@ -8,6 +8,24 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [Unreleased]
+
+### Added
+
+- **`fix.empty_metadata_element` now repairs EPUB 3 books too.** An empty
+  Dublin Core element (`<dc:rights/>`, `<dc:source></dc:source>`, …) is a
+  usage note in an EPUB 2 package but an error in an EPUB 3 one
+  (`RSC-005`, `opf.package.dc_value_not_empty`), and the fixer only listened
+  for the EPUB 2 rule. It now drops the element on both, under the same fix id,
+  so a caller that already approves it gets the EPUB 3 repair with no change.
+  On EPUB 3 it also drops an empty `dc:date`: there the date is optional and no
+  other fixer drops it. It still never drops `dc:title`, `dc:identifier` or
+  `dc:language`, still leaves alone an element a `<meta refines>` points at, and
+  on EPUB 3 drops only elements epubveri reported. Measured on the 562 books on
+  our shelf after an EPUB 2 → 3 upgrade by epublift: 59 books carried the error,
+  212 findings, and all 212 were cleared with no other finding rising. Reported
+  by epublift.
+
 ## [0.28.0] - 2026-10-15
 
 ### Added

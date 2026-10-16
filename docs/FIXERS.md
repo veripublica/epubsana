@@ -63,6 +63,8 @@ grows one carefully-argued entry at a time.
 | `RSC-005` | `htm.epub2_dom.nested_anchor` | ConfirmNeeded | An `<a>` with only an `id` wraps a real link | [Unwrap it, moving the `id` to the child](#rsc-005--an-anchor-target-wrapped-around-a-link) |
 | `RSC-005` | `navdoc.ol.empty` | ConfirmNeeded | An optional `<nav>` in the navigation document holds an `<ol>` with no `<li>` | [Delete the whole `<nav>`](#rsc-005--an-optional-nav-whose-list-is-empty) |
 | `OPF-054` | *(none)* | ConfirmNeeded | A `<dc:date>` holds no date at all (EPUB 2) | [Drop the empty element; never touch a non-empty one](#opf-054--an-empty-dcdate-epub-2) |
+| `OPF-072` | `opf.metadata.empty_element` | ConfirmNeeded | An optional Dublin Core element is empty (EPUB 2) | [Drop it; never a required one](#opf-072--an-empty-optional-dublin-core-element-epub-2) |
+| `RSC-005` | `opf.package.dc_value_not_empty` | ConfirmNeeded | A Dublin Core element other than the required three is empty (EPUB 3) | [Drop it, `dc:date` included; only what was reported](#rsc-005--an-empty-dublin-core-element-epub-3) |
 | `RSC-005` / `RSC-025` | `svg.attributes.attribute_not_allowed` (a lowercased camelCase name) | AutoSafe | An SVG attribute was lowercased by an HTML tool (`viewbox`), so an XML reading system ignores it | [Restore the name's case from the HTML standard's own table](#rsc-005--rsc-025--an-svg-attribute-whose-name-lost-its-case) |
 | `RSC-005` / `RSC-025` | `svg.elements.element_not_allowed` (a lowercased camelCase name) | AutoSafe | An SVG element was lowercased by an HTML tool (`lineargradient`), so an XML reading system does not know it | [Restore the name's case from the HTML standard's own table](#rsc-005--rsc-025--an-svg-element-whose-name-lost-its-case) |
 | `RSC-005` | `opf.content_document.schema_violation` (`params[0] == "dir"`, an uppercase `LTR`/`RTL`) | AutoSafe | A `dir` value written in capitals, which the grammar does not accept | [Lowercase it to `ltr` / `rtl`](#rsc-005--a-dir-value-in-capitals) |
@@ -1392,8 +1394,11 @@ the whole shape of this fixer:
 - **It is EPUB 2 only.** epubveri runs one check (`is_valid_dc_date`) and splits
   by version: `OPF-054`/Error on EPUB 2, **`OPF-053`/Warning on EPUB 3**. The same
   version-scoped split as the duplicate spine itemref, and the same lesson —
-  except here it cuts the other way. An EPUB 3 book with a broken date is not
-  invalid, so there is nothing for a `--goal valid` repairer to clear.
+  except here it cuts the other way. An EPUB 3 book with a *malformed* date is
+  not invalid, so there is nothing for a `--goal valid` repairer to clear. An
+  EPUB 3 book with an *empty* one is: since epubveri 0.13.3 it also draws
+  `opf.package.dc_value_not_empty`, and [that entry](#rsc-005--an-empty-dublin-core-element-epub-3)
+  drops it.
 - **The trigger is not "empty".** It is "not a valid W3C-DTF date", which covers
   an empty value *and* a malformed one, under one id and one message. That
   distinction is this fixer's entire content: the two need opposite treatment.
@@ -1535,6 +1540,80 @@ are not invalid because of it and clearing all 29 changes no verdict. The fixer
 exists because a publisher reading an epubcheck report has 29 lines of noise in
 it that describe nothing, and removing noise that describes nothing is exactly
 the burden this tool is for. Do not quote it as coverage of anything.
+
+## RSC-005 — an empty Dublin Core element (EPUB 3)
+
+**Finding.** `RSC-005` / `opf.package.dc_value_not_empty`, **error**, EPUB 3
+only, reported on the package document at the element: *dc:X must be a string
+with length at least 1*, with `params[0]` = the qualified name (`"dc:rights"`).
+The EPUB 3 half of [`OPF-072`](#opf-072--an-empty-optional-dublin-core-element-epub-2):
+the same defect, but here it is a validity failure. EPUB 3.3 §5.5.2: DCMES
+elements *"MUST have non-empty values after leading and trailing ASCII
+whitespace"*.
+
+**Read the emission site** (`epubveri/src/opf.rs`, `check_dc_values_not_empty`):
+
+- **It excludes `identifier`, `title` and `language` by name** — each has a rule
+  of its own — and **includes `date`**, which keeps its `OPF-053` warning as well
+  (epubcheck reports both on an empty date).
+- **Empty means: the text of all descendants is XML whitespace**, the predicate
+  `compute_empty_metadata_edits` already reads. The EPUB 2 site reads direct
+  text children instead (the Calibre `<p>` case). So pointing this fixer at the
+  EPUB 3 rule does not inherit the wrong test; that worry in `docs/COVERAGE.md`
+  was written before our predicate was pinned to descendants.
+- It walks every `dc:*` in the document; this fixer walks only `<metadata>`'s
+  children. That makes our candidates a subset, never a superset.
+
+**Fix** (`fix.empty_metadata_element`, ConfirmNeeded — **the same fixer and the
+same id**). Delete every empty Dublin Core element in `<metadata>` except
+`dc:title`, `dc:identifier` and `dc:language`, with the whitespace that preceded
+it. One proposal per package document. The fixer reads which of the two rules
+was reported for the file and takes that rule's set: on EPUB 2 `dc:date` is still
+left to `fix.empty_dc_date` (`OPF-054` fires there, so two fixers would edit one
+range); on EPUB 3 `OPF-054` never fires, and nothing else drops an empty date.
+
+**Why one id.** The repair is identical and so is its argument; only the
+detector's version split differs. epublift already approves
+`fix.empty_metadata_element` by id after its EPUB 2 → 3 upgrade, and that
+approval silently did nothing on the result. With one id it starts working with
+no change on their side, and the rule for "what is empty" lives in one place.
+
+**Why it is safe.** An empty element states nothing, so there is no value in it
+to lose, and every element this can reach is OPTIONAL in EPUB 3.3 (§5.5.3.2.1:
+all but `dc:identifier`, `dc:language` and `dc:title`). For `dc:date`
+specifically (§5.5.3.2.4): it is OPTIONAL, at most one is allowed, and it is the
+publication date, not `dcterms:modified` — so dropping an empty one asserts
+nothing about either date, and filling it would be inventing one.
+
+**Guards.**
+
+- **The required three** are never deleted, as on EPUB 2.
+- **The refinement check**, taken over unchanged. It is vacuous on EPUB 2;
+  here it is live, since `<meta refines>` is the EPUB 3 mechanism (epublift's
+  upgrade writes it for `opf:role` / `opf:file-as`). An empty `<dc:creator
+  id="c1">` with a `role` refining it is left alone, finding and all: dropping
+  only the creator orphans the `meta`, and dropping both deletes a statement.
+- **Every element we would drop must have been reported.** The findings carry
+  `params[0]`, so the fixer counts reported names per file and declines the
+  whole proposal if it would drop more of any name than epubveri reported. The
+  two predicates agree today, so this cannot fire on a real report; it fires
+  the day either side moves, which is the failure `fix.empty_metadata_element`
+  already had once (the NBSP case above: a file-dispatched fixer deleted what
+  was never reported). Tested with a report that names fewer elements than
+  the file holds — the same count-guard shape as `fix.empty_extra_identifier`.
+  The EPUB 2 path does not get it: there our descendants test is the narrower
+  one, so our candidates are already a subset by construction.
+
+**Measured (2026-10-16), and the measurement is not of the shelf as it stands.**
+The shelf's inputs carry 0 findings of this rule (400 of 474 were EPUB 2 when
+`docs/COVERAGE.md` counted). After epublift's upgrade (local build
+`3.3.0+89d81e3.dirty`) of all 562 books, epubveri 0.28.0 reports **59 books /
+212 findings**: `dc:source`, `dc:relation`, `dc:coverage`, `dc:rights` 41 each,
+`dc:subject`, `dc:description` 21 each, `dc:publisher` 5, `dc:creator` 1.
+`-y` on those 59, 0.28.0 against this fixer, per book: **212 → 0, no `(id,
+rule)` count rose, nothing reverted.** No refinement and no count guard declined
+anything there; both are exercised by fixtures only. **An empty `dc:date` is not
+among the 212**: that case is verified on fixtures only.
 
 ## OPF-090 — a manifest item declaring a non-preferred Core Media Type
 
