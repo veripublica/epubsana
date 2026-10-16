@@ -8,6 +8,61 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [Unreleased]
+
+### Changed
+
+- **`fix.html_entities` and `fix.entity_missing_semicolon` now know every
+  XHTML 1.x entity.** The table was a curated subset of 117 names; it is now the
+  full three DTD entity sets (`HTMLlat1`, `HTMLsymbol`, `HTMLspecial`), read
+  from epubveri's `htm::xhtml_entity`, the table epubveri itself reads EPUB 2
+  documents with. A book that used one of the other 131 names (`&emsp;`, say) in
+  a document with no DTD to declare it stayed unopenable. Names outside those
+  sets are still left untouched. The structural fixers that read an EPUB 2
+  document by declaring its entities use the same table. On the 562 books on
+  our shelf as they are, no output changes; after an EPUB 2 → 3 upgrade by
+  epublift, one book carried 12 fatal `&emsp;` findings, which are now cleared.
+- **`entities::lookup` returns a `char`** (was `&'static str`), and
+  `entities::TABLE` is removed: the table is epubveri's.
+
+### Added
+
+- **`fix.content_url_spaces`: a raw space in a content document's URL**
+  (`RSC-020`, `opf.content_document.malformed_relative_url`), the third
+  sibling of the manifest and NCX space fixers. `<img src="Screen Shot 1.png">`
+  becomes `Screen%20Shot%201.png`, which names the very same file; no file is
+  renamed. Only interior spaces are encoded, and only in the one attribute of
+  the reported element whose value is the reported one. Each encoding is first
+  tried on a copy of the book, and one the validator would still reject (the
+  URL had a second defect besides the space) is not proposed.
+  On our shelf (562 books, 2026-10-16): 6 findings in 3 books, all repaired, and
+  one of the books now validates. After an EPUB 2 → 3 upgrade by epublift
+  (cli-v4.0.0) there are 135 in 7 books — 129 of them in the `nav.xhtml` the
+  upgrade writes — all repaired, with no other finding rising and none of the
+  edits reverted; for 5 of those books it was the last error.
+- **`fix.nested_anchor` now repairs EPUB 3 books too.** In an EPUB 3 document
+  an `<a>` inside an `<a>` is reported as `RSC-005` /
+  `opf.content_document.no_interactive_in_a__a`, and the fixer only listened
+  for the EPUB 2 rule. It now answers both, under the same fix id. The repair
+  and its refusals are unchanged: an outer `<a>` that carries only an `id` is
+  unwrapped and the `id` moves to its single child. The EPUB 3 rule also
+  reports an `<a>` inside a `<button>`; that is not repaired. Measured on our
+  shelf after an EPUB 2 → 3 upgrade by epublift (cli-v4.0.0, 562 books,
+  2026-10-16): 10 books carried 111 of these errors and all 111 are now
+  repaired, with no other finding rising and none of the edits reverted. Three
+  of those books now validate. On the 562 books as they are, this changes no
+  output.
+
+### Fixed
+
+- **A character reference no longer hides the named entities after
+  it.** To read an EPUB 2 document whose DTD entities it cannot resolve, epubsana
+  declares the names the document uses; the scan for them stopped at the first
+  `&` that did not open a name (`&#160;`), so a later `&nbsp;` was
+  never declared and every structural fixer declined the document.
+  No book on our shelf (24,620 documents, 2026-10-16) mixes a character
+  reference with a DTD-only named entity, so this changes no output there; the
+  repair is argued and unit-tested, not observed on a book.
 ## [0.29.0] - 2026-10-16
 
 ### Added

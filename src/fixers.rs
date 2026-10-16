@@ -83,6 +83,7 @@ pub fn plan(report: &Report, ws: &Workspace, _goal: Goal) -> Vec<ProposedFix> {
     fixes.extend(ncx_dtb_uid(report, ws));
     fixes.extend(manifest_href_spaces(report, ws));
     fixes.extend(ncx_content_src_spaces(report, ws));
+    fixes.extend(content_url_spaces(report, ws));
     fixes.extend(content_properties(report, ws));
     fixes.extend(empty_titles(report, ws));
     fixes.extend(missing_titles(report, ws));
@@ -172,6 +173,9 @@ pub fn handled_rules() -> &'static [&'static str] {
         "opf.content_document.head_missing_title",
         "opf.content_document.invalid_content_type_meta",
         "opf.content_document.lang_xmllang_mismatch",
+        // One shape inside it: an interior space.
+        "opf.content_document.malformed_relative_url",
+        "opf.content_document.no_interactive_in_a__a",
         "opf.content_document.property_used_undeclared",
         "opf.content_document.reference_missing_resource",
         // Several shapes inside it, each matched on its kind and params.
@@ -248,7 +252,7 @@ fn html_entities(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
         let preview: Vec<Change> = ents
             .iter()
             .map(|(name, count)| {
-                let repl = entities::lookup(name).unwrap_or("");
+                let repl = entities::lookup(name).map(String::from).unwrap_or_default();
                 Change {
                     path: file.clone(),
                     note: format!("replace &{name}; → '{repl}' ({count}×)"),
@@ -258,9 +262,12 @@ fn html_entities(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
 
         // The replacement pairs, applied by re-reading the file at apply time
         // (robust to any earlier edit).
-        let repls: Vec<(String, &'static str)> = ents
+        let repls: Vec<(String, String)> = ents
             .keys()
-            .map(|name| (format!("&{name};"), entities::lookup(name).unwrap()))
+            .map(|name| {
+                let ch = entities::lookup(name).unwrap();
+                (format!("&{name};"), ch.to_string())
+            })
             .collect();
         let file_for_apply = file.clone();
 
@@ -289,7 +296,7 @@ fn html_entities(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
             apply_fn: Box::new(move |ws: &mut Workspace| {
                 if let Some(mut text) = ws.get_text(&file_for_apply) {
                     for (from, to) in &repls {
-                        text = text.replace(from, to);
+                        text = text.replace(from, to.as_str());
                     }
                     ws.set_text(&file_for_apply, text);
                 }
@@ -1558,7 +1565,10 @@ fn prepare_content_doc(text: &str) -> PreparedDoc {
     if parse_xml(text).is_some() {
         return noop(text.to_string());
     }
-    // The mappable, non-predefined entities actually used (raw-text scan).
+    // The mappable, non-predefined entities actually used (raw-text scan). A
+    // `&` that does not open a name — a character reference (`&#160;`), a stray
+    // ampersand — is stepped over, not the end of the scan: stopping there left
+    // every later name undeclared, and the document unreadable to us.
     let mut names: BTreeSet<&str> = BTreeSet::new();
     let mut rest = text;
     while let Some(i) = rest.find('&') {
@@ -1566,12 +1576,12 @@ fn prepare_content_doc(text: &str) -> PreparedDoc {
         match after.find(';') {
             Some(j) if j > 0 && j < 12 && after[..j].chars().all(|c| c.is_ascii_alphanumeric()) => {
                 let name = &after[..j];
-                if !PREDEFINED_ENTITIES.contains(&name) && entities::lookup(name).is_some() {
+                if entities::lookup(name).is_some() {
                     names.insert(name);
                 }
                 rest = &after[j..];
             }
-            _ => break,
+            _ => rest = after,
         }
     }
     // No mappable entity, or no DOCTYPE to declare it in — nothing we can do.
@@ -1584,11 +1594,9 @@ fn prepare_content_doc(text: &str) -> PreparedDoc {
     let decls: String = names
         .iter()
         .map(|name| {
-            let value: String = entities::lookup(name)
-                .unwrap_or("")
-                .chars()
+            let value = entities::lookup(name)
                 .map(|c| format!("&#{};", c as u32))
-                .collect();
+                .unwrap_or_default();
             format!("<!ENTITY {name} \"{value}\">")
         })
         .collect();
@@ -2075,6 +2083,237 @@ fn ncx_content_src_spaces(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
         });
     }
     fixes
+}
+
+/// The rule a malformed relative URL in a content document is reported under.
+const MALFORMED_RELATIVE_URL_RULE: &str = "opf.content_document.malformed_relative_url";
+
+/// `RSC-020` / `opf.content_document.malformed_relative_url`, where the defect
+/// is a raw space: `<img src="../Images/Screen Shot 1.png">`, or a `nav.xhtml`
+/// link an EPUB 2 → 3 upgrade copied from the NCX unencoded. The third sibling
+/// of [`manifest_href_spaces`] and [`ncx_content_src_spaces`], with the same
+/// argument and edit: `%20` resolves back to exactly the same container entry,
+/// and no file is renamed. `AutoSafe`.
+///
+/// `params[0]` is the value and `element_path` the element; the attribute is
+/// the one on that element whose value is exactly `params[0]`, and an element
+/// with none or two such attributes is declined. Only **interior** spaces are
+/// encoded: the URL parser strips leading and trailing ones, and encoding one
+/// would make it part of the path.
+///
+/// **And only where epubveri accepts the result.** The rule covers five URL
+/// defects and the message names only the first, so a space may hide a
+/// backslash after it. Rather than keep a table of URL syntax here (a second
+/// oracle), every planned encoding is tried on a copy of the book and one the
+/// detector still reports is declined — the pattern of [`svg_attribute_case`].
+fn content_url_spaces(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    // document -> (reported element path -> the reported values)
+    let mut by_doc: BTreeMap<String, BTreeMap<String, BTreeSet<String>>> = BTreeMap::new();
+    for m in &report.messages {
+        if m.rule != Some(MALFORMED_RELATIVE_URL_RULE) {
+            continue;
+        }
+        let (Some(doc), Some(np), Some(value)) = (
+            m.location.as_deref(),
+            m.element_path.as_ref(),
+            m.params.first(),
+        ) else {
+            continue;
+        };
+        let Some(path) = svg_reported_path(np) else {
+            continue;
+        };
+        by_doc
+            .entry(doc.to_string())
+            .or_default()
+            .entry(path)
+            .or_default()
+            .insert(value.clone());
+    }
+
+    let mut planned: BTreeMap<String, Vec<UrlSpaceEdit>> = BTreeMap::new();
+    for (doc, reported) in &by_doc {
+        let Some(text) = ws.get_text(doc) else {
+            continue;
+        };
+        let Some(edits) = plan_url_space_encoding(&text, reported) else {
+            continue; // won't parse: decline
+        };
+        if !edits.is_empty() {
+            planned.insert(doc.clone(), edits);
+        }
+    }
+    if planned.is_empty() {
+        return Vec::new();
+    }
+
+    // Ask the detector about the result before proposing it.
+    let Some(still_reported) = url_spaces_still_reported(ws, &planned, &by_doc) else {
+        return Vec::new();
+    };
+
+    let mut fixes = Vec::new();
+    for (doc, edits) in planned {
+        let kept: BTreeMap<String, BTreeSet<String>> = edits
+            .into_iter()
+            .filter(|e| !still_reported.contains(&(doc.clone(), e.path.clone(), e.encoded.clone())))
+            .fold(BTreeMap::new(), |mut acc, e| {
+                acc.entry(e.path).or_default().insert(e.value);
+                acc
+            });
+        let n: usize = kept.values().map(BTreeSet::len).sum();
+        if n == 0 {
+            continue;
+        }
+        let distinct: BTreeSet<&String> = kept.values().flatten().collect();
+        let preview: Vec<Change> = distinct
+            .iter()
+            .take(6)
+            .map(|v| Change {
+                path: doc.clone(),
+                note: format!("encode \"{v}\" → \"{}\"", encode_interior_spaces(v)),
+            })
+            .collect();
+        let doc_for_apply = doc.clone();
+
+        fixes.push(ProposedFix {
+            fix_id: "fix.content_url_spaces",
+            addresses_id: "RSC-020".to_string(),
+            addresses_rule: Some(MALFORMED_RELATIVE_URL_RULE),
+            addresses_severity: addressed_severity(
+                report,
+                "RSC-020",
+                Some(MALFORMED_RELATIVE_URL_RULE),
+            ),
+            tier: Tier::AutoSafe,
+            title: format!(
+                "Percent-encode {n} URL{} containing spaces in {doc}",
+                if n == 1 { "" } else { "s" }
+            ),
+            rationale: "A link or image reference is a URL, and a raw space is not a legal URL \
+                 character. Each space inside it becomes `%20`, which resolves to the very same \
+                 file — no file in the book is renamed. Only the reported references are \
+                 encoded, nothing else in them is touched, and one the validator would still \
+                 reject is left out."
+                .to_string(),
+            preview,
+            apply_fn: Box::new(move |ws: &mut Workspace| {
+                if let Some(text) = ws.get_text(&doc_for_apply)
+                    && let Some(edits) = plan_url_space_encoding(&text, &kept)
+                {
+                    ws.set_text(&doc_for_apply, apply_edits(&text, url_space_edits(edits)));
+                }
+            }),
+        });
+    }
+    fixes
+}
+
+/// One planned encoding: the reported element path, the value as reported,
+/// the attribute value's byte range in the original text, and the result.
+struct UrlSpaceEdit {
+    path: String,
+    value: String,
+    range: Range<usize>,
+    encoded: String,
+}
+
+fn url_space_edits(edits: Vec<UrlSpaceEdit>) -> Vec<MetaEdit> {
+    edits
+        .into_iter()
+        .map(|e| MetaEdit {
+            range: e.range,
+            replacement: e.encoded,
+        })
+        .collect()
+}
+
+/// `value` with every space between its first and last non-space character as
+/// `%20`. The URL standard strips leading and trailing C0 controls and spaces
+/// before parsing, so those are left exactly where they are.
+fn encode_interior_spaces(value: &str) -> String {
+    let is_edge = |c: char| c <= ' ';
+    let start = value.len() - value.trim_start_matches(is_edge).len();
+    let end = value.trim_end_matches(is_edge).len().max(start);
+    format!(
+        "{}{}{}",
+        &value[..start],
+        value[start..end].replace(' ', "%20"),
+        &value[end..]
+    )
+}
+
+/// The encodings for every reported `(element path, value)`: on that element,
+/// the one attribute whose value is exactly the reported one, spelled in the
+/// file exactly so, with an interior space. `None` (decline) if the document
+/// doesn't parse.
+fn plan_url_space_encoding(
+    text: &str,
+    reported: &BTreeMap<String, BTreeSet<String>>,
+) -> Option<Vec<UrlSpaceEdit>> {
+    let prepared = prepare_content_doc(text);
+    let doc = prepared.parse()?;
+    let mut edits = Vec::new();
+    for node in doc.descendants().filter(|n| n.is_element()) {
+        let Some(path) = svg_element_path(node) else {
+            continue;
+        };
+        let Some(values) = reported.get(&path) else {
+            continue;
+        };
+        for value in values {
+            // A value with no interior space comes back unchanged, and the
+            // trial declines it like any other URL the detector still reports.
+            let encoded = encode_interior_spaces(value);
+            let mut carriers = node.attributes().filter(|a| a.value() == value);
+            let (Some(attr), None) = (carriers.next(), carriers.next()) else {
+                continue; // none, or two attributes: which is the URL is a guess
+            };
+            let range = prepared.unshift(attr.range_value());
+            if text.get(range.clone()) != Some(value.as_str()) {
+                continue; // spelled with a reference in the file
+            }
+            edits.push(UrlSpaceEdit {
+                path: path.clone(),
+                value: value.clone(),
+                range,
+                encoded,
+            });
+        }
+    }
+    Some(edits)
+}
+
+/// Apply every planned encoding to a copy of the book and return the
+/// `(document, element path, value)` triples the detector still reports under
+/// this rule. `None` if the copy cannot be built or read, and the caller then
+/// declines.
+fn url_spaces_still_reported(
+    ws: &Workspace,
+    planned: &BTreeMap<String, Vec<UrlSpaceEdit>>,
+    reported: &BTreeMap<String, BTreeMap<String, BTreeSet<String>>>,
+) -> Option<BTreeSet<(String, String, String)>> {
+    let mut trial = Workspace::load(&ws.serialize().ok()?).ok()?;
+    for doc in planned.keys() {
+        let text = trial.get_text(doc)?;
+        let edits = plan_url_space_encoding(&text, &reported[doc])?;
+        trial.set_text(doc, apply_edits(&text, url_space_edits(edits)));
+    }
+    let report = trial.detect().ok()?;
+    Some(
+        report
+            .messages
+            .iter()
+            .filter(|m| m.rule == Some(MALFORMED_RELATIVE_URL_RULE))
+            .filter_map(|m| {
+                Some((
+                    m.location.clone()?,
+                    svg_reported_path(m.element_path.as_ref()?)?,
+                    m.params.first()?.clone(),
+                ))
+            })
+            .collect(),
+    )
 }
 
 /// The byte range of the non-whitespace span within `range`, or `None` when it
@@ -6419,8 +6658,9 @@ fn element_name_end(text: &str, tag_start: usize) -> Option<usize> {
     None
 }
 
-/// `RSC-005` / `htm.epub2_dom.nested_anchor`: an `<a>` containing another `<a>`,
-/// which XHTML forbids. On the shelf every case is one shape — a footnote
+/// `RSC-005` / `htm.epub2_dom.nested_anchor` (EPUB 2) and
+/// `opf.content_document.no_interactive_in_a__a` (EPUB 3): an `<a>` containing
+/// another `<a>`, which XHTML forbids. On the shelf every case is one shape — a footnote
 /// reference whose **outer** anchor carries no `href`:
 ///
 /// ```text
@@ -6438,16 +6678,25 @@ fn element_name_end(text: &str, tag_start: usize) -> Option<usize> {
 /// attribute besides `id` (they would be lost, and re-attaching them to a
 /// different element asserts they apply to it), when the child already has an
 /// `id`, or when the anchor wraps more than that one child.
+///
+/// The EPUB 3 rule is a Schematron pattern that also reports an `<a>` inside a
+/// `<button>`. That shape is never edited: the planner only looks at an `<a>`
+/// that contains another `<a>`, so a document whose only finding is the button
+/// one gets no proposal.
 fn nested_anchors(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
-    let docs: BTreeSet<&str> = report
+    let docs: BTreeMap<&str, &'static str> = report
         .messages
         .iter()
-        .filter(|m| m.rule == Some("htm.epub2_dom.nested_anchor"))
-        .filter_map(|m| m.location.as_deref())
+        .filter_map(|m| {
+            let rule = NESTED_ANCHOR_RULES
+                .into_iter()
+                .find(|r| m.rule == Some(*r))?;
+            Some((m.location.as_deref()?, rule))
+        })
         .collect();
 
     let mut fixes = Vec::new();
-    for doc in docs {
+    for (doc, rule) in docs {
         let Some(text) = ws.get_text(doc) else {
             continue;
         };
@@ -6460,12 +6709,8 @@ fn nested_anchors(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
         fixes.push(ProposedFix {
             fix_id: "fix.nested_anchor",
             addresses_id: "RSC-005".to_string(),
-            addresses_rule: Some("htm.epub2_dom.nested_anchor"),
-            addresses_severity: addressed_severity(
-                report,
-                "RSC-005",
-                Some("htm.epub2_dom.nested_anchor"),
-            ),
+            addresses_rule: Some(rule),
+            addresses_severity: addressed_severity(report, "RSC-005", Some(rule)),
             tier: Tier::ConfirmNeeded,
             title: format!(
                 "Unwrap {n} anchor target{} wrapped around a link in {doc}",
@@ -6494,6 +6739,12 @@ fn nested_anchors(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
     }
     fixes
 }
+
+/// The two rules [`nested_anchors`] repairs: EPUB 2's, then EPUB 3's.
+const NESTED_ANCHOR_RULES: [&str; 2] = [
+    "htm.epub2_dom.nested_anchor",
+    "opf.content_document.no_interactive_in_a__a",
+];
 
 /// Replace each qualifying outer `<a>` with its child, `id` moved across.
 /// `None` (decline) if the document won't parse or nothing qualifies.
@@ -8383,6 +8634,17 @@ mod tests {
 <html xmlns=\"http://www.w3.org/1999/xhtml\"><head><title></title></head>\
 <body><p>a&nbsp;b &mdash; c</p></body></html>";
 
+    /// A character reference before a name used to end the scan, leaving the
+    /// later name undeclared and the document unreadable to us.
+    #[test]
+    fn prepared_doc_declares_names_after_a_numeric_reference() {
+        for before in ["&#160;", "&#xA0;"] {
+            let doc = NBSP_DOC.replace("a&nbsp;b", &format!("a{before}x&nbsp;b"));
+            let prepared = prepare_content_doc(&doc);
+            assert!(prepared.parse().is_some(), "{before}: {}", prepared.working);
+        }
+    }
+
     #[test]
     fn prepared_doc_makes_an_nbsp_document_parse() {
         assert!(
@@ -8735,6 +8997,79 @@ mod tests {
     #[test]
     fn an_anchor_with_no_nested_anchor_is_untouched() {
         assert!(unwrap_anchors(r##"<p><a id="b"><sup>1</sup></a></p>"##).is_none());
+    }
+
+    // ---- fix.nested_anchor on EPUB 3 -----------------------------------
+
+    const EPUB3_NESTED_ANCHOR: &str = "opf.content_document.no_interactive_in_a__a";
+
+    /// One finding of `rule` in `OEBPS/ch.xhtml` holding `body`; the proposal's
+    /// rule and the document after applying it, or `None` if it declined.
+    fn nested_anchor_fix(rule: &'static str, body: &str) -> Option<(&'static str, String)> {
+        let doc = format!(
+            "<html xmlns=\"http://www.w3.org/1999/xhtml\"><head><title>t</title></head><body>{body}</body></html>"
+        );
+        let mut ws = container(&[("OEBPS/ch.xhtml", &doc)]);
+        let mut m = fixture("RSC-005", rule);
+        m.location = Some("OEBPS/ch.xhtml".to_string());
+        let mut report = Report::default();
+        report.messages.push(m);
+        let fix = nested_anchors(&report, &ws).into_iter().next()?;
+        let addressed = fix.addresses_rule?;
+        fix.apply(&mut ws);
+        Some((addressed, ws.get_text("OEBPS/ch.xhtml")?))
+    }
+
+    /// epublift's upgrade output: the EPUB 2 finding has become the Schematron
+    /// one, and the same repair answers it, under the rule it was given.
+    #[test]
+    fn on_epub3_an_anchor_target_around_a_link_is_unwrapped() {
+        let (rule, out) = nested_anchor_fix(
+            EPUB3_NESTED_ANCHOR,
+            r##"<p><a id="b1"><sup><a href="#f1">1</a></sup></a></p>"##,
+        )
+        .expect("proposed");
+        assert_eq!(rule, EPUB3_NESTED_ANCHOR);
+        assert!(
+            out.contains(r##"<sup id="b1"><a href="#f1">1</a></sup>"##),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn on_epub2_the_proposal_still_names_the_epub2_rule() {
+        let (rule, _) = nested_anchor_fix(
+            "htm.epub2_dom.nested_anchor",
+            r##"<p><a id="b1"><sup><a href="#f1">1</a></sup></a></p>"##,
+        )
+        .expect("proposed");
+        assert_eq!(rule, "htm.epub2_dom.nested_anchor");
+    }
+
+    /// The EPUB 3 pattern also reports an `<a>` inside a `<button>`. That is
+    /// not an anchor target around a link, and nothing is proposed for it.
+    #[test]
+    fn on_epub3_an_anchor_inside_a_button_is_left_alone() {
+        assert!(
+            nested_anchor_fix(
+                EPUB3_NESTED_ANCHOR,
+                r##"<p><button id="b1"><a href="#f1">1</a></button></p>"##
+            )
+            .is_none()
+        );
+    }
+
+    /// A sibling Schematron pattern (a `<button>` inside an `<a>`) is not ours,
+    /// even in a document that holds the shape we do repair.
+    #[test]
+    fn another_interactive_content_pattern_is_not_dispatched() {
+        assert!(
+            nested_anchor_fix(
+                "opf.content_document.no_interactive_in_a__button",
+                r##"<p><a id="b1"><sup><a href="#f1">1</a></sup></a></p>"##
+            )
+            .is_none()
+        );
     }
 
     /// A package with the given `unique-identifier` and `<dc:identifier>` list,
@@ -10179,6 +10514,112 @@ mod tests {
             assert!(!out.contains("@font-face"), "{src}: {out}");
             assert!(out.contains("p { margin: 0 }"), "{src}: {out}");
         }
+    }
+
+    // ---- fix.content_url_spaces ------------------------------------
+
+    /// An EPUB 2 book whose chapter holds `body`, with an image whose container
+    /// name has a space (`i/a b.png`, declared encoded in the manifest). Built
+    /// for the real detector, which the fixer asks about the result.
+    fn url_book(body: &str) -> Workspace {
+        let chapter = format!(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:xlink="http://www.w3.org/1999/xlink"><head><title>t</title></head><body><div>{body}</div></body></html>"#
+        );
+        container(&[
+            (
+                "META-INF/container.xml",
+                r#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#,
+            ),
+            (
+                "content.opf",
+                r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="id">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="id">x</dc:identifier><dc:title>t</dc:title><dc:language>en</dc:language></metadata>
+  <manifest><item href="c.xhtml" id="c" media-type="application/xhtml+xml"/><item href="i/a%20b.png" id="i" media-type="image/png"/></manifest>
+  <spine><itemref idref="c"/></spine>
+</package>"#,
+            ),
+            ("c.xhtml", &chapter),
+            ("i/a b.png", "\u{89}PNG\r\n\u{1a}\n"),
+        ])
+    }
+
+    /// The reported values under the rule.
+    fn malformed_url_findings(ws: &Workspace) -> Vec<String> {
+        ws.detect()
+            .unwrap()
+            .messages
+            .iter()
+            .filter(|m| m.rule == Some(MALFORMED_RELATIVE_URL_RULE))
+            .filter_map(|m| m.params.first().cloned())
+            .collect()
+    }
+
+    /// Applies the one proposal and returns the chapter, or `None` when the
+    /// fixer declined. The fixture must carry the finding.
+    fn url_spaces_fix(body: &str) -> Option<String> {
+        let mut ws = url_book(body);
+        assert!(
+            !malformed_url_findings(&ws).is_empty(),
+            "the fixture must carry the finding, or this test proves nothing"
+        );
+        let fix = content_url_spaces(&ws.detect().unwrap(), &ws)
+            .into_iter()
+            .next()?;
+        assert_eq!(fix.tier, Tier::AutoSafe);
+        assert_eq!(fix.addresses_id, "RSC-020");
+        fix.apply(&mut ws);
+        assert!(
+            malformed_url_findings(&ws).is_empty(),
+            "nothing left under the rule"
+        );
+        ws.get_text("c.xhtml")
+    }
+
+    /// The shelf's shapes: an `<img src>` and a cover's `<svg:image xlink:href>`.
+    #[test]
+    fn a_space_in_an_image_reference_is_encoded() {
+        let out = url_spaces_fix(r#"<img alt="a b" src="i/a b.png"/>"#).expect("proposed");
+        assert!(
+            out.contains(r#"<img alt="a b" src="i/a%20b.png"/>"#),
+            "{out}"
+        );
+        let out = url_spaces_fix(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><image width="1" height="1" xlink:href="i/a b.png"/></svg>"#,
+        )
+        .expect("proposed");
+        assert!(out.contains(r#"xlink:href="i/a%20b.png""#), "{out}");
+    }
+
+    /// The URL standard strips edge spaces, so only the interior one is ours.
+    #[test]
+    fn only_interior_spaces_are_encoded() {
+        assert_eq!(encode_interior_spaces(" a b c "), " a%20b%20c ");
+        assert_eq!(encode_interior_spaces("\ta b\n"), "\ta%20b\n");
+        assert_eq!(encode_interior_spaces("  "), "  ");
+        assert_eq!(encode_interior_spaces("ab"), "ab");
+    }
+
+    /// A backslash after the space: the message names only the space, the
+    /// trial still reports the encoded URL, and the edit would fix nothing.
+    #[test]
+    fn a_url_with_a_second_defect_is_declined() {
+        assert!(url_spaces_fix(r#"<img alt="x" src="i/a b\c.png"/>"#).is_none());
+    }
+
+    /// `alt` and `src` both hold the value: which one is the URL is a guess.
+    #[test]
+    fn two_attributes_with_the_value_decline() {
+        assert!(url_spaces_fix(r#"<img alt="i/a b.png" src="i/a b.png"/>"#).is_none());
+    }
+
+    /// The space is a character reference in the file: rewriting the value
+    /// would respell it, not only encode it.
+    #[test]
+    fn a_value_spelled_with_a_reference_declines() {
+        assert!(url_spaces_fix(r#"<img alt="x" src="i/a&#32;b.png"/>"#).is_none());
     }
 
     // ---- fix.svg_attribute_case ------------------------------------
@@ -12283,6 +12724,62 @@ mod tests {
     #[test]
     fn mapped_entity_replacement_is_the_character() {
         assert_eq!(missing_semicolon_replacement("mdash").as_deref(), Some("—"));
+    }
+
+    /// `&emsp;` is outside the 117 names the table once held: *On Küçük Zenci*
+    /// after epublift's upgrade carried 12 of them, fatal, and none was mapped.
+    #[test]
+    fn an_entity_from_the_whole_xhtml_table_is_mapped() {
+        let doc = "<html xmlns=\"http://www.w3.org/1999/xhtml\"><body><p>a&emsp;b&emsp;c</p></body></html>";
+        let mut ws = container(&[("OEBPS/ch.xhtml", doc)]);
+        let mut m = fixture("RSC-016", "htm.entity.undeclared");
+        m.severity = Severity::Fatal;
+        m.location = Some("OEBPS/ch.xhtml".to_string());
+        m.params = vec!["emsp".to_string()];
+        let mut report = Report::default();
+        report.messages.push(m.clone());
+        report.messages.push(m);
+        let fix = html_entities(&report, &ws)
+            .into_iter()
+            .next()
+            .expect("proposed");
+        fix.apply(&mut ws);
+        assert_eq!(
+            ws.get_text("OEBPS/ch.xhtml").unwrap(),
+            doc.replace("&emsp;", "\u{2003}")
+        );
+        assert_eq!(
+            missing_semicolon_replacement("emsp").as_deref(),
+            Some("\u{2003}")
+        );
+    }
+
+    /// An HTML5-only name is not an XHTML DTD entity: never guessed.
+    #[test]
+    fn an_html5_only_entity_is_declined() {
+        let doc =
+            "<html xmlns=\"http://www.w3.org/1999/xhtml\"><body><p>a&NewLine;b</p></body></html>";
+        let ws = container(&[("OEBPS/ch.xhtml", doc)]);
+        let mut m = fixture("RSC-016", "htm.entity.undeclared");
+        m.location = Some("OEBPS/ch.xhtml".to_string());
+        m.params = vec!["NewLine".to_string()];
+        let mut report = Report::default();
+        report.messages.push(m);
+        assert!(html_entities(&report, &ws).is_empty());
+        assert_eq!(missing_semicolon_replacement("NewLine"), None);
+    }
+
+    /// Our own parser declares from the same table, so a structural fixer can
+    /// read an EPUB 2 document that uses one of the newer names.
+    #[test]
+    fn prepared_doc_declares_an_entity_from_the_whole_table() {
+        let doc = NBSP_DOC.replace("&mdash;", "&emsp;");
+        assert!(
+            parse_xml(&doc).is_none(),
+            "precondition: raw doc does not parse"
+        );
+        let prepared = prepare_content_doc(&doc);
+        assert!(prepared.parse().is_some(), "{}", prepared.working);
     }
 
     #[test]

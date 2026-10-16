@@ -17,10 +17,11 @@ apply → check → report) is solid. The check re-validates the book after
 applying, and a fix that made any finding more frequent is undone and reported
 as reverted — unless the fix let the validator see part of the book it could not
 see before, in which case what appears was always there and the run says so.
-Forty-six fixers so far:
+Forty-seven fixers so far:
 
 - **`RSC-016`** — undeclared HTML entities (`&nbsp;`, `&mdash;`, …) → the exact
-  character each denotes.
+  character each denotes, for every name in the XHTML 1.x entity sets (the same
+  table epubveri reads EPUB 2 documents with).
 - **`RSC-016` / `missing_semicolon`** — a named entity with no closing `;`
   (`&nbsp`) → the character it denotes, or the reference closed. Completes the
   entity family: every entity defect epubveri reports now has a repair.
@@ -38,6 +39,9 @@ Forty-six fixers so far:
   an id.
 - **`RSC-020`** — an unencoded space in a manifest `href` → `%20`.
 - **`RSC-020` / `ncx.content_src`** — the same space in an NCX `<content src>`.
+- **`RSC-020` / `malformed_relative_url`** — the same space in a content
+  document's link or image reference (`<img src="Screen Shot 1.png">`), where
+  the validator then accepts the URL.
   A book carrying both needs both: encoding only the manifest leaves it invalid.
 - **`RSC-005` / `lang_xmllang_mismatch`** — `lang` and `xml:lang` disagreeing on
   one element, where one of them is empty → filled from the other. Declines when
@@ -176,7 +180,8 @@ Forty-six fixers so far:
   where the outer element is an anchor *target* rather than a link → unwrapped,
   with the `id` moved to its child so the fragment still resolves in the same
   place. An outer anchor that is a real link, or that carries anything besides
-  an `id`, is left alone.
+  an `id`, is left alone. EPUB 2 and EPUB 3 alike (on EPUB 3 the finding is
+  `opf.content_document.no_interactive_in_a__a`).
 - **`OPF-054`** — a `<dc:date>` with no content → dropped; the element states no
   date and `dc:date` is optional. A malformed but non-empty date (`March 2019`)
   is left exactly as it is: it carries a date the author wrote, and deciding

@@ -32,6 +32,7 @@ grows one carefully-argued entry at a time.
 | `RSC-005` | `opf.content_document.schema_violation` (`incomplete_content`, `params` = `["head", "title"]`) | ConfirmNeeded | An XHTML `<head>` has no `<title>` at all | [Add one, from the same three sources](#rsc-005--a-head-with-no-title) |
 | `RSC-020` | `opf.manifest_item.unencoded_space_in_href` | AutoSafe | A manifest `href` contains a raw space | [Percent-encode the space as `%20`](#rsc-020--unencoded-space-in-a-manifest-href) |
 | `RSC-020` | `opf.ncx.content_src_unencoded_space` | AutoSafe | An NCX `<content src>` contains a raw space | [Percent-encode the space as `%20`](#rsc-020--unencoded-space-in-an-ncx-content-src) |
+| `RSC-020` | `opf.content_document.malformed_relative_url` (a space) | AutoSafe | A link or image reference in a content document contains a raw space | [Percent-encode the space, where the validator then accepts the URL](#rsc-020--unencoded-space-in-a-content-documents-url) |
 | `OPF-014` | `opf.content_document.property_used_undeclared` | AutoSafe | A content document uses a feature its manifest item doesn't declare | [Add the token to that item's `properties`](#opf-014--undeclared-content-property) |
 | `PKG-006` / `PKG-005` | *(none)* | AutoSafe | The `mimetype` entry is not first in the ZIP, or its header carries an extra field | [Re-emit it first and stored, touching no content](#pkg-006--pkg-005--the-mimetype-entrys-packaging) |
 | `PKG-014` | *(none)* | AutoSafe | A ZIP directory entry has nothing inside it | [Leave the entry out of the archive](#pkg-014--an-empty-directory-entry) |
@@ -61,6 +62,7 @@ grows one carefully-argued entry at a time.
 | `OPF-001` | `opf.package.unrecognized_version` | ConfirmNeeded | The package declares a `version` that is not an EPUB version, so the book has never been validated | [Set it to `2.0` when only EPUB 2 fits](#opf-001--a-package-version-that-is-not-an-epub-version) |
 | `OPF-030` / `RSC-005` | `opf.package.unique_identifier_unresolved`, `opf.package.opf_identifier_not_empty` | ConfirmNeeded | The package's declared unique identifier resolves to nothing usable | [Attach the declared id to the book's one real identifier](#opf-030--rsc-005--the-packages-declared-identifier-points-at-nothing-usable) |
 | `RSC-005` | `htm.epub2_dom.nested_anchor` | ConfirmNeeded | An `<a>` with only an `id` wraps a real link | [Unwrap it, moving the `id` to the child](#rsc-005--an-anchor-target-wrapped-around-a-link) |
+| `RSC-005` | `opf.content_document.no_interactive_in_a__a` | ConfirmNeeded | The same nesting, in an EPUB 3 document | [The same repair, under the same fix id](#rsc-005--an-anchor-target-wrapped-around-a-link) |
 | `RSC-005` | `navdoc.ol.empty` | ConfirmNeeded | An optional `<nav>` in the navigation document holds an `<ol>` with no `<li>` | [Delete the whole `<nav>`](#rsc-005--an-optional-nav-whose-list-is-empty) |
 | `OPF-054` | *(none)* | ConfirmNeeded | A `<dc:date>` holds no date at all (EPUB 2) | [Drop the empty element; never touch a non-empty one](#opf-054--an-empty-dcdate-epub-2) |
 | `OPF-072` | `opf.metadata.empty_element` | ConfirmNeeded | An optional Dublin Core element is empty (EPUB 2) | [Drop it; never a required one](#opf-072--an-empty-optional-dublin-core-element-epub-2) |
@@ -106,18 +108,32 @@ is exactly what `--goal openable` is for.
 
 **Fix** (`fix.html_entities`, AutoSafe). For each recognized entity, replace
 every `&name;` occurrence in the file with the exact Unicode character that
-entity denotes (from a curated Latin-1 + General-Punctuation + common-symbol
-table). Example: `&nbsp;` → U+00A0, `&mdash;` → `—`.
+entity denotes. Example: `&nbsp;` → U+00A0, `&mdash;` → `—`, `&emsp;` → U+2003.
+
+The names are those of the three XHTML 1.x DTD entity sets (`HTMLlat1`,
+`HTMLsymbol`, `HTMLspecial`; 248 names besides the XML-predefined five), read
+from epubveri's `htm::xhtml_entity` — the table it declares from when it reads an
+EPUB 2 document, so the detector and the repair cannot disagree about what a
+name means. Each name denotes one code point, fixed by those DTDs. (Until 0.30.0
+this was a curated 117-name subset of the same table, and a book using any of
+the other 131 — `&emsp;` — was left unopenable.)
 
 **Why it's safe.** These are standard HTML named entities; substituting the
 character they denote changes only the *encoding* of that character, not the
 rendered content. The result no longer relies on an undeclared entity, so the
 document becomes well-formed and the finding clears.
 
-**When it declines.** Any entity **not** in the curated table is left untouched
-(and stays reported). The table is deliberately conservative — an unknown or
-ambiguous entity is never guessed. The XML-predefined five (`&amp;` `&lt;`
-`&gt;` `&quot;` `&apos;`) are always declared and so never appear here.
+**When it declines.** Any name **not** in those three sets is left untouched (and
+stays reported) — HTML5's much larger list of named references (`&NewLine;`) is
+not XHTML's, and a name outside the DTDs is never guessed. The XML-predefined
+five (`&amp;` `&lt;` `&gt;` `&quot;` `&apos;`) are always declared and so never
+appear here.
+
+**Measured (562 books, 2026-10-16, the 0.30.0 change).** On the shelf as it is,
+no output changes: only one book uses any of the 131 names, and its EPUB 2 DTD
+declares them. After epublift's EPUB 2 → 3 upgrade (cli-v4.0.0), that book —
+*On Küçük Zenci*, 12 × `&emsp;` in 4 documents — carried 12 fatal findings,
+which this clears with no other count rising.
 
 ---
 
@@ -135,8 +151,8 @@ repair.
 **Fix** (`fix.entity_missing_semicolon`, AutoSafe). Per file, for each recognized
 name, replace the unterminated `&name` with:
 
-- **the character it denotes**, when the name is one we map (reusing the
-  `html_entities` table) — this both closes and resolves the reference, leaving
+- **the character it denotes**, when the name is one we map (the same
+  XHTML 1.x table as `html_entities`) — this both closes and resolves the reference, leaving
   text that is well-formed with or without a DTD (`&nbsp` → U+00A0);
 - **`&name;`** (the semicolon inserted), when the name is one of the XML-predefined
   five (`amp`/`lt`/`gt`/`quot`/`apos`), whose denoted character is itself
@@ -425,7 +441,66 @@ present. Renaming container entries is not something any fixer here does.
 
 ---
 
-## OPF-014 — undeclared content property
+## RSC-020 — unencoded space in a content document's URL
+
+> **Written spec-first on 2026-10-16**, before the code.
+
+**Finding.** `RSC-020` / `opf.content_document.malformed_relative_url`,
+**error**, both versions. A relative URL in a content document is not a valid
+URL. `params[0]` is the attribute's value exactly as the file holds it, and
+`element_path` names the element carrying it
+(`/h:html[1]/h:body[1]/h:p[10]/h:img[1]`, or `…/svg:svg[1]/svg:image[1]` for a
+cover's `xlink:href`). The attribute itself is not named. The rule covers five
+defects (an unencoded space, a backslash, a `%` not followed by two hex digits,
+a control character, a character URLs do not allow), and the message names the
+first one only — so a URL with a space *and* a backslash is reported once.
+
+On the shelf (562 books, 2026-10-16) every case is a space: 6 findings in
+3 books (`<img src="../Images/Screen Shot 2018-01-07 at 23.03.10.png">`, two SVG
+covers). After epublift's EPUB 2 → 3 upgrade (cli-v4.0.0) there are 135 in 7
+books: the same 6, plus 129 in the `nav.xhtml` the upgrade writes from the NCX
+(`<a href="GururVe Onyargi_split_004.html">`), and for 5 of the 7 books this is
+the only error left.
+
+**Fix** (`fix.content_url_spaces`, AutoSafe). On the reported element, in the
+one attribute whose value is exactly `params[0]`, percent-encode each **interior**
+space as `%20`. Leading and trailing spaces are left as they are: the URL
+parser strips them, they are valid, and encoding one would make it part of the
+path. Nothing else in the value is touched. One proposal per document.
+
+**Why it's safe.** The same argument as the manifest and NCX siblings: a raw
+space is not a legal URL character, `%20` is its one correct spelling, and it
+resolves back to exactly the same container entry. No file is renamed. The
+manifest and the NCX already name these files in their own, separately
+repaired references; this is the third place a book spells the same path.
+
+**Only where the detector then accepts the URL.** No table of URL defects is
+kept here — that would be a second oracle. Every planned encoding is applied to
+a copy of the book, and an encoding whose result epubveri still reports under
+this rule (the URL had a second defect besides the space) is declined, since it
+would change the file and fix nothing. The pattern is
+[`fix.svg_attribute_case`](#rsc-005--rsc-025--an-svg-attribute-whose-name-lost-its-case)'s.
+
+**When it declines.**
+
+- **No attribute, or more than one, on the reported element carries the value
+  exactly.** `<img alt="a b.png" src="a b.png">` is declined: which one is the
+  URL is not ours to guess from the name. (On the shelf, `alt` drops the
+  extension, so it never matches.)
+- **The value in the file is not the value in `params[0]`**, byte for byte — an
+  entity or character reference inside it (`a&#32;b.png`). Rewriting the
+  attribute would then change how it is spelled, not only the space.
+- **The trial still reports it** — a second defect after the space, or no
+  interior space at all (the edit would then change nothing).
+- A document that will not parse, or whose reported element is not found.
+
+**Measured (562 books, 2026-10-16).** All 6 findings in the 3 books repaired,
+no other count moved, and one book (an SVG cover) now validates. On the
+upgraded copies, all 135 in 7 books repaired, no count rose, none reverted,
+and 5 books now validate. No case on the shelf exercises a decline: every
+reported URL's only defect was the space, and no element carried the value
+twice.
+ — undeclared content property
 
 **Finding.** `opf.content_document.property_used_undeclared`. A content document
 uses a feature — `scripted`, `svg`, `remote-resources`, or `switch` — that its
@@ -2373,10 +2448,24 @@ test, not by a book.
 
 ## RSC-005 — an anchor target wrapped around a link
 
-**Finding.** `htm.epub2_dom.nested_anchor`, message *The "a" element cannot
-contain any nested "a" elements*. `params` is empty, so the finding gives the
-file and nothing else; the element is re-located by parsing, as the other
-structural fixers do.
+**Finding.** Two rules, one per version, both `RSC-005` errors with empty
+`params` — the finding gives the file and nothing else, so the element is
+re-located by parsing, as the other structural fixers do:
+
+- EPUB 2: `htm.epub2_dom.nested_anchor`, *The "a" element cannot contain any
+  nested "a" elements*.
+- EPUB 3: `opf.content_document.no_interactive_in_a__a`, from epubcheck's
+  Schematron pattern *no-interactive-in-a--a*: *interactive content (a "a"
+  element) must not appear inside an "a" element*. The same pattern also
+  reports an `<a>` inside a `<button>`, with the same rule and its own message.
+  That shape is not repaired here: the fixer only ever edits an `<a>` that
+  contains another `<a>`, so a document whose only finding is an `<a>` in a
+  `<button>` gets no proposal, and one that has both keeps the button finding.
+
+Both rules go to the same fixer under the same id (`fix.nested_anchor`), as the
+EPUB 3 empty Dublin Core element did in 0.29.0: a caller that already approves
+it gets the EPUB 3 repair unchanged. The EPUB 3 rule appears on the shelf only
+after an EPUB 2 → 3 upgrade, when the EPUB 2 finding becomes this one.
 
 **The shape, and why it is determinate.** On the shelf every case is the same
 thing — a footnote reference where the *outer* `<a>` carries no `href`:
@@ -2411,10 +2500,14 @@ its own.
   anchor did.
 - A document that will not parse.
 
-**Measured.** 6 findings in **one** book, all the footnote shape above, all
-repaired. One book is thin evidence and the honest claim is the mechanism: it
-moves an id off a wrapper that exists only to hold it, and refuses every case
-where the wrapper carries anything else.
+**Measured (562 books, 2026-10-16).** EPUB 2: 111 findings in 10 books, every
+one cleared, all the footnote shape above. (The first measurement, 6 findings in
+one book on 2026-08-20, came before the shelf grew.) EPUB 3, after epublift's
+EPUB 2 → 3 upgrade (cli-v4.0.0): the same 111 findings in the same 10 books,
+every one inside an `<a>` (none in a `<button>`); before 0.30.0 none was
+repaired, after it all 111 are, no other count rises and none of its edits is reverted.
+The claim is still the mechanism: it moves an id off a wrapper that exists only
+to hold it, and refuses every case where the wrapper carries anything else.
 
 
 ---
