@@ -60,6 +60,7 @@ grows one carefully-argued entry at a time.
 | `RSC-007` | `css.font_face.missing_target` | ConfirmNeeded | A `@font-face` sources a font file the book does not contain | [Drop the whole rule; decline one with a second source](#rsc-007--a-font-face-whose-font-file-is-not-in-the-book) |
 | `RSC-005` | `opf.package.opf_identifier_not_empty` (an extra one) | ConfirmNeeded | An empty `<dc:identifier>` with no `id`, beside a real one | [Drop it; never the unique-identifier anchor](#rsc-005--an-empty-extra-dcidentifier) |
 | `OPF-001` | `opf.package.unrecognized_version` | ConfirmNeeded | The package declares a `version` that is not an EPUB version, so the book has never been validated | [Set it to `2.0` when only EPUB 2 fits](#opf-001--a-package-version-that-is-not-an-epub-version) |
+| `OPF-035` / `OPF-043` | *(none)* | ConfirmNeeded | An XHTML file is declared `text/html` (a warning in EPUB 2, an error in EPUB 3; either way the file is never fully checked) | [Declare it `application/xhtml+xml`, once the file is shown to be XHTML](#opf-035--opf-043--an-xhtml-file-declared-texthtml) |
 | `OPF-030` / `RSC-005` | `opf.package.unique_identifier_unresolved`, `opf.package.opf_identifier_not_empty` | ConfirmNeeded | The package's declared unique identifier resolves to nothing usable | [Attach the declared id to the book's one real identifier](#opf-030--rsc-005--the-packages-declared-identifier-points-at-nothing-usable) |
 | `RSC-005` | `htm.epub2_dom.nested_anchor` | ConfirmNeeded | An `<a>` with only an `id` wraps a real link | [Unwrap it, moving the `id` to the child](#rsc-005--an-anchor-target-wrapped-around-a-link) |
 | `RSC-005` | `opf.content_document.no_interactive_in_a__a` | ConfirmNeeded | The same nesting, in an EPUB 3 document | [The same repair, under the same fix id](#rsc-005--an-anchor-target-wrapped-around-a-link) |
@@ -1782,6 +1783,90 @@ buys nothing here; it is written for the book that has not arrived yet.
 
 **It moves no verdict.** `OPF-090` is Usage severity: nothing becomes valid. It
 removes a line from an epubcheck report that describes a name, not a fault.
+
+## OPF-035 / OPF-043 — an XHTML file declared `text/html`
+
+> **Written spec-first on 2026-10-16**, on epublift's report of the EPUB 3
+> shape. The finding shapes below are what epubveri 0.28.0 reports.
+
+**Findings.** Neither carries a `rule` or `params`; the finding's `position`
+(line and column in the package document) names the element.
+
+- **`OPF-035`**, warning, **EPUB 2 only**: *manifest item 'c1.html' should be
+  declared application/xhtml+xml, not text/html*. Reported at the manifest
+  `<item>`, whatever the file holds.
+- **`OPF-043`**, error, **EPUB 3**: *spine item idref 'c1' has non-content
+  media-type 'text/html' with no fallback*. Reported at the spine `<itemref>`.
+  EPUB 2 exempts `text/html` here; EPUB 3 does not. The same finding is raised
+  for any non-content type in the spine (audio, an image); only an itemref whose
+  item is declared `text/html` is this fixer's.
+
+**Fix** (`fix.html_media_type`, ConfirmNeeded). Rewrite that item's
+`media-type` to `application/xhtml+xml`. Nothing else changes, in the package
+or in the file. One proposal per package document.
+
+    <item id="c1" href="c1.html" media-type="text/html"/>
+    →
+    <item id="c1" href="c1.html" media-type="application/xhtml+xml"/>
+
+**Why it is one repair, not a choice.** The declaration and the file disagree,
+which elsewhere (`declared_media_type_mismatch`) is a choice this crate does not
+make. Here the other side of the choice does not exist: `text/html` is not an
+EPUB content document type in either version, so no edit to the file could make
+the declaration right. Only the declaration can move, and it can move to one
+value. The fixer first shows that the file *is* XHTML: it parses as XML (after
+the same DTD-entity step every structural fixer uses) and its root element is
+`html` in the XHTML namespace. A file that is not XML is real HTML; relabelling
+it would trade a warning for a fatal, and converting it is an editor's job.
+
+**What happens next, and why it is not a regression.** epubveri does not check
+a file declared `text/html` as a content document, in either version (epubveri
+0.28.0, 2026-10-16):
+
+- **EPUB 3: the file is not opened.** Like epubcheck, epubveri does not open a
+  spine item whose type is not a content document type. Probe: a file with two
+  broken references reports only `OPF-043` while declared `text/html`, and both
+  `RSC-007` once declared `application/xhtml+xml`.
+- **EPUB 2: the references are checked, the ids are not.** The same probe as
+  EPUB 2 reports both `RSC-007` under either type. But on *Karanlık Orman*
+  (91 such files), declaring them `application/xhtml+xml` showed 2
+  `duplicate_id` errors that were always there (two elements with
+  `id="bookmark0"`), and turned one NCX fragment from "may not be defined"
+  (usage) into "is not defined" (error), because the detector could now see the
+  file's ids. A first draft of this spec said EPUB 2 hides nothing; that was
+  read from the probe alone, and the book refuted it.
+
+So both ids join `opf.package.unrecognized_version` among the findings that
+mean *the detector could not look*: a rise under a fix that lowered their count
+is accepted as revealed, and a later fix that raises the same finding further is
+still undone. Neither id has a `rule`, so both are matched by id. The price is
+the one `fix.package_version` pays: any fix that lowers either count has its
+rises accepted, and this is the only fixer that does. It rewrites attribute
+values and nothing else.
+
+**When it declines.**
+
+- The node at the reported position is not the element the finding describes:
+  not an `<item>` declared `text/html` (`OPF-035`), or not an `<itemref>`
+  (`OPF-043`). A finding is never re-anchored to a guess.
+- The itemref's `idref` names no manifest item, or two (a defective book breaks
+  the uniqueness the lookup assumes), or an item not declared `text/html`
+  (audio, an image). The same two checks hold for an `OPF-035` item, and are
+  made again when the fix is applied. A `fallback` is not a reason: EPUB 3
+  raises no `OPF-043` for an item that has one, and in EPUB 2 the file is
+  XHTML whatever falls back to it.
+- The item's file is missing, does not parse as XML, or its root element is not
+  XHTML `html`.
+- The package document does not parse.
+
+**Tier.** ConfirmNeeded, like `fix.package_version`. The edit is small and
+determinate, but it lets the detector check documents it has never fully
+checked, and the book's count can rise. The title says so.
+
+**Measured (562 books, epubveri 0.28.0, 2026-10-16, before building).** Shelf
+inputs: 126 `OPF-035` in 5 books. The same 5 books after epublift's upgrade
+(`4.0.0+64375f5`) and an epubsana repair: 126 `OPF-043`, every one on a
+`text/html` item. One book holds 91 of them.
 
 ## RSC-007 — a `@font-face` whose font file is not in the book
 

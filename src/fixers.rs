@@ -116,6 +116,7 @@ pub fn plan(report: &Report, ws: &Workspace, _goal: Goal) -> Vec<ProposedFix> {
     fixes.extend(empty_metadata_element(report, ws));
     fixes.extend(empty_extra_identifier(report, ws));
     fixes.extend(non_preferred_media_type(report, ws));
+    fixes.extend(html_media_type(report, ws));
     fixes.extend(font_face_missing_target(report, ws));
     fixes.extend(navdoc_empty_navs(report, ws));
     fixes.extend(mimetype_packaging(report, ws));
@@ -135,14 +136,15 @@ pub fn plan(report: &Report, ws: &Workspace, _goal: Goal) -> Vec<ProposedFix> {
 /// like a fixer that does not exist), which is precisely the confusion that made
 /// this list necessary.
 ///
-/// **Three fixers dispatch on a bare `id`, and two of those ids have since grown
+/// **Four fixers dispatch on a bare `id`, and two of those ids have since grown
 /// a rule.** `NCX-001` and `PKG-006` were rule-less when their fixers were
 /// written; epubveri 0.9.11 named them `ncx.uid.package_identifier_mismatch` and
 /// `ocf.mimetype.not_first_entry`. The dispatch still keys on the id, because
 /// our floor is 0.9.7 where the slugs do not exist — but the rules belong in
 /// this list, since a census that reads it would otherwise file two rules we
 /// fix under *no fixer at all*, which is precisely the mislabelling this list
-/// exists to prevent. `OPF-054` is still rule-less.
+/// exists to prevent. `OPF-054` is still rule-less, and so are `OPF-035` and
+/// `OPF-043`, which `fix.html_media_type` dispatches on.
 ///
 /// **Keep this in sync with [`plan`].** Nothing enforces it at compile time; the
 /// census cross-checks at runtime and reports any rule a proposal addressed that
@@ -7370,6 +7372,201 @@ fn compute_media_type_edits(
     (!edits.is_empty()).then_some(edits)
 }
 
+/// The two findings for an XHTML file declared `text/html`: `OPF-035` (EPUB 2,
+/// warning, at the manifest `<item>`) and `OPF-043` (EPUB 3, error, at the spine
+/// `<itemref>`). Neither carries a rule.
+const HTML_MEDIA_TYPE_IDS: [&str; 2] = ["OPF-035", "OPF-043"];
+
+/// `OPF-035` / `OPF-043`: a manifest item declares `text/html` for a file that is
+/// XHTML. Rewrites the declaration to `application/xhtml+xml`.
+///
+/// **One repair, not a choice.** `text/html` is not an EPUB content document
+/// type in either version, so no edit to the file could make the declaration
+/// right; only the declaration can move, and to one value. Which is why the file
+/// must first be shown to be XHTML ([`is_xhtml_document`]): real HTML would trade
+/// a warning for a fatal, and converting it is an editor's job.
+///
+/// **The finding is found by its position.** Neither id carries `params` or an
+/// `element_path`, so the reported line and column name the element, and the
+/// element must be what the finding describes — an `<item>` declared `text/html`,
+/// or an `<itemref>` whose one item is — or the finding is declined, never
+/// re-anchored. `OPF-043` is raised for any non-content spine type; an itemref on
+/// audio or an image is not ours.
+///
+/// **The file has never been fully checked.** epubveri does not open an EPUB 3
+/// spine item of a non-content type, and in EPUB 2 it checks a `text/html`
+/// item's references but not its ids. So relabelling is the document's first
+/// full validation, and [`crate::repair`] counts both ids among the findings
+/// that mean the detector could not look. `ConfirmNeeded`, like
+/// [`package_version`], for the same reason.
+fn html_media_type(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    let mut found: BTreeMap<(&str, &'static str), Vec<(u32, u32)>> = BTreeMap::new();
+    for m in report
+        .messages
+        .iter()
+        .filter(|m| HTML_MEDIA_TYPE_IDS.contains(&m.id))
+    {
+        let (Some(opf), Some(p)) = (m.location.as_deref(), m.position.as_ref()) else {
+            continue;
+        };
+        found
+            .entry((opf, m.id))
+            .or_default()
+            .push((p.line, p.column));
+    }
+
+    let mut fixes = Vec::new();
+    for ((opf, id), positions) in found {
+        let Some(text) = ws.get_text(opf) else {
+            continue;
+        };
+        let Some(items) = html_items_at(&text, id, &positions) else {
+            continue;
+        };
+        let base = dir_of(opf);
+        let ids: BTreeSet<String> = items
+            .into_iter()
+            .filter(|(_, href)| {
+                ws.get_text(&to_entry(ws, resolve(&base, href)))
+                    .is_some_and(|t| is_xhtml_document(&t))
+            })
+            .map(|(item_id, _)| item_id)
+            .collect();
+        let Some(edits) = compute_html_media_type_edits(&text, &ids) else {
+            continue;
+        };
+        let n = edits.len();
+
+        let opf_for_apply = opf.to_string();
+        fixes.push(ProposedFix {
+            fix_id: "fix.html_media_type",
+            addresses_id: id.to_string(),
+            addresses_rule: None,
+            addresses_severity: addressed_severity(report, id, None),
+            tier: Tier::ConfirmNeeded,
+            title: format!(
+                "Declare {n} XHTML file(s) application/xhtml+xml instead of text/html in {opf} \
+                 (they will be fully checked for the first time)"
+            ),
+            rationale: "Each file parses as XML with an XHTML <html> root, so it is XHTML, and \
+                        text/html is not an EPUB content document type: only the declaration can be \
+                        wrong, and it has one right value. The files are not changed. epubveri does \
+                        not check a file declared text/html as a content document: in EPUB 3 it \
+                        does not open a spine item so declared, and in EPUB 2 it checks the \
+                        file's references but not, for one, its ids. So these files may show \
+                        defects that were always in them. Run epubsana again on the output to \
+                        repair the ones it can."
+                .to_string(),
+            preview: vec![Change {
+                path: opf.to_string(),
+                note: format!("text/html → application/xhtml+xml on {n} manifest item(s)"),
+            }],
+            apply_fn: Box::new(move |ws: &mut Workspace| {
+                if let Some(text) = ws.get_text(&opf_for_apply)
+                    && let Some(edits) = compute_html_media_type_edits(&text, &ids)
+                {
+                    ws.set_text(&opf_for_apply, apply_edits(&text, edits));
+                }
+            }),
+        });
+    }
+    fixes
+}
+
+/// Whether a declared media type is `text/html`, compared as epubveri compares it
+/// (XML whitespace trimmed, no parameter).
+fn is_text_html(mt: &str) -> bool {
+    mt.trim_matches(epubveri::xmlext::is_xml_space) == "text/html"
+}
+
+/// The manifest items `(id, href)` the findings at `positions` are about: for
+/// `OPF-035` the `<item>` at the position, for `OPF-043` the item the
+/// `<itemref>` at the position names. A position naming anything else
+/// contributes nothing. That the item is declared `text/html` and is the only
+/// one with its id is [`compute_html_media_type_edits`]'s to check, at plan and
+/// at apply time alike. `None` if the package will not parse.
+fn html_items_at(opf: &str, id: &str, positions: &[(u32, u32)]) -> Option<Vec<(String, String)>> {
+    let doc = parse_xml(opf)?;
+    let item_named = |item_id: &str| {
+        doc.descendants()
+            .filter(|n| n.is_element() && n.tag_name().name() == "manifest")
+            .flat_map(|m| m.children())
+            .find(|n| {
+                n.is_element()
+                    && n.tag_name().name() == "item"
+                    && n.attr_no_ns("id") == Some(item_id)
+            })
+    };
+    let (wanted, key) = if id == "OPF-035" {
+        ("item", "id")
+    } else {
+        ("itemref", "idref")
+    };
+    let mut out = Vec::new();
+    for n in doc
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == wanted)
+    {
+        let at = doc.text_pos_at(n.range().start);
+        if !positions.contains(&(at.row, at.col)) {
+            continue;
+        }
+        let Some(item) = n.attr_no_ns(key).and_then(item_named) else {
+            continue;
+        };
+        let (Some(item_id), Some(href)) = (item.attr_no_ns("id"), item.attr_no_ns("href")) else {
+            continue;
+        };
+        out.push((item_id.to_string(), href.to_string()));
+    }
+    Some(out)
+}
+
+/// Whether a file is XHTML: it parses as XML, after the DTD-entity step every
+/// structural fixer uses, and its root element is `html` in the XHTML namespace.
+fn is_xhtml_document(text: &str) -> bool {
+    let prepared = prepare_content_doc(text);
+    prepared.parse().is_some_and(|d| {
+        let root = d.root_element();
+        root.tag_name().name() == "html"
+            && root.tag_name().namespace() == Some("http://www.w3.org/1999/xhtml")
+    })
+}
+
+/// Edits declaring each manifest item in `ids` `application/xhtml+xml`, where it
+/// is still the one item with that id and still declared `text/html`. Computed
+/// again at apply time, because an earlier fix may have moved the bytes. `None`
+/// (decline) if the package won't parse or nothing is left to rename.
+fn compute_html_media_type_edits(opf: &str, ids: &BTreeSet<String>) -> Option<Vec<MetaEdit>> {
+    let doc = parse_xml(opf)?;
+    let items: Vec<_> = doc
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "manifest")
+        .flat_map(|m| m.children())
+        .filter(|n| n.is_element() && n.tag_name().name() == "item")
+        .collect();
+    let mut edits = Vec::new();
+    for id in ids {
+        let mut hits = items
+            .iter()
+            .filter(|i| i.attr_no_ns("id") == Some(id.as_str()));
+        let (Some(item), None) = (hits.next(), hits.next()) else {
+            continue;
+        };
+        if !item.attr_no_ns("media-type").is_some_and(is_text_html) {
+            continue;
+        }
+        let Some(attr) = item.attribute_node("media-type") else {
+            continue;
+        };
+        edits.push(MetaEdit {
+            range: attr.range(),
+            replacement: "media-type=\"application/xhtml+xml\"".to_string(),
+        });
+    }
+    (!edits.is_empty()).then_some(edits)
+}
+
 /// The Dublin Core elements namespace. Matched exactly as epubveri matches it
 /// (`epubveri/src/opf.rs:1217`) so the two never disagree about which element a
 /// finding is about — the same principle [`compute_empty_dc_date_edits`] states.
@@ -11497,6 +11694,225 @@ mod tests {
     fn an_unreported_navpoint_without_id_is_left_alone() {
         let ws = navpoint_book(&np(r#" playOrder="1""#, "A", "a.xhtml", ""));
         assert!(ncx_navpoint_ids(&Report::default(), &ws).is_empty());
+    }
+
+    // ---- fix.html_media_type ------------------------------------------
+
+    /// A book of `version` whose one chapter `c.html` is declared `mt` and holds
+    /// `chapter`, for the real detector. An EPUB 3 book also gets a nav.
+    fn html_mt_book(version: &str, mt: &str, chapter: &str) -> Workspace {
+        let (nav_item, modified) = if version.starts_with('3') {
+            (
+                r#"<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>"#,
+                r#"<meta property="dcterms:modified">2026-01-01T00:00:00Z</meta>"#,
+            )
+        } else {
+            ("", "")
+        };
+        let opf = format!(
+            r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="{version}" unique-identifier="id">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="id">x</dc:identifier><dc:title>t</dc:title><dc:language>en</dc:language>{modified}</metadata>
+  <manifest>{nav_item}<item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/><item href="c.html" id="c" media-type="{mt}"/></manifest>
+  <spine toc="ncx"><itemref idref="c"/></spine>
+</package>"#
+        );
+        container(&[
+            (
+                "META-INF/container.xml",
+                r#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#,
+            ),
+            ("content.opf", &opf),
+            (
+                "toc.ncx",
+                r#"<?xml version="1.0"?><ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1"><head><meta name="dtb:uid" content="x"/></head><docTitle><text>t</text></docTitle><navMap><navPoint id="n1" playOrder="1"><navLabel><text>c</text></navLabel><content src="c.html"/></navPoint></navMap></ncx>"#,
+            ),
+            (
+                "nav.xhtml",
+                r#"<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><head><title>n</title></head><body><nav epub:type="toc"><ol><li><a href="c.html">c</a></li></ol></nav></body></html>"#,
+            ),
+            ("c.html", chapter),
+        ])
+    }
+
+    const XHTML_CHAPTER: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml"><head><title>t</title></head><body><p>x</p></body></html>"#;
+
+    fn count_id(ws: &Workspace, id: &str) -> usize {
+        ws.detect()
+            .unwrap()
+            .messages
+            .iter()
+            .filter(|m| m.id == id)
+            .count()
+    }
+
+    /// The EPUB 3 shape epublift's upgrade leaves: the spine item is declared
+    /// `text/html`, the detector reports `OPF-043` at the itemref, and the one
+    /// edit is the declaration.
+    #[test]
+    fn an_epub3_xhtml_file_declared_text_html_is_relabelled() {
+        let mut ws = html_mt_book("3.0", "text/html", XHTML_CHAPTER);
+        assert_eq!(
+            count_id(&ws, "OPF-043"),
+            1,
+            "the fixture must carry the finding"
+        );
+        let fixes = html_media_type(&ws.detect().unwrap(), &ws);
+        assert_eq!(fixes.len(), 1);
+        assert_eq!(fixes[0].addresses_id, "OPF-043");
+        assert_eq!(fixes[0].tier, Tier::ConfirmNeeded);
+        let before = ws.get_text("content.opf").unwrap();
+        fixes.into_iter().next().unwrap().apply(&mut ws);
+        assert_eq!(
+            ws.get_text("content.opf").unwrap(),
+            before.replace(
+                r#"id="c" media-type="text/html""#,
+                r#"id="c" media-type="application/xhtml+xml""#
+            )
+        );
+        assert_eq!(ws.get_text("c.html").unwrap(), XHTML_CHAPTER);
+        assert_eq!(count_id(&ws, "OPF-043"), 0);
+    }
+
+    /// The EPUB 2 shape on the shelf: `OPF-035` at the manifest item.
+    #[test]
+    fn an_epub2_xhtml_file_declared_text_html_is_relabelled() {
+        let mut ws = html_mt_book("2.0", "text/html", XHTML_CHAPTER);
+        assert_eq!(
+            count_id(&ws, "OPF-035"),
+            1,
+            "the fixture must carry the finding"
+        );
+        let fixes = html_media_type(&ws.detect().unwrap(), &ws);
+        assert_eq!(fixes.len(), 1);
+        assert_eq!(fixes[0].addresses_id, "OPF-035");
+        fixes.into_iter().next().unwrap().apply(&mut ws);
+        assert!(
+            ws.get_text("content.opf")
+                .unwrap()
+                .contains(r#"id="c" media-type="application/xhtml+xml""#)
+        );
+        assert_eq!(count_id(&ws, "OPF-035"), 0);
+    }
+
+    /// The declaration is compared as epubveri compares it, XML whitespace
+    /// trimmed: `" text/html "` draws the finding, so it is ours to relabel.
+    #[test]
+    fn a_text_html_declaration_with_surrounding_space_is_relabelled() {
+        let ws = html_mt_book("2.0", " text/html ", XHTML_CHAPTER);
+        assert_eq!(
+            count_id(&ws, "OPF-035"),
+            1,
+            "the fixture must carry the finding"
+        );
+        assert_eq!(html_media_type(&ws.detect().unwrap(), &ws).len(), 1);
+    }
+
+    /// An XHTML 1.1 chapter using `&nbsp;` is XHTML: the DTD-entity step reads it.
+    #[test]
+    fn an_xhtml11_file_with_dtd_entities_is_xhtml() {
+        let chapter = r#"<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml"><head><title>t</title></head><body><p>a&nbsp;b</p></body></html>"#;
+        let ws = html_mt_book("2.0", "text/html", chapter);
+        assert_eq!(html_media_type(&ws.detect().unwrap(), &ws).len(), 1);
+    }
+
+    /// Real HTML is not relabelled: an XML parser could not read it, and the
+    /// warning would become a fatal. EPUB 2 reports `OPF-035` whatever the
+    /// file holds, so the finding is there to decline.
+    #[test]
+    fn a_text_html_file_that_is_not_xml_is_declined() {
+        let ws = html_mt_book("2.0", "text/html", "<html><body><p>x<br></body></html>");
+        assert_eq!(
+            count_id(&ws, "OPF-035"),
+            1,
+            "the fixture must carry the finding"
+        );
+        assert!(html_media_type(&ws.detect().unwrap(), &ws).is_empty());
+    }
+
+    /// Well-formed XML whose root is not XHTML `html` is not XHTML either.
+    #[test]
+    fn a_text_html_file_outside_the_xhtml_namespace_is_declined() {
+        let ws = html_mt_book("2.0", "text/html", "<html><body><p>x</p></body></html>");
+        assert_eq!(
+            count_id(&ws, "OPF-035"),
+            1,
+            "the fixture must carry the finding"
+        );
+        assert!(html_media_type(&ws.detect().unwrap(), &ws).is_empty());
+    }
+
+    /// An XHTML-namespace root that is not `html` is a fragment, not a document.
+    #[test]
+    fn a_text_html_file_whose_root_is_not_html_is_declined() {
+        let ws = html_mt_book(
+            "2.0",
+            "text/html",
+            r#"<div xmlns="http://www.w3.org/1999/xhtml"><p>x</p></div>"#,
+        );
+        assert_eq!(
+            count_id(&ws, "OPF-035"),
+            1,
+            "the fixture must carry the finding"
+        );
+        assert!(html_media_type(&ws.detect().unwrap(), &ws).is_empty());
+    }
+
+    /// `OPF-043` is raised for any non-content type in the spine; an image is
+    /// not ours, even when the bytes happen to be XHTML.
+    #[test]
+    fn opf_043_on_an_item_not_declared_text_html_is_declined() {
+        let ws = html_mt_book("3.0", "image/png", XHTML_CHAPTER);
+        assert_eq!(
+            count_id(&ws, "OPF-043"),
+            1,
+            "the fixture must carry the finding"
+        );
+        assert!(html_media_type(&ws.detect().unwrap(), &ws).is_empty());
+    }
+
+    /// Two manifest items with the one id: which the itemref means is not ours.
+    #[test]
+    fn a_text_html_item_whose_id_is_not_unique_is_declined() {
+        let mut ws = html_mt_book("3.0", "text/html", XHTML_CHAPTER);
+        let opf = ws.get_text("content.opf").unwrap().replace(
+            "</manifest>",
+            r#"<item href="d.html" id="c" media-type="text/html"/></manifest>"#,
+        );
+        ws.set_text("content.opf", opf);
+        ws.set_text("d.html", XHTML_CHAPTER.to_string());
+        let report = ws.detect().unwrap();
+        assert!(report.messages.iter().any(|m| m.id == "OPF-043"));
+        assert!(html_media_type(&report, &ws).is_empty());
+    }
+
+    /// The position names the element: a finding whose position is not an
+    /// element of the kind it describes is declined, never re-anchored.
+    #[test]
+    fn a_finding_whose_position_names_another_element_is_declined() {
+        let ws = html_mt_book("3.0", "text/html", XHTML_CHAPTER);
+        let mut report = ws.detect().unwrap();
+        let opf = ws.get_text("content.opf").unwrap();
+        let doc = parse_xml(&opf).unwrap();
+        // The `<item>` for the same file: right file, wrong element for OPF-043.
+        let item = doc
+            .descendants()
+            .find(|n| n.tag_name().name() == "item" && n.attr_no_ns("id") == Some("c"))
+            .unwrap();
+        let at = doc.text_pos_at(item.range().start);
+        let m = report
+            .messages
+            .iter_mut()
+            .find(|m| m.id == "OPF-043")
+            .unwrap();
+        m.position = Some(epubveri::report::Position {
+            line: at.row,
+            column: at.col,
+        });
+        assert!(html_media_type(&report, &ws).is_empty());
     }
 
     // ---- fix.dir_case ------------------------------------------------

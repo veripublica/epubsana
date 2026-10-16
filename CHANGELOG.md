@@ -52,6 +52,24 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
   repaired, with no other finding rising and none of the edits reverted. Three
   of those books now validate. On the 562 books as they are, this changes no
   output.
+- **`fix.html_media_type`: an XHTML file declared `text/html`** (`OPF-035`, a
+  warning in EPUB 2; `OPF-043`, an error in EPUB 3). The declaration becomes
+  `application/xhtml+xml`; the file is not changed. It is proposed only when
+  the file parses as XML and its root is XHTML `html`; real HTML is left alone.
+  ConfirmNeeded. epubveri never fully checks a file declared `text/html`: in
+  EPUB 3 it does not open it, and in EPUB 2 it checks the file's references but
+  not its ids. So after this fix the book's count can go up, with defects that
+  were always in it, and `repair()` keeps the fix and reports them as revealed,
+  as it does for a corrected package version. Run epubsana again on the output
+  to repair the ones it can.
+  Measured on our shelf (562 books, 2026-10-16): 126 files in 5 books, all
+  relabelled. Four books lose an error besides the warning (`RSC-032`), and one
+  of them, *Ölümün Sonu*, now validates. One book, *Karanlık Orman*, shows 2
+  duplicate ids and an undefined NCX fragment that were always in it. After an
+  EPUB 2 → 3 upgrade by epublift (cli-v4.0.0) the same 126 files are `OPF-043`
+  errors, all cleared; the first run reveals 223 findings, among them 126 empty
+  titles and 91 broken references in one book. A second run brings *Ölümün
+  Sonu* from 30 errors to valid. No other edit was reverted.
 
 ### Fixed
 

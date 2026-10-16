@@ -375,6 +375,13 @@ impl ChangeReport {
 ///   could not look* (an unrecognised package version, plus every fatal) fell
 ///   under the fix. Same price, same narrowness: only `fix.package_version`
 ///   clears one, and it rewrites one attribute value.
+/// - **And a fix that lets an XHTML file be checked as one** (Baris,
+///   2026-10-16). epubveri does not check a file declared `text/html` as a
+///   content document: in EPUB 3 it does not open it (`OPF-043`), in EPUB 2 it
+///   checks its references but not its ids (`OPF-035`). Declaring it
+///   `application/xhtml+xml` is its first full validation. Both ids count
+///   beside the two above; only `fix.html_media_type` lowers them, and it too
+///   rewrites attribute values only.
 /// - **Replaying re-plans.** [`ProposedFix::apply`] consumes the fix, so after a
 ///   revert the workspace returns to where the run started and the same
 ///   detection is planned again. Planning is deterministic (see
@@ -551,9 +558,27 @@ type Key = (&'static str, Option<&'static str>);
 /// a rule.
 const BLINDING_RULES: &[&str] = &["opf.package.unrecognized_version"];
 
+/// The same, for findings that carry no rule and are matched by id.
+///
+/// Both are a manifest item declared `text/html`, which epubveri does not check
+/// as a content document (measured 2026-10-16, epubveri 0.28.0):
+///
+/// - `OPF-043`, EPUB 3: a spine item of a non-content type with no fallback is
+///   not opened at all, so a `text/html` XHTML file there has never been checked.
+/// - `OPF-035`, EPUB 2: the file's references are checked, but its ids are not.
+///   On a shelf book, declaring 91 files `application/xhtml+xml` showed two
+///   duplicate ids that had always been there, and an NCX fragment the detector
+///   could now say was undefined rather than only possibly so.
+///
+/// `OPF-043` is also raised for audio or an image in the spine, where nothing is
+/// hidden. The line is drawn at the fix: only `fix.html_media_type` lowers
+/// either count.
+const BLINDING_IDS: &[&str] = &["OPF-035", "OPF-043"];
+
 /// Findings counted by `(id, rule)`, plus the count of findings meaning the
-/// detector could not look — every fatal and every [`BLINDING_RULES`] finding —
-/// which the revealed-rise rule compares. See [`repair`].
+/// detector could not look — every fatal, every [`BLINDING_RULES`] finding and
+/// every [`BLINDING_IDS`] one — which the revealed-rise rule compares. See
+/// [`repair`].
 struct Tally {
     counts: std::collections::BTreeMap<Key, usize>,
     blind: usize,
@@ -568,7 +593,10 @@ impl Tally {
         let stopped = r
             .messages
             .iter()
-            .filter(|m| m.rule.is_some_and(|rule| BLINDING_RULES.contains(&rule)))
+            .filter(|m| match m.rule {
+                Some(rule) => BLINDING_RULES.contains(&rule),
+                None => BLINDING_IDS.contains(&m.id),
+            })
             .count();
         Tally {
             counts,
@@ -847,6 +875,106 @@ pub(crate) mod tests {
             ws.get_text("content.opf").unwrap().contains("font/ttf"),
             "the workspace was left at an intermediate state"
         );
+    }
+
+    /// An EPUB 3 spine item declared `text/html` is never opened (`OPF-043`), so
+    /// a broken image in it is invisible. Declaring it `application/xhtml+xml`
+    /// lets the detector read it, and the `RSC-007` it then finds was always in
+    /// the book: the relabel is kept, and the finding counted as revealed
+    /// (Baris, 2026-10-16).
+    #[test]
+    fn a_finding_revealed_by_letting_a_spine_item_be_read_does_not_revert_the_fix() {
+        let mut ws = Workspace::load(&fixture_epub()).unwrap();
+        let opf = ws.get_text("content.opf").unwrap();
+        ws.set_text(
+            "content.opf",
+            opf.replacen(
+                r#"href="c1.xhtml" media-type="application/xhtml+xml""#,
+                r#"href="c1.xhtml" media-type="text/html""#,
+                1,
+            ),
+        );
+        let t = ws.get_text("c1.xhtml").unwrap();
+        ws.set_text(
+            "c1.xhtml",
+            t.replace(
+                "<p>Hello</p>",
+                r#"<p>Hello<img src="nope.png" alt=""/></p>"#,
+            ),
+        );
+        let r0 = ws.detect().unwrap();
+        assert!(
+            r0.messages.iter().any(|m| m.id == "OPF-043")
+                && !r0
+                    .messages
+                    .iter()
+                    .any(|m| m.location.as_deref() == Some("c1.xhtml")),
+            "fixture must hide the chapter behind OPF-043, or this proves nothing: {:?}",
+            r0.messages
+        );
+
+        let r = repair(&mut ws, Goal::Valid, Policy::AskEach, &mut ApproveAll).unwrap();
+        let relabel = r
+            .fixes
+            .iter()
+            .find(|f| f.fix_id == "fix.html_media_type")
+            .expect("the relabel must be proposed");
+        assert_eq!(relabel.outcome, Outcome::Applied);
+        assert!(r.revealed >= 1, "the broken image was never counted");
+        assert!(
+            ws.detect()
+                .unwrap()
+                .messages
+                .iter()
+                .any(|m| m.location.as_deref() == Some("c1.xhtml")),
+            "the chapter is read now"
+        );
+    }
+
+    /// The EPUB 2 half: epubveri checks a `text/html` item's references but not
+    /// its ids, so two elements sharing an `id` in it go unreported until the
+    /// file is declared XHTML. The relabel is kept, and the duplicate counted as
+    /// revealed (the shape measured on a shelf book, 2026-10-16).
+    #[test]
+    fn a_duplicate_id_revealed_by_relabelling_an_epub2_file_does_not_revert_the_fix() {
+        let mut ws = Workspace::load(&fixture_epub()).unwrap();
+        let opf = ws
+            .get_text("content.opf")
+            .unwrap()
+            .replacen(r#"version="3.0""#, r#"version="2.0""#, 1)
+            .replacen(
+                r#"href="c1.xhtml" media-type="application/xhtml+xml""#,
+                r#"href="c1.xhtml" media-type="text/html""#,
+                1,
+            );
+        ws.set_text("content.opf", opf);
+        let t = ws.get_text("c1.xhtml").unwrap();
+        ws.set_text(
+            "c1.xhtml",
+            t.replace(
+                "<p>Hello</p>",
+                r#"<p id="b0">Hello</p><p id="b0">again</p>"#,
+            ),
+        );
+        let r0 = ws.detect().unwrap();
+        assert!(
+            r0.messages.iter().any(|m| m.id == "OPF-035")
+                && !r0
+                    .messages
+                    .iter()
+                    .any(|m| m.rule == Some("opf.content_document.duplicate_id")),
+            "fixture must hide the duplicate behind OPF-035, or this proves nothing: {:?}",
+            r0.messages
+        );
+
+        let r = repair(&mut ws, Goal::Valid, Policy::AskEach, &mut ApproveAll).unwrap();
+        let relabel = r
+            .fixes
+            .iter()
+            .find(|f| f.fix_id == "fix.html_media_type")
+            .expect("the relabel must be proposed");
+        assert_eq!(relabel.outcome, Outcome::Applied);
+        assert!(r.revealed >= 1, "the duplicate id was never counted");
     }
 
     /// An unrecognised package `version` stops validation outright: the

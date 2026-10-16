@@ -515,10 +515,12 @@ meant to repair stays unrepaired, and stays in the report.
 Two limits, stated plainly:
 
 - A fix that lets epubveri see what it could not see before is **not** undone
-  for the findings that then appear. There are two such fixes: one makes an
-  unreadable document readable (by clearing an undeclared entity, say), and
-  the other corrects a package `version` no validator recognises, which had
-  stopped validation altogether. The findings were in the book all along. A
+  for the findings that then appear. There are three kinds: one makes an
+  unreadable document readable (by clearing an undeclared entity, say), one
+  corrects a package `version` no validator recognises, which had stopped
+  validation altogether, and one declares an XHTML file
+  `application/xhtml+xml` instead of `text/html`, which epubveri had never
+  fully checked. The findings were in the book all along. A
   later fix that makes the same finding more frequent still is undone. The
   cost is that a problem such a fix genuinely introduced would be accepted with
   them. When this happens the report ends with a note like this one:
@@ -722,6 +724,7 @@ safe, and when epubsana declines, see the **[fix catalogue](./FIXERS.md)**.
 | `OPF-054` | *(none)* | ConfirmNeeded | Drops a `<dc:date>` with no content: it states no date, and `dc:date` is optional. A malformed but non-empty date (`March 2019`) carries a date the author wrote and is left exactly as it is — deciding which characters are stray would be a guess. Note `OPF-054` is EPUB 2 only. On EPUB 3 a malformed date is only a warning; an *empty* one is also an error, handled by the `dc_value_not_empty` row below. |
 | `OPF-072` | `opf.metadata.empty_element` | ConfirmNeeded | Drops an empty **optional** Dublin Core element (`dc:coverage`, `dc:source`, `dc:rights`, `dc:relation`, `dc:subject`, `dc:description`) from an EPUB 2 package: it states nothing, and its absence is valid. Never drops `dc:title`, `dc:identifier` or `dc:language` — deleting an empty *required* element would trade "empty" for "missing" — leaves `dc:date` to the fixer above, and declines an element a `<meta refines="#id">` points at, so no refinement is orphaned. **Usage severity: this clears report noise, not a validity failure.** |
 | `RSC-005` | `opf.package.dc_value_not_empty` | ConfirmNeeded | The same repair on EPUB 3, where an empty Dublin Core element is an **error**, under the same fix id (`fix.empty_metadata_element`). Drops `dc:date` too: on EPUB 3 it is optional and no other fixer drops it. Never drops `dc:title`, `dc:identifier` or `dc:language`, declines an element a `<meta refines>` points at, and drops only elements epubveri reported — if it would drop one more than was reported, it proposes nothing for that package. Common after an EPUB 2 → 3 upgrade, since the empty elements EPUB 2 tolerated become errors. |
+| `OPF-035` / `OPF-043` | *(none)* | ConfirmNeeded | A manifest item declares `text/html` for a file that is XHTML: it parses as XML and its root is XHTML `html`. The declaration becomes `application/xhtml+xml`; the file is not changed. In EPUB 2 this is a warning (`OPF-035`), and epubveri checks the file's references but not its ids. In EPUB 3 it is an error (`OPF-043`), and epubveri does not open the file at all. Either way the next validation is the file's first full one and may show defects that were always in it; see [Reverted fixes](#reverted-fixes). Declines a file that is not XML (real HTML, which needs converting, not relabelling), an `OPF-043` on anything not declared `text/html` (audio, an image), and an item whose id is not unique. |
 | `OPF-090` | `opf.manifest_item.non_preferred_media_type` | ConfirmNeeded | Renames a manifest item's `media-type` from a superseded Core Media Type name to the current one for the same format: `application/vnd.ms-opentype` → `font/otf`, `application/x-font-ttf` → `font/ttf`, `application/font-woff` → `font/woff`, `application/ecmascript` and `text/javascript` → `application/javascript`. Renames the declaration only; it asserts nothing new about the file. **`application/font-sfnt` is declined** — SFNT is the container TrueType and OpenType share, so the name cannot say which the file is. **Usage severity.** |
 | `RSC-007` | `css.font_face.missing_target` | ConfirmNeeded | Deletes a `@font-face` rule whose font file is not in the book. The font cannot load and never could, so text using that family already falls back to a substitute — removing a rule that never applied changes nothing a reader sees. **Declines a rule holding more than one `url(`**: a second source may be present and working, and choosing between them would be editing a stylesheet rather than removing a dead declaration. No CSS parser is involved, and this does not open the rest of the `css.*` family. |
 
