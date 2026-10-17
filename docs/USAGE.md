@@ -583,8 +583,8 @@ reads both:
 ```json
 {
   "tool": "epubsana",
-  "tool_version": "0.3.1",
-  "convention": "0.5",
+  "tool_version": "0.31.0",
+  "convention": "0.7",
   "status": "problems",
   "inputs": [
     {
@@ -593,11 +593,11 @@ reads both:
       "output": "book_fixed.epub",
       "summary": {
         "fatals_before": 774, "fatals_after": 0,
-        "errors_before": 5, "errors_after": 4,
+        "errors_before": 5, "errors_after": 5,
         "warnings_before": 1, "warnings_after": 1,
         "infos_before": 0, "infos_after": 0,
-        "usages_before": 3, "usages_after": 2,
-        "applied": 2, "skipped": 0, "proposed": 0, "reverted": 0,
+        "usages_before": 3, "usages_after": 3,
+        "applied": 1, "skipped": 0, "proposed": 0, "reverted": 0,
         "goal": "valid"
       },
       "items": [
@@ -611,7 +611,7 @@ reads both:
           "message": "Map 1 undeclared HTML entity (657×) to characters …",
           "data": {
             "index": 1, "fix_id": "fix.html_entities", "tier": "auto_safe",
-            "changes": [ { "path": "OEBPS/ch01.xhtml", "note": "…" } ]
+            "changes": [ { "path": "OEBPS/Text/bolum2.xhtml", "note": "…" } ]
           }
         }
       ]
