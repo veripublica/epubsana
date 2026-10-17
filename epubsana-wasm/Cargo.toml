@@ -1,6 +1,6 @@
 [package]
 name = "epubsana-wasm"
-version = "0.30.0"
+version = "0.31.0"
 edition = "2024"
 rust-version = "1.88"
 description = "WebAssembly bindings for epubsana — repair EPUB defects in the browser, no upload."
@@ -20,6 +20,11 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 epubsana = { path = ".." }
+# Kept on the same release as epubveri's npm package (0.2.129 since
+# 2026-10-17), so epublift's loader meets one glue, not two. A move changes
+# the generated glue's import names (0.2.129 renamed `__wbindgen_cast_*` to
+# `__wbindgen_generic_*`), and epublift's loader calls the glue directly: tell
+# them with the release.
 wasm-bindgen = "0.2"
 serde = { version = "1", features = ["derive"] }
 # tsify derives both serde (de)serialization and a real TypeScript .d.ts
@@ -30,12 +35,12 @@ serde = { version = "1", features = ["derive"] }
 # which resumed. Same version number, feature and attribute, so the move is the
 # import path and this line. epubveri made the same move on 2026-08-03.
 #
-# Held at 0.5.6 in `Cargo.lock`, as epubveri holds it: 0.5.7 deprecates the
-# `#[tsify(into_wasm_abi)]` every returned type here uses. Pin BOTH halves when
-# moving it (`cargo update -p tsify --precise …`, then `-p tsify-macros`), since
-# the macro is what emits the deprecated reference.
+# Returned types cross the ABI as `tsify::Ts<T>`: the `#[tsify(into_wasm_abi)]`
+# they used before is deprecated since 0.5.7 because it leaks memory (tsify
+# issue #65). epubveri made the same move in 0.29.1. A `///` comment on a
+# returned type is copied verbatim into the published `.d.ts`.
 tsify = { version = "0.5", features = ["js"] }
 
 [dev-dependencies]
 # Only to build fixture EPUBs in the tests; the same zip the core uses.
-zip = { version = "8.6", default-features = false, features = ["deflate"] }
+zip = { version = "9.0.4", default-features = false, features = ["deflate"] }

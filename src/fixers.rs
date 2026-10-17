@@ -10678,7 +10678,8 @@ mod tests {
         {
             let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
             let opts = zip::write::SimpleFileOptions::default();
-            zip.start_file("mimetype", opts).unwrap();
+            let stored = opts.compression_method(zip::CompressionMethod::Stored);
+            zip.start_file("mimetype", stored).unwrap();
             zip.write_all(b"application/epub+zip").unwrap();
             for (name, body) in files {
                 zip.start_file(*name, opts).unwrap();
@@ -12062,7 +12063,6 @@ mod tests {
             opf_item_c(&ws),
             r#"<item href="c.xhtml" id="c" media-type="application/xhtml+xml"/>"#
         );
-        // The fixture's own container draws PKG-007; nothing else is left.
         let left: Vec<_> = ws
             .detect()
             .unwrap()
@@ -12070,7 +12070,7 @@ mod tests {
             .into_iter()
             .map(|m| m.id)
             .collect();
-        assert_eq!(left, ["PKG-007"]);
+        assert_eq!(left, [] as [&str; 0]);
     }
 
     /// A book that declares `scripted` beside another token keeps the other.

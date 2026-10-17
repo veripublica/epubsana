@@ -8,6 +8,54 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [0.31.0] - 2026-10-17
+
+`zip` moves to 9 and the `epubveri` floor to 0.29.1. No fixer changes (49
+in all). The WASM package moves to wasm-bindgen 0.2.129, as epubveri's did;
+its types are unchanged.
+
+### Changed
+
+- **`zip` 9.0.4** (was 8.6). Every `zip` below 9.0.0 fails `cargo audit`
+  (RUSTSEC-2026-0367, -0368, -0369). All three advisories are in
+  `extract`, which epubsana never calls.
+- **A book with a wrong CRC, or an entry longer than its header says, now
+  loads.** epubcheck reads both; so does epubveri. zip 9 refuses both, and
+  zip 8 already refused a wrong CRC, so such a book failed with "cannot
+  read". Stored and deflated entries are now inflated from their raw bytes,
+  as epubveri does; an encrypted entry or another compression method is
+  still refused. No book on our shelf has either shape; 16 of epubveri's
+  wrong-CRC probe books now load.
+- **A written book keeps each untouched entry's file attributes.** An entry
+  no fix changed is still copied with its compressed bytes, CRC, method and
+  time, and still without extra fields. What changes is that zip 9 now copies
+  the entry's external attributes and host system from the original; zip 8
+  rewrote them. On the 256 books our shelf run writes, the attributes of
+  10,993 entries now match the original where 0.30.0's did not. Data, CRC,
+  method and time are identical to 0.30.0's output for every entry.
+- **`epubveri` 0.29.1** (was 0.28.0). A `mimetype` with the right contents
+  that is compressed rather than stored is no longer an error by default,
+  because epubcheck does not check it (epubveri NEXT-016, advisory only), so
+  `--goal valid` can now be met on such a book. An entry that cannot be
+  inflated is now reported (PKG-008), and a wrong CRC alone is no longer a
+  finding. On the 562 books on our shelf, every book's result is identical
+  to 0.30.0's.
+- **The npm package: `tsify` 0.5.8 and wasm-bindgen 0.2.129** (were 0.5.6
+  and 0.2.126). `plan`, `repair` and `report` now return their results as
+  tsify's `Ts<T>`; the attribute used before is deprecated because it leaks
+  memory. What a caller sees:
+  - The `.d.ts` declares the same types. Its doc comments no longer show
+    backslashes before quotes and apostrophes.
+  - `plan()` can now throw a JavaScript error if its result cannot be
+    converted, as `repair` and `report` already could. No plan can actually
+    fail to convert.
+  - The `.wasm` exports the same functions. The glue's import functions are
+    renamed (`__wbindgen_cast_*` is now `__wbindgen_generic_*`, and the
+    `__wbg_*` hashes change), so a hand-written loader that builds its import
+    object by name must follow. A loader that passes the glue module whole
+    needs no change.
+- Other compatible dependency updates.
+
 ## [0.30.0] - 2026-10-16
 
 Three new fixers (49 in all); `fix.nested_anchor` now repairs EPUB 3 books

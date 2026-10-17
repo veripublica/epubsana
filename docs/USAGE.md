@@ -649,7 +649,7 @@ carries `error` (the reason), no `summary`, and no items:
 ```json
 {
   "tool": "epubsana",
-  "tool_version": "0.30.0",
+  "tool_version": "0.31.0",
   "convention": "0.7",
   "status": "error",
   "inputs": [

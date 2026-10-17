@@ -34,7 +34,7 @@
 //! ```
 
 use serde::Serialize;
-use tsify::Tsify;
+use tsify::{Ts, Tsify};
 use wasm_bindgen::prelude::*;
 
 use std::collections::BTreeSet;
@@ -46,7 +46,6 @@ use epubsana::{
 
 /// One concrete edit a fix would make (mirrors `epubsana::Change`).
 #[derive(Clone, Serialize, Tsify)]
-#[tsify(into_wasm_abi)]
 pub struct Change {
     pub path: String,
     pub note: String,
@@ -55,7 +54,6 @@ pub struct Change {
 /// A proposed fix as shown to the user. The apply logic stays in Rust; JS only
 /// sees this description and passes `index` to `Session.repair`.
 #[derive(Clone, Serialize, Tsify)]
-#[tsify(into_wasm_abi)]
 pub struct Fix {
     /// This fix's handle in `Session.repair`'s `approved` list. **0-based** — it
     /// indexes this array.
@@ -95,7 +93,6 @@ pub struct Fix {
 /// Fatals are counted apart from errors, as epubveri reports them — a book whose
 /// defects are all fatal has `errors_before: 0` and does not even open.
 #[derive(Serialize, Tsify)]
-#[tsify(into_wasm_abi)]
 pub struct Plan {
     pub fatals_before: usize,
     pub errors_before: usize,
@@ -107,7 +104,6 @@ pub struct Plan {
 /// `path`/`error` (a wasm caller has no path, and in-memory bytes are always
 /// readable, so there is no unprocessable/`"error"` case here).
 #[derive(Serialize, Tsify)]
-#[tsify(into_wasm_abi)]
 pub struct Report {
     /// `"ok"` (the goal was met) or `"problems"` (it was not).
     pub status: String,
@@ -272,13 +268,8 @@ impl Session {
 
     /// The session's plan: the starting counts and every proposed fix (each with
     /// its current `outcome`). Cheap — it re-validates nothing.
-    pub fn plan(&self) -> Plan {
-        Plan {
-            fatals_before: self.fatals_before,
-            errors_before: self.errors_before,
-            warnings_before: self.warnings_before,
-            fixes: self.infos.clone(),
-        }
+    pub fn plan(&self) -> Result<Ts<Plan>, JsError> {
+        Ok(Ts::from_rust(&self.plan_value())?)
     }
 
     /// Run the repair with the fixes at `approved` (0-based [`Fix::index`]
@@ -295,6 +286,56 @@ impl Session {
     /// different selection replaces the previous run. An index out of range is
     /// an error and changes nothing.
     pub fn repair(
+        &mut self,
+        approved: Vec<usize>,
+        goal: Option<String>,
+    ) -> Result<Ts<Report>, JsError> {
+        Ok(Ts::from_rust(&self.repair_value(approved, goal)?)?)
+    }
+
+    /// How many findings the last [`Session::repair`] accepted as **revealed**:
+    /// always in the book, and visible only once a fix let the validator in —
+    /// by making an unreadable document readable, or by correcting a package
+    /// version no validator recognises. They were not in the plan, so running
+    /// again on [`Session::result_bytes`] can repair some of them. `0` before
+    /// any repair.
+    ///
+    /// Not in the envelope's `summary`, which the conventions own; the CLI
+    /// prints the same number as a note after its report.
+    pub fn revealed(&self) -> usize {
+        self.last.as_ref().map_or(0, |r| r.revealed)
+    }
+
+    /// **Re-validate** the current EPUB with epubveri and return the result in
+    /// the shared envelope shape — the same independent check the CLI reports.
+    /// `goal` is `"valid"` (the default: no fatals and no errors remain) or
+    /// `"openable"` (no fatals remain — the book opens). Before any
+    /// [`Session::repair`] every item is `"proposed"` and the book is unchanged.
+    pub fn report(&self, goal: Option<String>) -> Result<Ts<Report>, JsError> {
+        Ok(Ts::from_rust(&self.report_value(goal)?)?)
+    }
+
+    /// The repaired EPUB's bytes — download these as `<name>_fixed.epub`.
+    pub fn result_bytes(&self) -> Result<Vec<u8>, JsError> {
+        self.ws.serialize().map_err(to_js)
+    }
+}
+
+// The bodies of `plan`, `repair` and `report`, kept apart so the tests can
+// read what they return: a `Ts<…>` holds a JavaScript value, which a native
+// test cannot build. Their documentation is on the exported wrappers, since
+// that is what reaches the `.d.ts`.
+impl Session {
+    fn plan_value(&self) -> Plan {
+        Plan {
+            fatals_before: self.fatals_before,
+            errors_before: self.errors_before,
+            warnings_before: self.warnings_before,
+            fixes: self.infos.clone(),
+        }
+    }
+
+    fn repair_value(
         &mut self,
         approved: Vec<usize>,
         goal: Option<String>,
@@ -319,25 +360,7 @@ impl Session {
         Ok(report)
     }
 
-    /// How many findings the last [`Session::repair`] accepted as **revealed**:
-    /// always in the book, and visible only once a fix let the validator in —
-    /// by making an unreadable document readable, or by correcting a package
-    /// version no validator recognises. They were not in the plan, so running
-    /// again on [`Session::result_bytes`] can repair some of them. `0` before
-    /// any repair.
-    ///
-    /// Not in the envelope's `summary`, which the conventions own; the CLI
-    /// prints the same number as a note after its report.
-    pub fn revealed(&self) -> usize {
-        self.last.as_ref().map_or(0, |r| r.revealed)
-    }
-
-    /// **Re-validate** the current EPUB with epubveri and return the result in
-    /// the shared envelope shape — the same independent check the CLI reports.
-    /// `goal` is `"valid"` (the default: no fatals and no errors remain) or
-    /// `"openable"` (no fatals remain — the book opens). Before any
-    /// [`Session::repair`] every item is `"proposed"` and the book is unchanged.
-    pub fn report(&self, goal: Option<String>) -> Result<Report, JsError> {
+    fn report_value(&self, goal: Option<String>) -> Result<Report, JsError> {
         let goal = parse_goal(goal.as_deref());
         let after = self.ws.detect().map_err(to_js)?;
         Ok(self.envelope(
@@ -353,13 +376,6 @@ impl Session {
         ))
     }
 
-    /// The repaired EPUB's bytes — download these as `<name>_fixed.epub`.
-    pub fn result_bytes(&self) -> Result<Vec<u8>, JsError> {
-        self.ws.serialize().map_err(to_js)
-    }
-}
-
-impl Session {
     /// Rewind to the book as loaded and run the core repair with `approved`.
     fn run(&mut self, approved: BTreeSet<usize>, goal: Goal) -> Result<ChangeReport, JsError> {
         self.ws.seek(self.start);
@@ -598,8 +614,8 @@ mod tests {
         assert!(cli.fixes.len() >= 2, "fixture must plan at least two fixes");
 
         let mut s = Session::load(&bytes).unwrap();
-        let all: Vec<usize> = (0..s.plan().fixes.len()).collect();
-        let r = s.repair(all, None).unwrap();
+        let all: Vec<usize> = (0..s.plan_value().fixes.len()).collect();
+        let r = s.repair_value(all, None).unwrap();
 
         assert_eq!(s.result_bytes().unwrap(), ws.serialize().unwrap());
         let outcomes: Vec<_> = r.items.iter().map(|i| i.outcome.as_str()).collect();
@@ -614,13 +630,13 @@ mod tests {
     #[test]
     fn an_unapproved_fix_is_skipped() {
         let mut s = Session::load(&two_fix_book()).unwrap();
-        let n = s.plan().fixes.len();
-        let r = s.repair(vec![0], None).unwrap();
+        let n = s.plan_value().fixes.len();
+        let r = s.repair_value(vec![0], None).unwrap();
         assert_eq!(r.items[0].outcome, "applied");
         assert!(r.items[1..].iter().all(|i| i.outcome == "skipped"));
         let m = &r.summary;
         assert_eq!(m.applied + m.skipped + m.proposed + m.reverted, n);
-        assert_eq!(s.plan().fixes[1].outcome, "skipped");
+        assert_eq!(s.plan_value().fixes[1].outcome, "skipped");
     }
 
     /// A second run replaces the first rather than stacking on it: running
@@ -629,14 +645,14 @@ mod tests {
     fn a_second_repair_starts_again_from_the_book_as_loaded() {
         let bytes = two_fix_book();
         let mut twice = Session::load(&bytes).unwrap();
-        twice.repair(vec![0], None).unwrap();
-        twice.repair(vec![1], None).unwrap();
+        twice.repair_value(vec![0], None).unwrap();
+        twice.repair_value(vec![1], None).unwrap();
 
         let mut once = Session::load(&bytes).unwrap();
-        once.repair(vec![1], None).unwrap();
+        once.repair_value(vec![1], None).unwrap();
 
         assert_eq!(twice.result_bytes().unwrap(), once.result_bytes().unwrap());
-        assert_eq!(twice.plan().fixes[0].outcome, "skipped");
+        assert_eq!(twice.plan_value().fixes[0].outcome, "skipped");
     }
 
     /// Before any repair nothing is applied and every item is `"proposed"`.
@@ -644,7 +660,7 @@ mod tests {
     fn before_a_repair_everything_is_proposed() {
         let bytes = two_fix_book();
         let s = Session::load(&bytes).unwrap();
-        let r = s.report(None).unwrap();
+        let r = s.report_value(None).unwrap();
         assert!(r.items.iter().all(|i| i.outcome == "proposed"));
         assert_eq!(r.summary.errors_after, r.summary.errors_before);
         assert_eq!(s.revealed(), 0);
@@ -661,13 +677,13 @@ mod tests {
         // `<blink/>` is invisible while the unknown version stops validation.
         let bytes = book("1.0", "<p>a</p><blink/>");
         let mut s = Session::load(&bytes).unwrap();
-        let plan = s.plan();
+        let plan = s.plan_value();
         let v = plan
             .fixes
             .iter()
             .find(|f| f.id == "OPF-001")
             .expect("the version fix must be planned");
-        let r = s.repair(vec![v.index], None).unwrap();
+        let r = s.repair_value(vec![v.index], None).unwrap();
         assert_eq!(r.items[v.index].outcome, "applied");
         assert!(
             s.revealed() > 0,

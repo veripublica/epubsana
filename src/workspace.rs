@@ -44,8 +44,10 @@
 use std::collections::{BTreeSet, HashMap};
 use std::io::{Cursor, Read, Write};
 
+use flate2::read::DeflateDecoder;
+
 use zip::write::SimpleFileOptions;
-use zip::{CompressionMethod, ZipArchive, ZipWriter};
+use zip::{CompressionMethod, DateTime, ZipArchive, ZipWriter};
 
 /// Errors from loading, serializing, or re-validating a [`Workspace`].
 #[derive(Debug)]
@@ -164,6 +166,40 @@ enum Record {
     },
 }
 
+/// Entry `index`'s contents, at most `limit` bytes of them, read the way
+/// epubveri reads them. Stored and deflated entries are inflated here from
+/// their raw bytes: zip 9 bounds every read by the size the header declares
+/// (zip-rs/zip2#1022) and checks the CRC, so a book epubcheck and epubveri
+/// accept — one entry longer than its header says, or with a wrong CRC — would
+/// fail to load. Anything else (another method, an encrypted entry) goes
+/// through zip's own reader, which refuses it as before.
+fn inflate(
+    zip: &mut ZipArchive<Cursor<Vec<u8>>>,
+    index: usize,
+    limit: u64,
+) -> Result<Vec<u8>, Error> {
+    let mut data = Vec::new();
+    let raw = zip.by_index_raw(index)?;
+    if !raw.encrypted() {
+        match raw.compression() {
+            CompressionMethod::Stored => {
+                raw.take(limit).read_to_end(&mut data)?;
+                return Ok(data);
+            }
+            CompressionMethod::Deflated => {
+                DeflateDecoder::new(raw)
+                    .take(limit)
+                    .read_to_end(&mut data)?;
+                return Ok(data);
+            }
+            _ => {}
+        }
+    }
+    drop(raw);
+    zip.by_index(index)?.take(limit).read_to_end(&mut data)?;
+    Ok(data)
+}
+
 impl Workspace {
     /// Read an EPUB from its raw bytes, preserving entry order.
     ///
@@ -181,18 +217,16 @@ impl Workspace {
         let mut total: u64 = 0;
         let mut directories = Vec::new();
         for i in 0..zip.len() {
-            let mut f = zip.by_index(i)?;
+            let f = zip.by_index_raw(i)?;
             if f.is_dir() {
-                directories.push(f.name().to_string());
+                directories.push(f.name()?.into_owned());
                 continue;
             }
-            let name = f.name().to_string();
-            let mut data = Vec::new();
+            let name = f.name()?.into_owned();
+            drop(f);
             // Read one byte past the cap, so an entry whose header understates
             // its size is still caught by what it actually inflates to.
-            (&mut f)
-                .take(max_entry.saturating_add(1))
-                .read_to_end(&mut data)?;
+            let data = inflate(&mut zip, i, max_entry.saturating_add(1))?;
             if data.len() as u64 > max_entry {
                 return Err(too_large(format!(
                     "entry {name} inflates past the {} limit",
@@ -433,7 +467,7 @@ impl Workspace {
 
             for i in 0..src.len() {
                 let f = src.by_index_raw(i)?;
-                let name = f.name().to_string();
+                let name = f.name()?.into_owned();
                 if hoisted && name == "mimetype" {
                     continue; // already written, in its rightful place
                 }
@@ -445,7 +479,17 @@ impl Workspace {
                 }
                 if !self.dirty.contains(&name) {
                     // Untouched (or a directory entry): copy it through as-is.
-                    zip.raw_copy_file(f)?;
+                    // Not `raw_copy_file`: since zip 9 it writes the central
+                    // directory's extra fields into the local header too, which
+                    // can give `mimetype` a local extra field it never had
+                    // (PKG-005), and refuses an Info-ZIP Unix field (0x7875)
+                    // outright. `_touch` with the entry's own time copies what
+                    // zip 8's `raw_copy_file` did: no extra field, either header.
+                    let time = f
+                        .last_modified()
+                        .filter(DateTime::is_valid)
+                        .unwrap_or_else(DateTime::default_for_write);
+                    zip.raw_copy_file_touch(f, time, None)?;
                     continue;
                 }
                 // Rewritten by a fix: re-encode, but keep the original's method
@@ -538,7 +582,7 @@ mod tests {
             let mut first = zip::write::FullFileOptions::default()
                 .compression_method(CompressionMethod::Stored);
             first
-                .add_extra_data(0x5455, [1u8, 0, 0, 0, 0], false)
+                .add_extra_field(0x5455, [1u8, 0, 0, 0, 0], false)
                 .unwrap();
             zip.start_file("mimetype", first).unwrap();
             zip.write_all(b"application/epub+zip").unwrap();
@@ -590,7 +634,7 @@ mod tests {
 
     fn entry_names(bytes: &[u8]) -> Vec<String> {
         let z = ZipArchive::new(Cursor::new(bytes.to_vec())).unwrap();
-        z.file_names().map(str::to_string).collect()
+        z.file_names().map(|n| n.unwrap().into_owned()).collect()
     }
 
     /// A dropped directory entry is left out of the written archive, nothing
@@ -620,6 +664,116 @@ mod tests {
         ws.drop_directory("text.html");
     }
 
+    /// Overwrite the 4-byte field at `local` in `name`'s local header and at
+    /// `central` in its central-directory header with `value`.
+    fn patch_headers(
+        mut epub: Vec<u8>,
+        name: &str,
+        local: usize,
+        central: usize,
+        value: u32,
+    ) -> Vec<u8> {
+        let find = |epub: &[u8], sig: &[u8], at: usize| {
+            (0..epub.len() - at)
+                .find(|&i| {
+                    epub[i..].starts_with(sig) && epub[i + at..].starts_with(name.as_bytes())
+                })
+                .unwrap()
+        };
+        let l = find(&epub, b"PK\x03\x04", 30);
+        epub[l + local..l + local + 4].copy_from_slice(&value.to_le_bytes());
+        let c = find(&epub, b"PK\x01\x02", 46);
+        epub[c + central..c + central + 4].copy_from_slice(&value.to_le_bytes());
+        epub
+    }
+
+    /// zip 9 refuses an entry that inflates past the size its header declares
+    /// (zip-rs/zip2#1022); epubcheck, epubveri and zip 8 read it whole.
+    #[test]
+    fn an_entry_longer_than_its_header_says_is_read_whole() {
+        let orig = awkward_epub();
+        let whole = Workspace::load(&orig).unwrap();
+        for name in ["META-INF/container.xml", "text.html"] {
+            let epub = patch_headers(orig.clone(), name, 22, 24, 4);
+            let ws = Workspace::load(&epub).unwrap();
+            assert_eq!(ws.entries.get(name), whole.entries.get(name), "{name}");
+        }
+    }
+
+    /// epubcheck does not check CRCs, nor does epubveri since 0.29.0; zip 9
+    /// does by default, and zip 8 did too, so such a book used not to load.
+    #[test]
+    fn an_entry_with_a_wrong_crc_still_loads() {
+        let orig = awkward_epub();
+        for name in ["META-INF/container.xml", "text.html"] {
+            let epub = patch_headers(orig.clone(), name, 14, 16, 0xdead_beef);
+            let ws = Workspace::load(&epub).unwrap();
+            assert_eq!(
+                ws.entries.get(name),
+                Workspace::load(&orig).unwrap().entries.get(name)
+            );
+            // Untouched, so it goes out as it came in, wrong CRC and all.
+            assert_eq!(
+                ws.serialize().unwrap(),
+                Workspace::load(&epub).unwrap().serialize().unwrap()
+            );
+        }
+    }
+
+    /// An encrypted entry is not read from its raw bytes, which would load
+    /// ciphertext as the entry: zip refuses it, as it always did.
+    #[test]
+    fn an_encrypted_entry_is_not_read_raw() {
+        // The flags and method fields, in one write: bit 0 (encrypted), Stored.
+        let epub = patch_headers(awkward_epub(), "META-INF/container.xml", 6, 8, 1);
+        assert!(Workspace::load(&epub).is_err());
+    }
+
+    /// The local and central extra-field lengths of `name` in `epub`.
+    fn extra_lengths(epub: &[u8], name: &str) -> (u16, u16) {
+        let at = |sig: &[u8], name_at: usize, len_at: usize| {
+            let i = (0..epub.len() - name_at)
+                .find(|&i| {
+                    epub[i..].starts_with(sig) && epub[i + name_at..].starts_with(name.as_bytes())
+                })
+                .unwrap();
+            u16::from_le_bytes([epub[i + len_at], epub[i + len_at + 1]])
+        };
+        (at(b"PK\x03\x04", 30, 28), at(b"PK\x01\x02", 46, 30))
+    }
+
+    /// An untouched entry is copied with no extra field in either header, as
+    /// under zip 8. zip 9's `raw_copy_file` refuses an Info-ZIP Unix field
+    /// (0x7875) without its "unreserved" feature, which stopped a shelf book
+    /// from being written.
+    #[test]
+    fn an_untouched_entry_with_a_unix_extra_field_is_copied_without_it() {
+        let mut epub = Vec::new();
+        {
+            let mut zip = ZipWriter::new(Cursor::new(&mut epub));
+            let mut opts = zip::write::FullFileOptions::default()
+                .compression_method(CompressionMethod::Deflated);
+            opts.add_extra_field(0x5455, [1u8, 0, 0, 0, 0], false)
+                .unwrap();
+            zip.start_file("text.html", opts).unwrap();
+            zip.write_all(b"<html/>").unwrap();
+            zip.finish().unwrap();
+        }
+        // Re-tag the field 0x7875 in both headers.
+        for (sig, name_at) in [(&b"PK\x03\x04"[..], 30), (&b"PK\x01\x02"[..], 46)] {
+            let i = (0..epub.len())
+                .find(|&i| epub[i..].starts_with(sig))
+                .unwrap()
+                + name_at
+                + 9;
+            assert_eq!(epub[i..i + 2], [0x55, 0x54]);
+            epub[i..i + 2].copy_from_slice(&0x7875u16.to_le_bytes());
+        }
+        assert_eq!(extra_lengths(&epub, "text.html"), (9, 9));
+        let out = Workspace::load(&epub).unwrap().serialize().unwrap();
+        assert_eq!(extra_lengths(&out, "text.html"), (0, 0));
+    }
+
     fn refused(r: Result<Workspace, Error>) -> bool {
         matches!(r, Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::InvalidData)
     }
@@ -641,7 +795,7 @@ mod tests {
             .map(|i| {
                 let f = z.by_index_raw(i).unwrap();
                 (
-                    f.name().to_string(),
+                    f.name().unwrap().into_owned(),
                     f.compression(),
                     f.compressed_size(),
                     f.crc32() as u64,
