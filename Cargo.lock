@@ -37,7 +37,7 @@ dependencies = [
 
 [[package]]
 name = "epubsana"
-version = "0.31.0"
+version = "0.32.0"
 dependencies = [
  "epubveri",
  "flate2",
@@ -50,7 +50,7 @@ dependencies = [
 
 [[package]]
 name = "epubsana-wasm"
-version = "0.31.0"
+version = "0.32.0"
 dependencies = [
  "epubsana",
  "serde",
@@ -61,9 +61,9 @@ dependencies = [
 
 [[package]]
 name = "epubveri"
-version = "0.29.1"
+version = "0.30.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0c27bff0faacb86e84257eacc39869b3ca06aa835195e57911b4c4e4ea90ae90"
+checksum = "da39f74ff898e4b9b8e8c55174f5b4f6edb3983bcc8c323ded61d8b5f6d05598"
 dependencies = [
  "flate2",
  "roxmltree",
@@ -313,9 +313,9 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
 name = "styloria"
-version = "0.12.0"
+version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34a602bfa35666f0bd9242741f08ef5cd3ea65fe6e2b25aecaf6ae6f77a9bcb4"
+checksum = "e03077c562f26d9cb642bee337e1fd1a97a40f5d5ee2d15ef022b664cd06b253"
 
 [[package]]
 name = "syn"

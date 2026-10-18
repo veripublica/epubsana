@@ -8,6 +8,20 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [0.32.0] - 2026-10-18
+
+The `epubveri` floor moves to 0.30.0. No fixer changes (49 in all).
+
+### Changed
+
+- **`epubveri` 0.30.0** (was 0.29.1), which moves to styloria 0.13. More
+  invalid CSS selectors are now reported as errors (CSS-008), the four
+  shapes epubcheck also reports: `[a=x i s]`, `:not(. a)`, `:has(. a)` and an
+  empty `:not()`. epubsana does not repair selectors, so these findings are
+  reported and left alone. On the 562 books of our shelf, every book's
+  findings, proposals, outcomes and repaired output are identical to
+  0.31.0's.
+
 ## [0.31.0] - 2026-10-17
 
 `zip` moves to 9 and the `epubveri` floor to 0.29.1. No fixer changes (49
