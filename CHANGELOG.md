@@ -8,7 +8,7 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
-## [Unreleased]
+## [0.33.0] - 2026-10-21
 
 The `epubveri` floor moves to 0.31.0, and styloria, the family's CSS
 parser, becomes a direct dependency. Stylesheets are now read and written in
