@@ -5113,8 +5113,12 @@ fn id_attr_value_span(text: &str, bad: &str) -> Option<Range<usize>> {
 }
 
 /// Every `#value` occurrence in `text`, as (span of the `#`, span of the value).
-/// Bounded by [`is_frag_char`] so a longer id that merely starts with `value`
-/// is never matched.
+/// Bounded by [`is_frag_char`] and `%` so a longer id that merely starts with
+/// `value`, or an escaped one (`#k10%20` for `k10`), is never matched.
+///
+/// A reader percent-decodes a fragment before matching it (URL Standard), so a
+/// run of fragment characters holding a `%` is also decoded and matched; its
+/// span is the whole escaped run.
 fn fragment_spans(text: &str, value: &str) -> Vec<(usize, Range<usize>)> {
     let needle = format!("#{value}");
     let mut out = Vec::new();
@@ -5122,13 +5126,49 @@ fn fragment_spans(text: &str, value: &str) -> Vec<(usize, Range<usize>)> {
     while let Some(rel) = text[from..].find(needle.as_str()) {
         let hash = from + rel;
         let end = hash + needle.len();
-        let next_ok = text[end..].chars().next().is_none_or(|c| !is_frag_char(c));
+        let next_ok = text[end..]
+            .chars()
+            .next()
+            .is_none_or(|c| !is_frag_char(c) && c != '%');
         if next_ok {
             out.push((hash, (hash + 1)..end));
         }
         from = hash + needle.len();
     }
+    for (hash, _) in text.match_indices('#') {
+        let run = &text[hash + 1..];
+        let len = run
+            .find(|c: char| !is_frag_char(c) && c != '%')
+            .unwrap_or(run.len());
+        let run = &run[..len];
+        if run.contains('%') && percent_decoded(run).as_deref() == Some(value) {
+            out.push((hash, (hash + 1)..hash + 1 + len));
+        }
+    }
     out
+}
+
+/// `s` percent-decoded as a URL fragment is: a `%` not followed by two hex
+/// digits stays as written. `None` when the bytes are not UTF-8, since no id
+/// in a text document can be spelled by them.
+fn percent_decoded(s: &str) -> Option<String> {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let hex = |j: usize| b.get(j).and_then(|&c| (c as char).to_digit(16));
+        match (b[i], hex(i + 1), hex(i + 2)) {
+            (b'%', Some(h), Some(l)) => {
+                out.push((h * 16 + l) as u8);
+                i += 3;
+            }
+            (c, _, _) => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).ok()
 }
 
 /// What the reference at `hash` points at: the **path part** of the attribute
@@ -5487,6 +5527,9 @@ fn plan_id_renames(ws: &Workspace, doc: &str, values: &BTreeSet<String>) -> Opti
     for old in values {
         if attr_occurrences(&doc_text, old) != 1 {
             continue;
+        }
+        if old.contains('%') {
+            continue; // a link spelling it as written decodes to another value
         }
         let Some(base) = sanitize_ncname(old) else {
             continue;
@@ -11168,6 +11211,65 @@ mod tests {
         assert_eq!(fragment_spans(r##"href="#0912""##, "09").len(), 0);
         assert_eq!(fragment_spans("color:#0099ff", "09").len(), 0);
         assert_eq!(fragment_spans(r##"href="#09""##, "09").len(), 1);
+    }
+
+    /// The shelf case (epublift, 2026-10-21): an EPUB 2 footnote mark with
+    /// `id="k10 "`, and its back-link spelling the space `%20`. A reader decodes
+    /// the fragment, so the link is a reference and must move.
+    #[test]
+    fn a_percent_encoded_reference_moves_with_the_rename() {
+        let ws = container(&[
+            (
+                "Text/03.xhtml",
+                r#"<html><body><a id="k10 " href="dipnotlar.xhtml#a10">10</a></body></html>"#,
+            ),
+            (
+                "Text/dipnotlar.xhtml",
+                r##"<html><body><a id="a10" href="../Text/03.xhtml#k10%20">10</a></body></html>"##,
+            ),
+        ]);
+        let plan = planned(&ws, "Text/03.xhtml", &["k10 "]).unwrap();
+        assert_eq!(plan.renames, vec![("k10 ".into(), "k10".into())]);
+        let out = applied(&ws, &plan, "Text/dipnotlar.xhtml");
+        assert!(out.contains(r##"href="../Text/03.xhtml#k10""##), "{out}");
+    }
+
+    #[test]
+    fn every_escaped_spelling_of_the_id_is_a_reference() {
+        for link in [
+            r##"href="#09%C5%9F""##,
+            r##"href="#09%c5%9f""##,
+            r##"href="#%309%C5%9F""##,
+        ] {
+            let spans = fragment_spans(link, "09ş");
+            assert_eq!(spans.len(), 1, "{link}");
+            assert_eq!(&link[spans[0].1.clone()], &link[7..link.len() - 1]);
+        }
+        assert_eq!(fragment_spans(r##"href="#09%C5""##, "09ş").len(), 0);
+    }
+
+    /// `#k10%20` decodes to `k10 `: it never means an id `k10`.
+    #[test]
+    fn an_escaped_longer_id_is_not_matched() {
+        assert_eq!(fragment_spans(r##"href="#k10%20""##, "k10").len(), 0);
+        assert_eq!(fragment_spans(r##"href="#k10%20x""##, "k10 ").len(), 0);
+    }
+
+    #[test]
+    fn an_id_holding_a_percent_sign_is_declined() {
+        let ws = container(&[(
+            "ch1.xhtml",
+            r##"<html><body><p id="9%41">x</p><a href="#9%41">back</a></body></html>"##,
+        )]);
+        assert!(planned(&ws, "ch1.xhtml", &["9%41"]).is_none());
+    }
+
+    #[test]
+    fn a_fragment_is_percent_decoded_as_the_url_standard_does() {
+        assert_eq!(percent_decoded("k10%20").as_deref(), Some("k10 "));
+        assert_eq!(percent_decoded("a%2").as_deref(), Some("a%2"));
+        assert_eq!(percent_decoded("a%zz%4").as_deref(), Some("a%zz%4"));
+        assert_eq!(percent_decoded("%C3"), None);
     }
 
     #[test]

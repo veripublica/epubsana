@@ -8,6 +8,20 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **`fix.content_document_invalid_id` moves a percent-encoded link with the
+  id it renames.** A reading system decodes a fragment before matching it, so
+  `href="03.xhtml#k10%20"` points at `id="k10 "`. The rename to `k10` used to
+  leave that link pointing at the old value, and the book kept one error. Now
+  every escaped spelling of the old id is found, and the link is rewritten to
+  the new id. An escaped fragment is also no longer mistaken for a link to a
+  shorter id (`#k10%20` for `k10`). An id that itself holds a `%` is declined.
+  Reported by epublift: one book of our shelf, once upgraded to EPUB 3,
+  which now repairs to valid.
+
 ## [0.33.0] - 2026-10-21
 
 The `epubveri` floor moves to 0.31.0, and styloria, the family's CSS

@@ -2087,6 +2087,23 @@ as container-absolute is the mistake `frag_diag` made once and `docs/API.md`
 records), and rewritten only when it lands on this document. A bare `#value`
 belongs to the file it appears in.
 
+**A fragment that spells the id percent-encoded (epublift, 2026-10-21).** A
+reading system percent-decodes a fragment before matching it against an id (URL
+Standard; epubveri resolves links the same way), so `href="03.xhtml#k10%20"` is
+a reference to `id="k10 "`. Before 0.33.1 the scan looked for `#k10 ` only, did
+not see it, and the rename left that link dangling. Now every `#` followed by a
+run of fragment characters and `%` that contains a `%` is decoded — a `%` not
+followed by two hex digits stays as written, as in the URL Standard, and a run
+that does not decode to UTF-8 names no id — and, when it equals the old id, it
+is resolved and rewritten like any other reference. The new id is written
+unencoded: a sanitized NCName needs no escaping. The literal match also stops
+at a `%` now, so `#k10%20` is never taken for a reference to an id `k10`.
+Measured (2026-10-21): one book on the 562-book shelf, the only id with stray
+whitespace on it, whose footnote back-link is the one reference. Not found: a
+spelling that mixes a raw character no fragment may hold with escapes
+(`#a b%41`); no such link is a valid URL, and the post-repair detect still
+reverts a rename that leaves one dangling.
+
 **When it declines.**
 
 - **An occurrence it cannot classify.** A `#value` that is not inside a quoted
@@ -2124,6 +2141,9 @@ belongs to the file it appears in.
   fragment would be rewritten by writing the stylesheet back, and that cannot
   be done without U+FFFD. Every stylesheet is now written in its own encoding
   (`encode_stylesheet`).
+- **An id containing `%`.** A link that spells it as written is decoded by a
+  reading system into another value (`#a%41` means `aA`), so which links mean
+  this id cannot be read off the text.
 - **Two elements sharing the invalid id.** That is a duplicate-id defect, and
   which of them a reference meant is not ours to guess.
 - **A value nothing usable survives sanitizing.** Never invent an id.
