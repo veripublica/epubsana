@@ -114,6 +114,14 @@ else
   bad "cargo audit is not installed: cargo install cargo-audit --locked"
 fi
 
+# One copy of each family crate in the lock (Baris, 2026-10-18): styloria is
+# a direct dependency only on the condition that we parse with the same copy
+# epubveri parses with, and zip is shared because we re-emit what it reads.
+# Restricted to these three: a plain `cargo tree -d` also lists syn (tsify's 2
+# beside serde's 3), which is no concern of ours.
+check "one styloria, epubveri and zip in the lock" \
+  bash -c "! cargo tree -q -d --workspace --target all | grep -E '^(styloria|epubveri|zip) v'"
+
 MSRV=$(grep -m1 '^rust-version' Cargo.toml | cut -d'"' -f2)
 if rustup run "$MSRV" rustc -V >/dev/null 2>&1; then
   check "compiles at the MSRV ($MSRV)" rustup run "$MSRV" cargo check --workspace --locked

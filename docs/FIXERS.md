@@ -1977,20 +1977,52 @@ That decline is the whole of the difficulty, and it costs nothing here.
 **It does not open the `css.*` family, and must not be read as doing so.** The
 rest of that family — a malformed selector, a malformed declaration value, an
 unterminated stylesheet — is open-ended in exactly the way this member is not.
-This is a *deletion of a whole rule identified by a resource that is absent*; it
-requires no understanding of CSS beyond finding an at-rule's braces, and **no CSS
-parser is added.** The crate still runs on five dependencies.
+This is a *deletion of a whole rule identified by a resource that is absent*.
+
+**How the rule is found (styloria, 2026-10-21).** Until 0.33 this fixer matched
+braces by text, so a `}` in a comment or a string cut a rule short, and a
+`url(` in a comment counted as a source. It now asks styloria, which **locates
+and never decides**: epubveri still says which url is missing (`params[0]`),
+styloria only says where the `@font-face` rules are and which urls each holds.
+
+- The stylesheet is decoded the way epubveri decodes it
+  (`styloria::decode_stylesheet(bytes, None, None)`: BOM, then a byte-exact
+  `@charset`, then UTF-8), so the text we parse is the text epubveri parsed.
+- `parse_stylesheet` gives every `@font-face` at-rule at any depth (inside
+  `@media` too) with its span; the deletion is that span plus the whitespace
+  before it, as before.
+- The rule's urls are `block_url_references` of its block: `url()`, `url("…")`,
+  `src()`, and a bad-url token all count; a url in a comment does not.
+- The reported url must appear in the text of one of those url constructs
+  (`params[0]` is the url as written, so this is the same text match as before,
+  narrowed from the whole rule body to the url itself).
+- The stylesheet is written back with `encode_stylesheet` in its own encoding
+  and with its own BOM, so every byte outside the deleted rule is unchanged.
+- **Inline `<style>` in a content document** (9 of the 27 proposals on the
+  562-book shelf, 2026-10-21; all 27 are byte-identical to the text matcher's): each `style` element whose only child is one text
+  node is parsed on its own. Its raw bytes must hold no `&` and no `<`, so that
+  they are exactly the CSS text and a span maps back to the document by an
+  offset. A `<style>` with an entity, a CDATA section or a comment in it is
+  declined.
 
 **When it declines.**
 
-- **More than one `url(` in the rule** — a second source may be present and
+- **More than one url in the rule** — a second source may be present and
   working, and choosing which line to cut is editing CSS rather than deleting a
-  dead rule. 0 cases on the shelf.
-- **A rule whose braces cannot be delimited** — no `{` after `@font-face`, no
-  closing `}`, or a nested `{` inside it. Nothing on the shelf is shaped that
-  way, and a stylesheet that is, is one epubsana should not be rewriting.
-- A stylesheet that cannot be read, or in which the reported url does not appear
-  inside a `@font-face` rule at all.
+  dead rule. 0 cases on the shelf. (`local()` is not a url and does not count,
+  as before; see the open question below.)
+- **A rule whose block is never closed** (runs to the end of the input), or one
+  holding a nested rule. Nothing on the shelf is shaped that way.
+- **A stylesheet that does not decode losslessly** — an encoding styloria does
+  not decode (Shift_JIS, GBK, …), or a byte that does not decode in the one it
+  chose. Writing such a file back would replace those bytes with U+FFFD. Shelf:
+  878 of 878 stylesheets are UTF-8, 0 lossy (styloria, 2026-10-21).
+- A reported url that does not appear inside a `@font-face` rule at all.
+
+**Open question, not decided here: `local()`.** `src: local(Arial),
+url(missing.ttf)` holds one url, so the whole rule is deleted, although a
+reading system that has Arial installed would have used it. That was true of
+the text matcher too and is unchanged. To be measured before anyone decides.
 
 **An unquoted url with a space, a quote or a parenthesis in it (epubveri 0.21+).**
 `url(f/a b.ttf)`, `url(f/q'q.ttf)` and `url(f/p(p.ttf)` were a CSS syntax error
@@ -2068,6 +2100,30 @@ belongs to the file it appears in.
   the rename rewrites the fragment alone, so no encoding is ever re-emitted.
   (The 544-book shelf has 1,040 such links in 10 books, none of them pointing at
   an invalid id, so no proposal moved.)
+- **A selector whose match the rename would change (styloria, 2026-10-21).**
+  The text scan above sees `#09`, but not `#\30 9` (the same id, escaped) or
+  `[id^="0"]`, and a rename past either silently changes what a stylesheet
+  styles. Every `.css` entry, and every `<style>` element in a markup entry, is
+  parsed with styloria, and `selector_references` lists every id and attribute
+  selector at any depth (escapes resolved). The id is declined when, for any of
+  them, *matches the old name* differs from *matches the new name*: `#09`,
+  `#\30 9`, `#id_09` (the new name), `[id="09"]`, `[id^="0"]`. One that matches
+  both or neither (`[id]`, `[id*="9"]`) is left alone, since the rename cannot
+  change it. Attribute selectors are compared per Selectors 4 (`=`, `~=`, `|=`,
+  `^=`, `$=`, `*=`); without an `s` flag the comparison is ASCII
+  case-insensitive, which can only decline more. A selector in a rule a browser
+  drops (`dropped`) styles nothing and is ignored. The text scan stays: a rule
+  with a token error is not listed by styloria, and `#09` in it still declines.
+  A stylesheet that does not decode losslessly, or a markup entry with a
+  `<style>` that does not parse, declines every rename in the book.
+  Shelf (562 books, 2026-10-21): 878 stylesheets, 2,349 id selectors, 0
+  escaped, 0 attribute selectors on `id` (`.css` entries only; inline `<style>`
+  not counted). The whole-shelf plan is identical before and after, so this
+  guard is proven by its tests (each mutation-checked), not by the shelf.
+- **A reference inside a stylesheet that does not decode losslessly.** The
+  fragment would be rewritten by writing the stylesheet back, and that cannot
+  be done without U+FFFD. Every stylesheet is now written in its own encoding
+  (`encode_stylesheet`).
 - **Two elements sharing the invalid id.** That is a duplicate-id defect, and
   which of them a reference meant is not ours to guess.
 - **A value nothing usable survives sanitizing.** Never invent an id.

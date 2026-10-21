@@ -5328,6 +5328,133 @@ fn content_document_invalid_ids(report: &Report, ws: &Workspace) -> Vec<Proposed
     fixes
 }
 
+/// An id or attribute selector, from a stylesheet or a `<style>` element,
+/// whose match on an element's `id` a rename could change.
+enum IdSelector {
+    /// `#value`, escapes resolved.
+    Id(String),
+    /// `[id op value flag]`; presence alone (`[id]`) is never kept, since no
+    /// rename changes it.
+    Attr {
+        operator: styloria::AttributeOperator,
+        value: String,
+        case: Option<bool>,
+    },
+}
+
+impl IdSelector {
+    /// Whether the selector matches one of `old` and `new` but not the
+    /// other, so renaming `old` to `new` changes what it styles. Where the
+    /// case rule is the document language's (no flag, an unknown flag, and
+    /// always for `#id`), both readings are tried: that can only decline more.
+    fn tells_apart(&self, old: &str, new: &str) -> bool {
+        let differs =
+            |sensitive: bool| self.matches(old, sensitive) != self.matches(new, sensitive);
+        let case = match self {
+            IdSelector::Id(_) => None,
+            IdSelector::Attr { case, .. } => *case,
+        };
+        match case {
+            Some(sensitive) => differs(sensitive),
+            None => differs(true) || differs(false),
+        }
+    }
+
+    /// Selectors 4 §6 attribute matching, of `id` against this selector.
+    fn matches(&self, id: &str, sensitive: bool) -> bool {
+        use styloria::AttributeOperator as Op;
+        let fold = |s: &str| {
+            if sensitive {
+                s.to_string()
+            } else {
+                s.to_ascii_lowercase()
+            }
+        };
+        let (a, op, v) = match self {
+            IdSelector::Id(v) => (fold(id), Op::Equal, fold(v)),
+            IdSelector::Attr {
+                operator, value, ..
+            } => (fold(id), *operator, fold(value)),
+        };
+        match op {
+            Op::Equal => a == v,
+            // A value holding a space equals no word, so it matches nothing.
+            Op::Includes => !v.is_empty() && a.split(is_css_space).any(|w| w == v),
+            Op::DashMatch => a == v || a.starts_with(&format!("{v}-")),
+            Op::Prefix => !v.is_empty() && a.starts_with(&v),
+            Op::Suffix => !v.is_empty() && a.ends_with(&v),
+            Op::Substring => !v.is_empty() && a.contains(&v),
+        }
+    }
+}
+
+/// CSS whitespace, which separates the words `~=` compares.
+fn is_css_space(c: char) -> bool {
+    matches!(c, ' ' | '\t' | '\n' | '\r' | '\u{c}')
+}
+
+/// Every id and attribute-on-`id` selector in the book's stylesheets and
+/// `<style>` elements, from styloria's `selector_references` (any depth,
+/// escapes resolved), except those in a rule a browser drops. `None` when one
+/// cannot be read: a stylesheet that does not decode losslessly, or a markup
+/// document holding a `<style>` that does not parse.
+fn css_id_selectors(ws: &Workspace, files: &[(String, String)]) -> Option<Vec<IdSelector>> {
+    let mut out = Vec::new();
+    for (name, text) in files {
+        if crate::workspace::is_stylesheet(name) {
+            if !ws.text_round_trips(name) {
+                return None;
+            }
+            collect_id_selectors(text, &mut out);
+        } else if is_markup_entry(name) && text.to_ascii_lowercase().contains("<style") {
+            let prepared = prepare_content_doc(text);
+            let doc = prepared.parse()?;
+            for style in doc
+                .descendants()
+                .filter(|n| n.is_element() && n.tag_name().name() == "style")
+            {
+                let css: String = style
+                    .descendants()
+                    .filter(|n| n.is_text())
+                    .filter_map(|n| n.text())
+                    .collect();
+                collect_id_selectors(&css, &mut out);
+            }
+        }
+    }
+    Some(out)
+}
+
+fn collect_id_selectors(css: &str, out: &mut Vec<IdSelector>) {
+    let (sheet, _) = styloria::parse_stylesheet(css);
+    for r in styloria::selector_references(&sheet) {
+        if r.dropped {
+            continue;
+        }
+        match r.selector.node {
+            styloria::SimpleSelector::Id(v) => out.push(IdSelector::Id(v.into_owned())),
+            styloria::SimpleSelector::Attribute(a)
+                if a.name.local.node.eq_ignore_ascii_case("id") =>
+            {
+                let Some(v) = a.value else {
+                    continue;
+                };
+                let case = match v.case {
+                    styloria::AttributeCase::Sensitive => Some(true),
+                    styloria::AttributeCase::Insensitive => Some(false),
+                    styloria::AttributeCase::Default | styloria::AttributeCase::Other(_) => None,
+                };
+                out.push(IdSelector::Attr {
+                    operator: v.operator,
+                    value: v.value.into_owned(),
+                    case,
+                });
+            }
+            _ => {}
+        }
+    }
+}
+
 /// A rename plan: the (old, new) pairs and every edit they imply, by file.
 struct IdRenamePlan {
     renames: Vec<(String, String)>,
@@ -5351,6 +5478,7 @@ fn plan_id_renames(ws: &Workspace, doc: &str, values: &BTreeSet<String>) -> Opti
         .filter(|n| can_reference_a_fragment(n))
         .filter_map(|n| ws.get_text(&n).map(|t| (n, t)))
         .collect();
+    let selectors = css_id_selectors(ws, &files)?;
 
     let mut used = existing_ids(&doc_text);
     let mut renames = Vec::new();
@@ -5364,6 +5492,9 @@ fn plan_id_renames(ws: &Workspace, doc: &str, values: &BTreeSet<String>) -> Opti
             continue;
         };
         let new = make_unique(base, &used);
+        if selectors.iter().any(|s| s.tells_apart(old, &new)) {
+            continue; // a stylesheet would style the element differently
+        }
         let Some(id_span) = id_attr_value_span(&doc_text, old) else {
             continue;
         };
@@ -7073,9 +7204,11 @@ fn all_reported(drops: &[(String, MetaEdit)], reported: &BTreeMap<&str, usize>) 
 /// rather than deleting a dead rule. Every affected rule on the shelf holds
 /// exactly one, which is what makes the whole-rule deletion determinate.
 ///
-/// No CSS parser is involved and none is wanted: this finds an at-rule's braces
-/// and nothing more. It does not open the rest of the `css.*` family, which is
-/// open-ended in a way this member is not.
+/// styloria finds the rules and the urls in them; epubveri's `params[0]` says
+/// which url is missing. styloria locates, it never decides, and this does not
+/// open the rest of the `css.*` family, which is open-ended in a way this
+/// member is not. A stylesheet that does not decode losslessly is declined,
+/// since writing it back would put U+FFFD where its undecodable bytes were.
 fn font_face_missing_target(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
     // file -> the urls reported missing in it
     let mut by_file: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
@@ -7094,10 +7227,13 @@ fn font_face_missing_target(report: &Report, ws: &Workspace) -> Vec<ProposedFix>
 
     let mut fixes = Vec::new();
     for (file, urls) in by_file {
+        if !ws.text_round_trips(&file) {
+            continue;
+        }
         let Some(text) = ws.get_text(&file) else {
             continue;
         };
-        let Some(edits) = plan_font_face_drops(&text, &urls) else {
+        let Some(edits) = plan_font_face_file(&file, &text, &urls) else {
             continue;
         };
         let n = edits.len();
@@ -7135,7 +7271,8 @@ fn font_face_missing_target(report: &Report, ws: &Workspace) -> Vec<ProposedFix>
             }],
             apply_fn: Box::new(move |ws: &mut Workspace| {
                 if let Some(text) = ws.get_text(&file_for_apply)
-                    && let Some(edits) = plan_font_face_drops(&text, &urls_for_apply)
+                    && let Some(edits) =
+                        plan_font_face_file(&file_for_apply, &text, &urls_for_apply)
                 {
                     ws.set_text(&file_for_apply, apply_edits(&text, edits));
                 }
@@ -7145,45 +7282,120 @@ fn font_face_missing_target(report: &Report, ws: &Workspace) -> Vec<ProposedFix>
     fixes
 }
 
-/// The `@font-face` rules to delete: those whose single `url(` names one of
-/// `urls`. `None` (decline) when nothing is deletable.
-///
-/// Brace matching rather than parsing. A rule with a nested `{`, or no closing
-/// `}`, is left alone: a stylesheet shaped that way is not one to rewrite by
-/// looking for delimiters.
-fn plan_font_face_drops(css: &str, urls: &BTreeSet<String>) -> Option<Vec<MetaEdit>> {
-    let mut edits: Vec<MetaEdit> = Vec::new();
-    let mut from = 0usize;
-    while let Some(at) = css[from..].find("@font-face") {
-        let start = from + at;
-        let Some(open_rel) = css[start..].find('{') else {
-            break;
-        };
-        let open = start + open_rel;
-        let Some(close_rel) = css[open + 1..].find('}') else {
-            break;
-        };
-        let close = open + 1 + close_rel;
-        let body = &css[open + 1..close];
-        from = close + 1;
+/// The `@font-face` deletions in `file`: the whole text when it is a
+/// stylesheet, each inline `<style>` when it is a markup document.
+fn plan_font_face_file(file: &str, text: &str, urls: &BTreeSet<String>) -> Option<Vec<MetaEdit>> {
+    if !is_markup_entry(file) {
+        return plan_font_face_drops(text, urls);
+    }
+    let mut edits = Vec::new();
+    for at in inline_style_ranges(text) {
+        for e in plan_font_face_drops(&text[at.clone()], urls).unwrap_or_default() {
+            edits.push(MetaEdit {
+                range: e.range.start + at.start..e.range.end + at.start,
+                replacement: e.replacement,
+            });
+        }
+    }
+    (!edits.is_empty()).then_some(edits)
+}
 
-        // A nested `{` means the closing brace we found is not this rule's.
-        if body.contains('{') {
+/// The byte ranges of the CSS text of each `<style>` element in a markup
+/// document, where that text is the bytes as written: the element's only
+/// child is one text node holding no `&` and no `<`. A `<style>` with an
+/// entity, a CDATA section or a comment in it is skipped, since a span in the
+/// text it holds would not be a span in the file.
+fn inline_style_ranges(text: &str) -> Vec<Range<usize>> {
+    let prepared = prepare_content_doc(text);
+    let Some(doc) = prepared.parse() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for style in doc
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "style")
+    {
+        let mut children = style.children();
+        let (Some(only), None) = (children.next(), children.next()) else {
+            continue;
+        };
+        if !only.is_text() {
+            continue;
+        }
+        let range = prepared.unshift(only.range());
+        if text
+            .get(range.clone())
+            .is_some_and(|raw| !raw.contains(['&', '<']))
+        {
+            out.push(range);
+        }
+    }
+    out
+}
+
+/// The `@font-face` rules to delete, at any depth: those whose only url
+/// names one of `urls`. `None` (decline) when nothing is deletable.
+///
+/// A rule whose block is never closed, or holds a nested rule, is left
+/// alone: a stylesheet shaped that way is not one to rewrite.
+fn plan_font_face_drops(css: &str, urls: &BTreeSet<String>) -> Option<Vec<MetaEdit>> {
+    let (sheet, errors) = styloria::parse_stylesheet(css);
+    let unclosed: Vec<usize> = errors
+        .iter()
+        .filter(|e| e.kind == styloria::SyntaxErrorKind::UnterminatedBlock)
+        .map(|e| e.span.start)
+        .collect();
+    let mut edits: Vec<MetaEdit> = Vec::new();
+    let mut stack: Vec<&styloria::Spanned<styloria::Rule<'_>>> = sheet.rules.iter().collect();
+    while let Some(rule) = stack.pop() {
+        let styloria::Rule::At(at) = &rule.node else {
+            push_nested_rules(&rule.node, &mut stack);
+            continue;
+        };
+        if !at.name.eq_ignore_ascii_case("font-face") {
+            push_nested_rules(&rule.node, &mut stack);
+            continue;
+        }
+        let Some(block) = &at.block else {
+            continue;
+        };
+        let span = rule.span;
+        if unclosed.iter().any(|&u| span.start <= u && u < span.end)
+            || block
+                .node
+                .iter()
+                .any(|i| matches!(i, styloria::BlockItem::Rule(_)))
+        {
             continue;
         }
         // Exactly one source, and it is one epubveri reported missing.
-        if body.matches("url(").count() != 1 {
+        let refs = styloria::block_url_references(&block.node);
+        let [only] = refs.as_slice() else {
             continue;
-        }
-        if !urls.iter().any(|u| body.contains(u.as_str())) {
+        };
+        let written = only.span.slice(css);
+        if !urls.iter().any(|u| written.contains(u.as_str())) {
             continue;
         }
         edits.push(MetaEdit {
-            range: with_leading_whitespace(css, start..close + 1),
+            range: with_leading_whitespace(css, span.start..span.end),
             replacement: String::new(),
         });
     }
     (!edits.is_empty()).then_some(edits)
+}
+
+/// The rules directly inside `rule`'s block, pushed for a depth-first walk.
+fn push_nested_rules<'s, 'a>(
+    rule: &'s styloria::Rule<'a>,
+    stack: &mut Vec<&'s styloria::Spanned<styloria::Rule<'a>>>,
+) {
+    if let Some(block) = rule.block() {
+        stack.extend(block.node.iter().filter_map(|i| match i {
+            styloria::BlockItem::Rule(r) => Some(r),
+            styloria::BlockItem::Declaration(_) => None,
+        }));
+    }
 }
 
 /// The rule this fixer dispatches on, spelled once.
@@ -10824,6 +11036,123 @@ mod tests {
         assert!(planned(&ws, "ch1.xhtml", &["09"]).is_none());
     }
 
+    /// The latent hole the text scan had: a selector it cannot see as `#09`.
+    /// Each of these styles the element differently after a rename, so the
+    /// id is declined, in a stylesheet and in a `<style>` element alike.
+    #[test]
+    fn a_selector_the_rename_would_change_declines_it() {
+        for css in [
+            "#\\30 9 { color: red }",
+            "#\\30 \\39 { color: red }",
+            "[id=\"09\"] { color: red }",
+            "p[id^=\"0\"] { color: red }",
+            "@media screen { :is(p, #\\30 9) { color: red } }",
+            "#id_09 { color: red }",
+            "[ID|=\"ID_09\"] { color: red }",
+        ] {
+            let ws = container(&[
+                ("ch1.xhtml", r#"<html><body><p id="09">x</p></body></html>"#),
+                ("style.css", css),
+            ]);
+            assert!(planned(&ws, "ch1.xhtml", &["09"]).is_none(), "{css}");
+            let doc = format!(
+                r#"<html><head><style>{css}</style></head><body><p id="09">x</p></body></html>"#
+            );
+            let ws = container(&[("ch1.xhtml", &doc)]);
+            assert!(planned(&ws, "ch1.xhtml", &["09"]).is_none(), "inline {css}");
+        }
+    }
+
+    /// One that matches both names or neither cannot change, and a rule a
+    /// browser drops styles nothing: the rename goes ahead.
+    #[test]
+    fn a_selector_the_rename_cannot_change_leaves_it() {
+        for css in [
+            "[id] { color: red }",
+            "[id*=\"9\"] { color: red }",
+            "[id$=\"9\" s] { color: red }",
+            "#ch1 { color: red }",
+            "p::before.x, #\\30 9 { color: red }",
+        ] {
+            let ws = container(&[
+                ("ch1.xhtml", r#"<html><body><p id="09">x</p></body></html>"#),
+                ("style.css", css),
+            ]);
+            let plan = planned(&ws, "ch1.xhtml", &["09"]);
+            assert!(plan.is_some_and(|p| p.renames[0].1 == "id_09"), "{css}");
+        }
+    }
+
+    /// A stylesheet that does not decode losslessly cannot be read for its
+    /// selectors, so nothing in the book is renamed.
+    #[test]
+    fn an_unreadable_stylesheet_declines_every_rename() {
+        use std::io::Write;
+        let mut buf = Vec::new();
+        {
+            let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            let opts = zip::write::SimpleFileOptions::default();
+            for (name, body) in [
+                ("mimetype", &b"application/epub+zip"[..]),
+                (
+                    "ch1.xhtml",
+                    br#"<html><body><p id="09">x</p></body></html>"#,
+                ),
+                ("style.css", b"p::before { content: \"\xff\" }"),
+            ] {
+                zip.start_file(name, opts).unwrap();
+                zip.write_all(body).unwrap();
+            }
+            zip.finish().unwrap();
+        }
+        let ws = Workspace::load(&buf).unwrap();
+        assert!(planned(&ws, "ch1.xhtml", &["09"]).is_none());
+    }
+
+    /// A `<style>` we cannot reach is a stylesheet we cannot read.
+    #[test]
+    fn an_unparseable_document_with_a_style_declines_every_rename() {
+        let ws = container(&[
+            ("ch1.xhtml", r#"<html><body><p id="09">x</p></body></html>"#),
+            (
+                "ch2.xhtml",
+                "<html><head><style>p {}</style></head><body><p></html>",
+            ),
+        ]);
+        assert!(planned(&ws, "ch1.xhtml", &["09"]).is_none());
+        let ws = container(&[
+            ("ch1.xhtml", r#"<html><body><p id="09">x</p></body></html>"#),
+            ("ch2.xhtml", "<html><body><p></html>"),
+        ]);
+        assert!(
+            planned(&ws, "ch1.xhtml", &["09"]).is_some(),
+            "no <style>, no decline"
+        );
+    }
+
+    #[test]
+    fn id_selector_matching_follows_selectors_4() {
+        use styloria::AttributeOperator as Op;
+        let attr = |operator, value: &str| IdSelector::Attr {
+            operator,
+            value: value.to_string(),
+            case: Some(true),
+        };
+        assert!(attr(Op::Includes, "b").matches("a b c", true));
+        assert!(!attr(Op::Includes, "").matches("a  b", true));
+        assert!(!attr(Op::Includes, "a b").matches("a b", true));
+        assert!(attr(Op::DashMatch, "en").matches("en-US", true));
+        assert!(!attr(Op::DashMatch, "en").matches("english", true));
+        assert!(!attr(Op::Prefix, "").matches("x", true));
+        assert!(!attr(Op::Suffix, "").matches("x", true));
+        assert!(!attr(Op::Substring, "").matches("x", true));
+        assert!(attr(Op::Equal, "X").matches("x", false));
+        assert!(!attr(Op::Equal, "X").matches("x", true));
+        // The flag decides when written; `#id` tries both readings.
+        assert!(!attr(Op::Equal, "ID_09").tells_apart("09", "id_09"));
+        assert!(IdSelector::Id("ID_09".into()).tells_apart("09", "id_09"));
+    }
+
     /// A cover image reliably contains the bytes `#1` somewhere. Scanning it
     /// cost ten repairable ids on a real book before this filter existed.
     #[test]
@@ -10983,6 +11312,130 @@ mod tests {
             assert!(!out.contains("@font-face"), "{src}: {out}");
             assert!(out.contains("p { margin: 0 }"), "{src}: {out}");
         }
+    }
+
+    /// The text matcher cut a rule at the first `}`, wherever it stood, and
+    /// counted a `url(` in a comment as a second source. styloria reads the
+    /// rule as CSS does.
+    #[test]
+    fn font_face_reads_comments_and_strings_as_css_does() {
+        let urls = BTreeSet::from(["x.ttf".to_string()]);
+        let brace = "@font-face { /* } */ font-family: \"a}b\"; src: url(x.ttf); }\np { a: b }";
+        assert_eq!(
+            apply_edits(brace, plan_font_face_drops(brace, &urls).unwrap()),
+            "\np { a: b }"
+        );
+        let comment = "@font-face { src: url(x.ttf); /* was url(old.ttf) */ }";
+        assert_eq!(
+            apply_edits(comment, plan_font_face_drops(comment, &urls).unwrap()),
+            ""
+        );
+    }
+
+    #[test]
+    fn font_face_finds_a_rule_inside_a_conditional_rule() {
+        let css = "@media print {\n  @font-face { src: url(x.ttf); }\n  p { a: b }\n}";
+        let urls = BTreeSet::from(["x.ttf".to_string()]);
+        assert_eq!(
+            apply_edits(css, plan_font_face_drops(css, &urls).unwrap()),
+            "@media print {\n  p { a: b }\n}"
+        );
+    }
+
+    /// Every url form counts as a source, not only `url(`: `src()` names a
+    /// font too, and may be the one that loads.
+    #[test]
+    fn font_face_counts_every_url_form_as_a_source() {
+        let css = "@font-face { src: url(x.ttf), src(\"y.ttf\"); }";
+        let urls = BTreeSet::from(["x.ttf".to_string()]);
+        assert!(plan_font_face_drops(css, &urls).is_none());
+    }
+
+    /// An inline `<style>` is parsed on its own and its spans mapped back to
+    /// the document; one whose bytes are not its CSS text is left alone.
+    #[test]
+    fn font_face_drops_a_rule_in_an_inline_style() {
+        let urls = BTreeSet::from(["x.ttf".to_string()]);
+        let doc = "<html xmlns=\"http://www.w3.org/1999/xhtml\"><head><style>\n@font-face { src: url(x.ttf); }\np { a: b }</style></head><body/></html>";
+        let out = apply_edits(doc, plan_font_face_file("a.xhtml", doc, &urls).unwrap());
+        assert_eq!(out, doc.replace("\n@font-face { src: url(x.ttf); }", ""));
+        for inner in [
+            "@font-face { src: url(x.ttf); } p::after { content: \"&amp;\" }",
+            "<![CDATA[@font-face { src: url(x.ttf); }]]>",
+            "@font-face { src: url(x.ttf); }<!-- c -->",
+        ] {
+            let doc = format!("<html><head><style>{inner}</style></head></html>");
+            assert!(
+                plan_font_face_file("a.xhtml", &doc, &urls).is_none(),
+                "{inner}"
+            );
+        }
+    }
+
+    /// A Latin-1 stylesheet keeps its encoding through the deletion; one with
+    /// a byte that does not decode is declined before anything is proposed.
+    #[test]
+    fn font_face_writes_a_stylesheet_back_in_its_own_encoding() {
+        let book = |css: &[u8]| {
+            use std::io::Write;
+            let mut buf = Vec::new();
+            {
+                let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+                let opts = zip::write::SimpleFileOptions::default();
+                for (name, body) in [
+                    ("mimetype", &b"application/epub+zip"[..]),
+                    (
+                        "META-INF/container.xml",
+                        br#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#,
+                    ),
+                    (
+                        "content.opf",
+                        br#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="id">x</dc:identifier></metadata>
+  <manifest><item href="s.css" id="css" media-type="text/css"/></manifest>
+  <spine/>
+</package>"#,
+                    ),
+                    ("s.css", css),
+                ] {
+                    zip.start_file(name, opts).unwrap();
+                    zip.write_all(body).unwrap();
+                }
+                zip.finish().unwrap();
+            }
+            Workspace::load(&buf).unwrap()
+        };
+        let latin1 = b"@charset \"iso-8859-1\";\n@font-face { src: url(x.ttf); }\np::before { content: \"\xe9\" }";
+        let mut ws = book(latin1);
+        let report = ws.detect().unwrap();
+        let fixes = font_face_missing_target(&report, &ws);
+        assert_eq!(fixes.len(), 1);
+        (fixes.into_iter().next().unwrap().apply_fn)(&mut ws);
+        let out = ws.detect().unwrap();
+        assert!(
+            !out.messages
+                .iter()
+                .any(|m| m.rule == Some("css.font_face.missing_target"))
+        );
+        let ws_bytes = ws.serialize().unwrap();
+        let back = Workspace::load(&ws_bytes).unwrap();
+        assert_eq!(
+            back.get_text("s.css").unwrap(),
+            "@charset \"iso-8859-1\";\np::before { content: \"\u{e9}\" }"
+        );
+
+        let lossy = b"@font-face { src: url(x.ttf); }\np::before { content: \"\xff\" }";
+        let ws = book(lossy);
+        let report = ws.detect().unwrap();
+        assert!(
+            report
+                .messages
+                .iter()
+                .any(|m| m.rule == Some("css.font_face.missing_target")),
+            "the finding is there, so the decline is ours"
+        );
+        assert!(font_face_missing_target(&report, &ws).is_empty());
     }
 
     // ---- fix.content_url_spaces ------------------------------------

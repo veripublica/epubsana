@@ -177,6 +177,20 @@ members = ["epubsana-wasm"]
 #   and 50 renames, so a `params` answer that failed to arrive would have deleted
 #   every one of them.
 #
+#   **0.31.0 (2026-10-21) is a TRACKING floor.** It moves to styloria 0.15,
+#   which decodes stylesheets as CSS Syntax 3 says (a byte-exact `@charset`
+#   chooses the encoding; a UTF-8 BOM is no longer text). A `url()` nested in
+#   another function (`image-set(url(a.png) 1x)`) now draws nothing by default
+#   (NEXT-018 under `advisory`, which we never set), as epubcheck never reads
+#   it. No rule key renamed; the one CSS key we read,
+#   `css.font_face.missing_target`, is untouched; no source change for the bump.
+#   Measured on 562 books (0.30.0 vs 0.31.0, the linked version printed by both
+#   binaries): per-book census, plan, outcomes and repaired-byte hash
+#   identical. Not a dead instrument: on epubveri's 18 probe books the
+#   announced moves all show (CSS-029 in `@media`, `url( "a" )` read as a url,
+#   nested urls silent), and on one of them `fix.content_properties` no longer
+#   adds `remote-resources` for a nested remote url, because OPF-014 is gone.
+#
 #   **0.30.0 (2026-10-18) is a TRACKING floor.** It moves to styloria 0.13:
 #   `css.stylesheet.invalid_selector` (CSS-008) gains four selector shapes
 #   epubcheck also reports, and the new `css.stylesheet.invalid_selector_structure`
@@ -384,7 +398,16 @@ members = ["epubsana-wasm"]
 #
 # For local co-development of epubveri, add an uncommitted override:
 #   [patch.crates-io] epubveri = { path = "../epubveri" }
-epubveri = "0.30.0"
+epubveri = "0.31.0"
+# CSS, located: the family's own parser, taken directly as a peer (Baris,
+# 2026-10-18; epubveri will not re-export it). Two conditions. **One styloria
+# in the lock**: the requirement is epubveri's own (`0.15`), so the text we
+# parse is the text it parsed, and `scripts/preflight.sh` fails on any
+# duplicate in `cargo tree -d`. **styloria locates, it never decides**: which
+# url is missing or which id is invalid is still epubveri's finding; styloria
+# only says where a rule is, which selectors name an id, and how to decode and
+# re-encode a stylesheet byte for byte. None of its types is in our public API.
+styloria = "0.15"
 # Pure-Rust only (no C deps), same philosophy as epubveri: zip's "deflate"
 # feature uses zlib-rs (Rust); bzip2/zstd (C) stay disabled.
 # Aligned to epubveri's zip major — the family shares one zip version because

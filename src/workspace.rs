@@ -107,6 +107,14 @@ fn size(bytes: u64) -> String {
     }
 }
 
+/// Whether an entry is read and written as a stylesheet: a `.css` name, as
+/// epubsana's fixers have always told stylesheets apart. A `text/css` item
+/// under another name is UTF-8 to us, as it was before styloria.
+pub(crate) fn is_stylesheet(name: &str) -> bool {
+    let b = name.as_bytes();
+    b.len() >= 4 && b[b.len() - 4..].eq_ignore_ascii_case(b".css")
+}
+
 /// A mutable EPUB container: entry names in original order + their bytes.
 pub struct Workspace {
     /// The bytes we were loaded from. Kept so untouched entries can be copied
@@ -297,16 +305,63 @@ impl Workspace {
         self.directories.iter()
     }
 
-    /// A container entry decoded as UTF-8 (lossy), or `None` if absent.
+    /// A container entry as text, or `None` if absent.
+    ///
+    /// A stylesheet (a `.css` name, ASCII case-insensitive) is decoded as CSS
+    /// Syntax 3 says and as epubveri decodes it (`styloria::decode_stylesheet`
+    /// with no protocol or referring-document label: a BOM, then a byte-exact
+    /// `@charset`, then UTF-8), without its BOM, so a span from parsing it is
+    /// a span in the text epubveri parsed. Everything else, and a stylesheet in
+    /// an encoding styloria does not decode, is UTF-8 (lossy).
     pub fn get_text(&self, name: &str) -> Option<String> {
-        self.entries
-            .get(name)
-            .map(|b| String::from_utf8_lossy(b).into_owned())
+        let bytes = self.entries.get(name)?;
+        if is_stylesheet(name)
+            && let Ok(d) = styloria::decode_stylesheet(bytes, None, None)
+        {
+            return Some(d.text.into_owned());
+        }
+        Some(String::from_utf8_lossy(bytes).into_owned())
+    }
+
+    /// Whether [`Workspace::set_text`] can write this entry back without
+    /// damage: always for an absent entry or one that is not a stylesheet; for
+    /// a stylesheet, only when every byte decoded. A fixer that edits a
+    /// stylesheet declines when this is false: writing it back would turn the
+    /// bytes that did not decode into U+FFFD.
+    pub fn text_round_trips(&self, name: &str) -> bool {
+        match self.entries.get(name) {
+            Some(bytes) if is_stylesheet(name) => {
+                styloria::decode_stylesheet(bytes, None, None).is_ok_and(|d| d.lossless)
+            }
+            _ => true,
+        }
     }
 
     /// Replace (or add) a text entry.
+    ///
+    /// A stylesheet is written in the encoding it was read in, with its BOM if
+    /// it had one, so every byte the edit did not touch is unchanged. A new
+    /// one is UTF-8 without a BOM.
+    ///
+    /// # Panics
+    ///
+    /// If `name` is a stylesheet that does not round-trip
+    /// ([`Workspace::text_round_trips`]), or `text` holds a character its
+    /// encoding cannot hold. Fixers check the first before proposing and only
+    /// insert ASCII; writing U+FFFD over a book's bytes is not a fallback.
     pub fn set_text(&mut self, name: &str, text: String) {
-        self.set_bytes(name, text.into_bytes());
+        let bytes = match self.entries.get(name) {
+            Some(old) if is_stylesheet(name) => {
+                let d = styloria::decode_stylesheet(old, None, None)
+                    .ok()
+                    .filter(|d| d.lossless)
+                    .unwrap_or_else(|| panic!("{name} does not decode losslessly"));
+                styloria::encode_stylesheet(&text, d.encoding, d.had_bom)
+                    .unwrap_or_else(|e| panic!("{name} cannot be re-encoded: {e:?}"))
+            }
+            _ => text.into_bytes(),
+        };
+        self.set_bytes(name, bytes);
     }
 
     /// Replace (or add) a raw entry, keeping original position if it existed.
@@ -592,6 +647,72 @@ mod tests {
             zip.finish().unwrap();
         }
         buf
+    }
+
+    /// A container holding exactly these entries, as bytes.
+    fn with_entries(files: &[(&str, &[u8])]) -> Workspace {
+        let mut buf = Vec::new();
+        {
+            let mut zip = ZipWriter::new(Cursor::new(&mut buf));
+            let stored = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+            zip.start_file("mimetype", stored).unwrap();
+            zip.write_all(b"application/epub+zip").unwrap();
+            for (name, body) in files {
+                zip.start_file(*name, stored).unwrap();
+                zip.write_all(body).unwrap();
+            }
+            zip.finish().unwrap();
+        }
+        Workspace::load(&buf).unwrap()
+    }
+
+    /// A Latin-1 stylesheet is read as Latin-1 and written back as Latin-1:
+    /// before styloria, `get_text` made the `é` U+FFFD and `set_text` wrote
+    /// the replacement character over it as UTF-8.
+    #[test]
+    fn a_stylesheet_is_written_back_in_its_own_encoding() {
+        let css = b"@charset \"iso-8859-1\";\np::before { content: \"\xe9\" }\nq { a: b }";
+        let mut ws = with_entries(&[("s.CSS", css)]);
+        assert!(ws.text_round_trips("s.CSS"));
+        let text = ws.get_text("s.CSS").unwrap();
+        assert!(text.contains("\"\u{e9}\""));
+        ws.set_text("s.CSS", text.replace("\nq { a: b }", ""));
+        let mut want = css.to_vec();
+        want.truncate(css.len() - b"\nq { a: b }".len());
+        assert_eq!(ws.entries["s.CSS"], want);
+    }
+
+    #[test]
+    fn a_stylesheet_keeps_its_byte_order_mark() {
+        let mut ws = with_entries(&[("s.css", b"\xef\xbb\xbfp { a: b }")]);
+        let text = ws.get_text("s.css").unwrap();
+        assert_eq!(text, "p { a: b }", "the BOM is not text");
+        ws.set_text("s.css", "p { a: c }".to_string());
+        assert_eq!(ws.entries["s.css"], b"\xef\xbb\xbfp { a: c }");
+    }
+
+    /// A stylesheet with a byte that does not decode cannot be written back
+    /// without U+FFFD, so writing it is a fixer's bug, not a fallback.
+    #[test]
+    #[should_panic(expected = "does not decode losslessly")]
+    fn a_lossy_stylesheet_is_never_written() {
+        let mut ws = with_entries(&[("s.css", b"p { content: \"\xff\" }")]);
+        assert!(!ws.text_round_trips("s.css"));
+        ws.set_text("s.css", "p {}".to_string());
+    }
+
+    /// Only stylesheets are decoded as CSS; a markup entry stays UTF-8 text,
+    /// and a name ending in a multi-byte character is not sliced through it.
+    #[test]
+    fn only_a_css_name_is_a_stylesheet() {
+        assert!(is_stylesheet("a/b.css") && is_stylesheet("B.Css"));
+        assert!(!is_stylesheet("b.xhtml") && !is_stylesheet("css") && !is_stylesheet("aş.ş"));
+        let ws = with_entries(&[("a.xhtml", b"@charset \"iso-8859-1\"; \xc3\xa9")]);
+        assert!(ws.text_round_trips("a.xhtml"));
+        assert_eq!(
+            ws.get_text("a.xhtml").unwrap(),
+            "@charset \"iso-8859-1\"; \u{e9}"
+        );
     }
 
     fn has_pkg005(r: &epubveri::report::Report) -> bool {

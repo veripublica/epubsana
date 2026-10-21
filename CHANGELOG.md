@@ -8,6 +8,46 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [Unreleased]
+
+The `epubveri` floor moves to 0.31.0, and styloria, the family's CSS
+parser, becomes a direct dependency. Stylesheets are now read and written in
+their own encoding, and two fixers read CSS with a parser instead of by
+text. Still 49 fixers.
+
+### Changed
+
+- **`epubveri` 0.31.0** (was 0.30.0), which moves to styloria 0.15. A
+  `url()` nested in another function (`image-set(url(a.png) 1x)`) no longer
+  draws an error, since epubcheck never reads it. `url( "a.png" )` is now
+  read as a url. Stylesheets decode as CSS Syntax 3 says. On the 562 books
+  of our shelf, every book's findings, proposals, outcomes and repaired
+  output are identical to 0.30.0's.
+- **Stylesheets keep their encoding.** A `.css` entry is now decoded as
+  epubveri decodes it (a byte order mark, then a byte-exact `@charset`, then
+  UTF-8) and written back in that encoding, with its byte order mark if it
+  had one. Before, a fix to a Latin-1 stylesheet would have rewritten it as
+  UTF-8 with U+FFFD in place of its Latin-1 characters. A stylesheet holding a
+  byte that does not decode is never written: fixers decline it.
+- **`fix.font_face_missing_target` reads the stylesheet as CSS** (styloria).
+  A `}` in a comment or a string no longer ends the rule early, a `url(` in a
+  comment no longer counts as a second font source, and `src()` now does
+  count as one. A `@font-face` inside `@media` is found too. In an inline
+  `<style>`, the rule is deleted only when the element holds plain text. All
+  27 proposals on our shelf are unchanged.
+
+### Fixed
+
+- **`fix.content_document_invalid_id` no longer renames an id that a
+  stylesheet selects in a way it could not see.** It declined an id written
+  as `#09` in CSS, but not the same id escaped (`#\30 9`) or matched by an
+  attribute selector (`[id="09"]`, `[id^="0"]`). It also did not check
+  whether a selector matched the new name. Renaming past any of these
+  silently changed what the stylesheet styled. Every stylesheet and
+  `<style>` element is now parsed, and the id is declined when a selector
+  would match the old name and not the new one, or the other way round.
+  None of our shelf's 878 stylesheets has such a selector.
+
 ## [0.32.0] - 2026-10-18
 
 The `epubveri` floor moves to 0.30.0. No fixer changes (49 in all).

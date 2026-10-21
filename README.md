@@ -132,7 +132,9 @@ Forty-nine fixers so far:
   from other documents, the NCX. References are resolved against the referring
   file's own directory rather than replaced globally, so a link meaning another
   document's identically-named id is left alone. Any occurrence it can't
-  classify — a fragment in a stylesheet or in prose — makes it decline.
+  classify — a fragment in a stylesheet or in prose — makes it decline, and so
+  does any CSS selector (escaped, or an `[id…]` attribute selector) whose match
+  the rename would change.
 - **`RSC-005` / `opf.package.schema_violation`** — an EPUB 3 attribute on an
   EPUB 2 package → deleted, but only once verified it says nothing the book
   doesn't: a `properties="cover-image"` whose cover is already declared by
@@ -216,9 +218,10 @@ Forty-nine fixers so far:
 - **`RSC-007` / `css.font_face.missing_target`** — a `@font-face` rule sourcing a
   font file the book doesn't contain → the whole rule dropped. The font cannot
   load and never could, so text using that family already falls back to a
-  substitute. A rule with a second `url(` is declined: one of them may work, and
+  substitute. A rule with a second url is declined: one of them may work, and
   choosing between them would be editing a stylesheet rather than removing a dead
-  declaration. No CSS parser was added for this, and the rest of the `css.*`
+  declaration. The rule is found with styloria, the family's CSS parser, and
+  the stylesheet is written back in its own encoding. The rest of the `css.*`
   family stays out of scope.
 
 The two before it clear *usage*-severity findings — report noise rather than a
