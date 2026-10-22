@@ -122,6 +122,7 @@ pub fn plan(report: &Report, ws: &Workspace, _goal: Goal) -> Vec<ProposedFix> {
     fixes.extend(image_media_type(report, ws));
     fixes.extend(font_face_missing_target(report, ws));
     fixes.extend(css_unterminated(report, ws));
+    fixes.extend(css_missing_image(report, ws));
     fixes.extend(navdoc_empty_navs(report, ws));
     fixes.extend(mimetype_packaging(report, ws));
     fixes.extend(empty_directories(report, ws));
@@ -157,6 +158,7 @@ pub fn handled_rules() -> &'static [&'static str] {
     &[
         "css.font_face.missing_target",
         "css.stylesheet.unterminated",
+        "css.url.missing_resource",
         "htm.doctype.epub2_unrecognized_public_id",
         "htm.doctype.epub3_obsolete_public_id",
         "htm.entity.missing_semicolon",
@@ -7571,6 +7573,173 @@ fn close_open_blocks(css: &str) -> Option<String> {
     (!closers.is_empty() && open(&format!("{css}{closers}")) == 0).then_some(closers)
 }
 
+/// The properties where an image that does not load draws what `none` draws:
+/// a layer that paints nothing (CSS Backgrounds 3 §3.1), or the
+/// `list-style-type` marker (CSS Lists 3). Not the `list-style` shorthand,
+/// where `none` would also set the type.
+const NONE_EQUIVALENT_IMAGE_PROPERTIES: [&str; 3] =
+    ["background", "background-image", "list-style-image"];
+
+/// `RSC-007` / `css.url.missing_resource`: a background or list image that is
+/// in neither the manifest nor the container. Writes `none` for the `url(…)`,
+/// which draws exactly what the missing image draws today. Deleting the
+/// declaration would let an earlier rule's image win the cascade; fixing the
+/// path would be a guess, and a file of that name elsewhere in the container
+/// declines the url for that reason.
+fn css_missing_image(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    // file -> the urls reported missing in it
+    let mut by_file: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for m in &report.messages {
+        if m.rule != Some("css.url.missing_resource") {
+            continue;
+        }
+        let (Some(file), Some(url)) = (m.location.as_deref(), m.params.first()) else {
+            continue;
+        };
+        by_file
+            .entry(file.to_string())
+            .or_default()
+            .insert(url.clone());
+    }
+    let names: BTreeSet<String> = ws
+        .names()
+        .filter_map(|n| n.rsplit('/').next())
+        .map(nfc)
+        .collect();
+
+    let mut fixes = Vec::new();
+    for (file, urls) in by_file {
+        let urls: BTreeSet<String> = urls
+            .into_iter()
+            .filter(|u| {
+                let path = u.split(['?', '#']).next().unwrap_or(u);
+                let base = path.rsplit('/').next().unwrap_or(path);
+                let base = percent_decoded(base).unwrap_or_else(|| base.to_string());
+                !names.contains(&nfc(&base))
+            })
+            .collect();
+        if urls.is_empty() || !ws.text_round_trips(&file) {
+            continue;
+        }
+        let Some(text) = ws.get_text(&file) else {
+            continue;
+        };
+        let Some(edits) = plan_missing_image_file(&file, &text, &urls) else {
+            continue;
+        };
+        let n = edits.len();
+
+        let file_for_apply = file.clone();
+        let urls_for_apply = urls.clone();
+        fixes.push(ProposedFix {
+            fix_id: "fix.css_missing_image",
+            addresses_id: "RSC-007".to_string(),
+            addresses_rule: Some("css.url.missing_resource"),
+            addresses_severity: addressed_severity(
+                report,
+                "RSC-007",
+                Some("css.url.missing_resource"),
+            ),
+            tier: Tier::ConfirmNeeded,
+            title: format!(
+                "Write none for {n} missing image{} in {file}",
+                if n == 1 { "" } else { "s" }
+            ),
+            rationale:
+                "The image is not in the book, so it has never loaded. CSS draws an image that \
+                 does not load exactly as it draws none: a background layer that paints nothing, \
+                 or the list marker. Writing none changes nothing a reader sees. Deleting the \
+                 declaration would let another rule's image apply; fixing the path would be a \
+                 guess."
+                    .to_string(),
+            preview: vec![Change {
+                path: file.clone(),
+                note: format!(
+                    "url(…) → none: {}",
+                    urls.iter().cloned().collect::<Vec<_>>().join(", ")
+                ),
+            }],
+            apply_fn: Box::new(move |ws: &mut Workspace| {
+                if let Some(text) = ws.get_text(&file_for_apply)
+                    && let Some(edits) =
+                        plan_missing_image_file(&file_for_apply, &text, &urls_for_apply)
+                {
+                    ws.set_text(&file_for_apply, apply_edits(&text, edits));
+                }
+            }),
+        });
+    }
+    fixes
+}
+
+/// The `url(…)` → `none` edits in `file`: the whole text when it is a
+/// stylesheet, each inline `<style>` when it is a markup document.
+fn plan_missing_image_file(
+    file: &str,
+    text: &str,
+    urls: &BTreeSet<String>,
+) -> Option<Vec<MetaEdit>> {
+    if !is_markup_entry(file) {
+        return plan_missing_images(text, urls);
+    }
+    let mut edits = Vec::new();
+    for at in inline_style_ranges(text) {
+        for e in plan_missing_images(&text[at.clone()], urls).unwrap_or_default() {
+            edits.push(MetaEdit {
+                range: e.range.start + at.start..e.range.end + at.start,
+                replacement: e.replacement,
+            });
+        }
+    }
+    (!edits.is_empty()).then_some(edits)
+}
+
+/// The `url(…)`s in `css` to write as `none`: in a style rule, a top-level
+/// value of a [`NONE_EQUIVALENT_IMAGE_PROPERTIES`] declaration, written as
+/// `url(a)` or `url("a")`, naming one of `urls`. A url nested in a function
+/// (`image-set()`) would make the declaration invalid. A `src()` that a
+/// reading system does not read drops its declaration today, and `none` would
+/// bring it back.
+fn plan_missing_images(css: &str, urls: &BTreeSet<String>) -> Option<Vec<MetaEdit>> {
+    let (sheet, _) = styloria::parse_stylesheet(css);
+    let mut edits = Vec::new();
+    let mut stack: Vec<&styloria::Spanned<styloria::Rule<'_>>> = sheet.rules.iter().collect();
+    while let Some(rule) = stack.pop() {
+        push_nested_rules(&rule.node, &mut stack);
+        let (styloria::Rule::Qualified(_), Some(block)) = (&rule.node, rule.node.block()) else {
+            continue;
+        };
+        let top_level: BTreeSet<(usize, usize)> = block
+            .node
+            .iter()
+            .filter_map(|i| match i {
+                styloria::BlockItem::Declaration(d) => Some(d),
+                styloria::BlockItem::Rule(_) => None,
+            })
+            .filter(|d| {
+                NONE_EQUIVALENT_IMAGE_PROPERTIES
+                    .iter()
+                    .any(|p| d.node.name.eq_ignore_ascii_case(p))
+            })
+            .flat_map(|d| d.node.value.iter().map(|v| (v.span.start, v.span.end)))
+            .collect();
+        for r in styloria::block_url_references(&block.node) {
+            if matches!(
+                r.form,
+                styloria::UrlForm::UrlToken | styloria::UrlForm::UrlFunction
+            ) && top_level.contains(&(r.span.start, r.span.end))
+                && urls.contains(r.url.as_ref())
+            {
+                edits.push(MetaEdit {
+                    range: r.span.start..r.span.end,
+                    replacement: "none".to_string(),
+                });
+            }
+        }
+    }
+    (!edits.is_empty()).then_some(edits)
+}
+
 /// `RSC-005` / `opf.content_document.schema_violation` (`element_not_allowed`
 /// on a `ul`/`ol`): a nested list sits directly in its parent list, after an
 /// `<li>`, where only `<li>` may stand. Moves that `<li>`'s end tag to just
@@ -11522,6 +11691,43 @@ mod tests {
         Workspace::load(&buf).unwrap()
     }
 
+    /// An EPUB 3 book whose manifest holds one stylesheet, `s.css`, with
+    /// these bytes, and `extra` entries in the container only.
+    fn css_book(css: &[u8], extra: &[(&str, &[u8])]) -> Workspace {
+        use std::io::Write;
+        let mut buf = Vec::new();
+        {
+            let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            let opts = zip::write::SimpleFileOptions::default();
+            let stored = opts.compression_method(zip::CompressionMethod::Stored);
+            zip.start_file("mimetype", stored).unwrap();
+            zip.write_all(b"application/epub+zip").unwrap();
+            let mut files: Vec<(&str, &[u8])> = vec![
+                (
+                    "META-INF/container.xml",
+                    br#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#,
+                ),
+                (
+                    "content.opf",
+                    br#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="id">x</dc:identifier></metadata>
+  <manifest><item href="s.css" id="css" media-type="text/css"/></manifest>
+  <spine/>
+</package>"#,
+                ),
+                ("s.css", css),
+            ];
+            files.extend_from_slice(extra);
+            for (name, body) in files {
+                zip.start_file(name, opts).unwrap();
+                zip.write_all(body).unwrap();
+            }
+            zip.finish().unwrap();
+        }
+        Workspace::load(&buf).unwrap()
+    }
+
     fn planned(ws: &Workspace, doc: &str, bad: &[&str]) -> Option<IdRenamePlan> {
         let values: BTreeSet<String> = bad.iter().map(|s| s.to_string()).collect();
         plan_id_renames(ws, doc, &values)
@@ -11945,6 +12151,103 @@ mod tests {
         assert!(plan_font_face_drops(css, &urls).is_none());
     }
 
+    fn missing_image(css: &str, url: &str) -> String {
+        let urls = BTreeSet::from([url.to_string()]);
+        plan_missing_images(css, &urls).map_or_else(|| css.to_string(), |e| apply_edits(css, e))
+    }
+
+    /// A missing image draws what `none` draws; only the url changes, and the
+    /// rest of the shorthand, `!important` and the quotes' absence stay.
+    #[test]
+    fn missing_image_becomes_none() {
+        assert_eq!(
+            missing_image(
+                "h3 {padding-bottom: 1em;background: url('../Images/underline.gif') no-repeat bottom center;}",
+                "../Images/underline.gif"
+            ),
+            "h3 {padding-bottom: 1em;background: none no-repeat bottom center;}"
+        );
+        assert_eq!(
+            missing_image("body { background-image: url(w.jpg) !important; }", "w.jpg"),
+            "body { background-image: none !important; }"
+        );
+        assert_eq!(
+            missing_image("li { LIST-STYLE-IMAGE: url(\"b.png\") }", "b.png"),
+            "li { LIST-STYLE-IMAGE: none }"
+        );
+        assert_eq!(
+            missing_image("@media screen { p { background: url(w.jpg) } }", "w.jpg"),
+            "@media screen { p { background: none } }"
+        );
+        assert_eq!(
+            missing_image("p { background: url(a\\26 b.png) }", "a&b.png"),
+            "p { background: none }"
+        );
+    }
+
+    /// Where `none` is not what a missing image draws, or not where the url
+    /// stands, the url stays.
+    #[test]
+    fn missing_image_leaves_every_other_place_alone() {
+        for css in [
+            // `list-style: none` would set the type too.
+            "li { list-style: url(w.jpg) square }",
+            "p::before { content: url(w.jpg) }",
+            "p { cursor: url(w.jpg), auto }",
+            // In a function, `none` makes the declaration invalid.
+            "p { background-image: image-set(url(w.jpg) 1x) }",
+            // Where `src()` is not read, its declaration is dropped today;
+            // `none` would revive it.
+            "p { background-image: src(\"w.jpg\") }",
+            // Not a style rule.
+            "@page { background: url(w.jpg) }",
+            // Another url.
+            "p { background: url(my-w.jpg) }",
+        ] {
+            assert_eq!(missing_image(css, "w.jpg"), css);
+        }
+    }
+
+    /// Through the real detector: reported, planned, gone after the repair. A
+    /// file of that name elsewhere makes the url a stale path, not a dead one;
+    /// a stylesheet that does not decode losslessly is not written.
+    #[test]
+    fn missing_image_clears_the_finding() {
+        let rule = Some("css.url.missing_resource");
+        let css = "body { background-image: url(img/w.jpg); }\np { margin: 0 }";
+        let mut ws = css_book(css.as_bytes(), &[]);
+        let report = ws.detect().unwrap();
+        assert!(report.messages.iter().any(|m| m.rule == rule));
+        let fixes = css_missing_image(&report, &ws);
+        assert_eq!(fixes.len(), 1);
+        (fixes.into_iter().next().unwrap().apply_fn)(&mut ws);
+        assert_eq!(
+            ws.get_text("s.css").unwrap(),
+            "body { background-image: none; }\np { margin: 0 }"
+        );
+        assert!(!ws.detect().unwrap().messages.iter().any(|m| m.rule == rule));
+
+        let ws = css_book(css.as_bytes(), &[("Images/w.jpg", b"\xff\xd8\xff")]);
+        let report = ws.detect().unwrap();
+        assert!(report.messages.iter().any(|m| m.rule == rule));
+        assert!(css_missing_image(&report, &ws).is_empty());
+        let ws = css_book(
+            b"body { background-image: url(img/w%20x.jpg?v=1); }",
+            &[("Images/w x.jpg", b"\xff\xd8\xff")],
+        );
+        let report = ws.detect().unwrap();
+        assert!(report.messages.iter().any(|m| m.rule == rule));
+        assert!(css_missing_image(&report, &ws).is_empty());
+
+        let ws = css_book(
+            b"p::before { content: \"\xff\" }\nbody { background-image: url(img/w.jpg); }",
+            &[],
+        );
+        let report = ws.detect().unwrap();
+        assert!(report.messages.iter().any(|m| m.rule == rule));
+        assert!(css_missing_image(&report, &ws).is_empty());
+    }
+
     #[test]
     fn unterminated_closes_the_last_rule_at_the_end() {
         let css = "body { color: black }\r\nh6{\r\n   text-align:center;\r\n";
@@ -11988,38 +12291,7 @@ mod tests {
     /// still there.
     #[test]
     fn unterminated_clears_the_finding() {
-        let book = |css: &[u8]| {
-            use std::io::Write;
-            let mut buf = Vec::new();
-            {
-                let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
-                let opts = zip::write::SimpleFileOptions::default();
-                let stored = opts.compression_method(zip::CompressionMethod::Stored);
-                zip.start_file("mimetype", stored).unwrap();
-                zip.write_all(b"application/epub+zip").unwrap();
-                for (name, body) in [
-                    (
-                        "META-INF/container.xml",
-                        br#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#.as_slice(),
-                    ),
-                    (
-                        "content.opf",
-                        br#"<?xml version="1.0"?>
-<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id">
-  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="id">x</dc:identifier></metadata>
-  <manifest><item href="s.css" id="css" media-type="text/css"/></manifest>
-  <spine/>
-</package>"#,
-                    ),
-                    ("s.css", css),
-                ] {
-                    zip.start_file(name, opts).unwrap();
-                    zip.write_all(body).unwrap();
-                }
-                zip.finish().unwrap();
-            }
-            Workspace::load(&buf).unwrap()
-        };
+        let book = |css: &[u8]| css_book(css, &[]);
         let rule = Some("css.stylesheet.unterminated");
         let css = "body { color: black }\n@media amzn-mobi {\n  p { margin: 0 }\n";
         let mut ws = book(css.as_bytes());

@@ -19,9 +19,22 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
   today, not where the author may have meant to close it. If the file ends
   inside a comment or a string, the `}` would be swallowed, so the fixer
   declines. It also works on inline `<style>` elements.
-  On our shelf: both such books, one finding each. One of them becomes valid.
-  In the other, an unclosed `@media` keeps the rest of the file inside it, as
-  readers already read it. 52 fixers.
+  On our shelf: both such books, one finding each. In one of them, an
+  unclosed `@media` keeps the rest of the file inside it, as readers already
+  read it.
+- **`fix.css_missing_image`** (`RSC-007`, ConfirmNeeded): an image named in
+  `background`, `background-image` or `list-style-image` that is not in the
+  book becomes `none`. CSS draws an image that cannot load exactly as it
+  draws `none`, so readers see nothing new. Deleting the declaration would
+  let another rule's image apply instead.
+  - Only a url that stands on its own in one of those properties is changed.
+    A url inside `image-set()`, `content`, `cursor` or the `list-style`
+    shorthand is left alone.
+  - A file with the same name elsewhere in the book means the path is
+    probably stale rather than dead, and that is left alone too.
+
+  On our shelf: all 3 such books, one finding each. One of them, *Ruhlar
+  Evi*, now has no finding left. 53 fixers.
 
 ### Changed
 

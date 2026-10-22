@@ -2118,6 +2118,76 @@ declaration, so on those five books:
 
 Nothing else moves, and the shelf audit reports zero introduced findings.
 
+## RSC-007 — a background image that is not in the book
+
+**Finding.** `RSC-007` / `css.url.missing_resource`, **Error**, reported on the
+stylesheet (or on the content document, for an inline `<style>`): *references a
+missing resource 'X'*. `params[0]` is the url as CSS reads it, with escapes
+resolved. epubveri reports it only when the target is in neither the manifest
+nor the container: a file that is declared but absent draws RSC-001 on the
+manifest instead.
+
+**Fix** (`fix.css_missing_image`, ConfirmNeeded). Replace the `url(…)` with
+`none`, in `background-image`, `background` and `list-style-image`. One
+proposal per file.
+
+    h3 { background: url('../Images/underline.gif') no-repeat bottom center; }
+    →
+    h3 { background: none no-repeat bottom center; }
+
+**Why it is safe, and why there is exactly one repair.** CSS Backgrounds 3
+(§3.1, `background-image`): an image that fails to download or cannot be
+displayed "still counts as an image layer, but draws nothing", and `none` is
+also a layer that draws nothing. So the image draws nothing today, and `none`
+draws nothing too. For `list-style-image`, CSS Lists 3 uses the marker set by
+`list-style-type` both when the image is invalid and when it is `none`. The
+other repairs are not equivalent:
+
+- **Deleting the declaration** lets an earlier rule's image win the cascade.
+- **Fixing the path** is a guess.
+
+**What it does not touch.**
+
+- **Any other property.** `content: url(x)`, `cursor`, `border-image`,
+  `mask` and the rest each treat a failed image differently. The
+  `list-style` shorthand is excluded too: `list-style: none` also sets
+  `list-style-type` to `none`, which would remove the marker.
+- **A url nested in a function** (`image-set(url(a.png) 1x)`): `none` there
+  makes the whole declaration invalid. Only a url that is a top-level value
+  of the declaration is replaced. Its span must be the span of one of the
+  declaration's own component values.
+- **A `<bad-url-token>`** (`url(a b.png)`): CSS drops that declaration
+  already, so `none` would make a dead declaration live. Also a `src()`
+  function or a bare string.
+- **A declaration outside a style rule** (`@page { background: … }`, a
+  descriptor).
+
+**When it declines.**
+
+- A file with the url's file name is in the container under another path,
+  compared after percent-decoding and without a query or fragment.
+  Then the reference may be stale rather than dead, and that is a different
+  repair (as in `fix.missing_script`).
+- The stylesheet does not decode losslessly (`text_round_trips`).
+- For an inline `<style>`: the element's only child must be one text node
+  with no `&` and no `<`, as in `fix.font_face_missing_target`.
+
+**How the url is matched.** By equality between styloria's decoded value
+and `params[0]`, as in `fix.font_face_missing_target` since 0.35.
+
+**Measured after building (562 books, epubveri 0.33.0, 2026-10-23).** All 3
+are proposed and applied, the finding is gone, and no other `(id, rule)`
+count moves in any book. *Ruhlar Evi* ends the repair with no finding at
+all. The other two keep errors this fixer does not address.
+
+**Measured (562 books, epubveri 0.33.0, 2026-10-23, before building).** 3
+books, one finding each, all in a style rule:
+
+- *Ruhlar Evi*: `h3 { background: url('../Images/underline.gif') no-repeat
+  bottom center; }`. This is the book's last error.
+- *101 Soruda Kuantum* and *Üç Cisim Problemi*: `body { background-image:
+  url(watermark.jpg); }`.
+
 ## CSS-008 — a stylesheet whose `{` is never closed
 
 **Finding.** `CSS-008` / `css.stylesheet.unterminated`, **Error**, reported on

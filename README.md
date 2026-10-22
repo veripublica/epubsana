@@ -17,7 +17,7 @@ apply → check → report) is solid. The check re-validates the book after
 applying, and a fix that made any finding more frequent is undone and reported
 as reverted — unless the fix let the validator see part of the book it could not
 see before, in which case what appears was always there and the run says so.
-Fifty-two fixers so far:
+Fifty-three fixers so far:
 
 - **`RSC-016`** — undeclared HTML entities (`&nbsp;`, `&mdash;`, …) → the exact
   character each denotes, for every name in the XHTML 1.x entity sets (the same
@@ -240,6 +240,11 @@ Fifty-two fixers so far:
   not be where the author meant. Moving the `}` would change the rendering
   and would be a guess. If a `}` would be swallowed (the file ends inside a
   comment or a string), the fixer declines.
+- **`RSC-007` / `css.url.missing_resource`**: a `background`,
+  `background-image` or `list-style-image` url naming an image the book
+  doesn't contain → `none`. CSS draws an image that cannot load exactly as it
+  draws `none`. A url inside a function, in another property, or naming a file
+  that is in the book under another path is left alone.
   The other `css.*` findings stay out of scope: a malformed selector or
   declaration has no single correct repair.
 
