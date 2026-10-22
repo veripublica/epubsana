@@ -8,10 +8,12 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
-## [Unreleased]
+## [0.34.0] - 2026-10-22
 
 Two new fixers, both suggested by epublift from what is left on our shelf
-after their pipeline. 51 fixers.
+after their pipeline, and a fix to the invalid-id rename, also reported by
+them. 51 fixers. epublift tested this release before it shipped: after their
+EPUB 3 upgrade, 8 more books of our shelf come out valid, and none got worse.
 
 ### Added
 
