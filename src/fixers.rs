@@ -121,6 +121,7 @@ pub fn plan(report: &Report, ws: &Workspace, _goal: Goal) -> Vec<ProposedFix> {
     fixes.extend(html_media_type(report, ws));
     fixes.extend(image_media_type(report, ws));
     fixes.extend(font_face_missing_target(report, ws));
+    fixes.extend(css_unterminated(report, ws));
     fixes.extend(navdoc_empty_navs(report, ws));
     fixes.extend(mimetype_packaging(report, ws));
     fixes.extend(empty_directories(report, ws));
@@ -155,6 +156,7 @@ pub fn plan(report: &Report, ws: &Workspace, _goal: Goal) -> Vec<ProposedFix> {
 pub fn handled_rules() -> &'static [&'static str] {
     &[
         "css.font_face.missing_target",
+        "css.stylesheet.unterminated",
         "htm.doctype.epub2_unrecognized_public_id",
         "htm.doctype.epub3_obsolete_public_id",
         "htm.entity.missing_semicolon",
@@ -7465,6 +7467,110 @@ fn push_nested_rules<'s, 'a>(
     }
 }
 
+/// `CSS-008` / `css.stylesheet.unterminated`: a `{` the stylesheet never
+/// closes. Appends one `}` per open block at the end of the text, which is
+/// where CSS Syntax already closes them (§5.4), so a reader sees nothing new.
+/// Proposed only where those `}`s close every block (`close_open_blocks`).
+/// A stylesheet that does not decode losslessly is
+/// declined, as for every CSS write.
+fn css_unterminated(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    let files: BTreeSet<String> = report
+        .messages
+        .iter()
+        .filter(|m| m.rule == Some("css.stylesheet.unterminated"))
+        .filter_map(|m| m.location.clone())
+        .collect();
+
+    let mut fixes = Vec::new();
+    for file in files {
+        if !ws.text_round_trips(&file) {
+            continue;
+        }
+        let Some(text) = ws.get_text(&file) else {
+            continue;
+        };
+        let Some(edits) = plan_unterminated_file(&file, &text) else {
+            continue;
+        };
+        let n: usize = edits.iter().map(|e| e.replacement.len()).sum();
+
+        let file_for_apply = file.clone();
+        fixes.push(ProposedFix {
+            fix_id: "fix.css_unterminated",
+            addresses_id: "CSS-008".to_string(),
+            addresses_rule: Some("css.stylesheet.unterminated"),
+            addresses_severity: addressed_severity(
+                report,
+                "CSS-008",
+                Some("css.stylesheet.unterminated"),
+            ),
+            tier: Tier::ConfirmNeeded,
+            title: format!(
+                "Close {n} unclosed block{} at the end of {file}",
+                if n == 1 { "" } else { "s" }
+            ),
+            rationale:
+                "CSS closes every open block at the end of the stylesheet, so a reading system \
+                 already reads it as if the '}' were there; appending it changes nothing a \
+                 reader sees. It closes the block where the reader closes it today, which may \
+                 not be where the author meant to: moving it would change the rendering and be \
+                 a guess."
+                    .to_string(),
+            preview: vec![Change {
+                path: file.clone(),
+                note: format!("append {}", "}".repeat(n)),
+            }],
+            apply_fn: Box::new(move |ws: &mut Workspace| {
+                if let Some(text) = ws.get_text(&file_for_apply)
+                    && let Some(edits) = plan_unterminated_file(&file_for_apply, &text)
+                {
+                    ws.set_text(&file_for_apply, apply_edits(&text, edits));
+                }
+            }),
+        });
+    }
+    fixes
+}
+
+/// The `}`s to append in `file`: at the end of the text when it is a
+/// stylesheet, at the end of each inline `<style>` when it is a markup
+/// document.
+fn plan_unterminated_file(file: &str, text: &str) -> Option<Vec<MetaEdit>> {
+    let ranges = if is_markup_entry(file) {
+        inline_style_ranges(text)
+    } else {
+        std::iter::once(0..text.len()).collect()
+    };
+    let edits: Vec<MetaEdit> = ranges
+        .into_iter()
+        .filter_map(|at| {
+            close_open_blocks(&text[at.clone()]).map(|closers| MetaEdit {
+                range: at.end..at.end,
+                replacement: closers,
+            })
+        })
+        .collect();
+    (!edits.is_empty()).then_some(edits)
+}
+
+/// The `}`s that close every block `css` leaves open, or `None`. A `}` at the
+/// end either closes a block, which gives the tree CSS already builds there
+/// (§5.4), or is taken into a token (a comment, a string, an open `[` or `(`)
+/// and leaves the block open. So the one test is that nothing is left open.
+/// Measured on 35,120 cuts of the shelf's stylesheets (2026-10-23): wherever
+/// nothing is left open, the repaired text serializes as the original does.
+fn close_open_blocks(css: &str) -> Option<String> {
+    let open = |text: &str| {
+        styloria::parse_stylesheet(text)
+            .1
+            .iter()
+            .filter(|e| e.kind == styloria::SyntaxErrorKind::UnterminatedBlock)
+            .count()
+    };
+    let closers = "}".repeat(open(css));
+    (!closers.is_empty() && open(&format!("{css}{closers}")) == 0).then_some(closers)
+}
+
 /// `RSC-005` / `opf.content_document.schema_violation` (`element_not_allowed`
 /// on a `ul`/`ol`): a nested list sits directly in its parent list, after an
 /// `<li>`, where only `<li>` may stand. Moves that `<li>`'s end tag to just
@@ -11837,6 +11943,99 @@ mod tests {
         let css = "@font-face { src: url(x.woff), url(x.ttf); }";
         let urls = BTreeSet::from(["x.woff".to_string()]);
         assert!(plan_font_face_drops(css, &urls).is_none());
+    }
+
+    #[test]
+    fn unterminated_closes_the_last_rule_at_the_end() {
+        let css = "body { color: black }\r\nh6{\r\n   text-align:center;\r\n";
+        assert_eq!(close_open_blocks(css).as_deref(), Some("}"));
+    }
+
+    /// Every rule after an unclosed `@media` is inside it today, and stays
+    /// there: the `}` goes where CSS already closes the block.
+    #[test]
+    fn unterminated_closes_every_open_block_where_css_does() {
+        let media = "@media amzn-mobi {\n  h1 { font-size: xx-large; }\n  p { margin: 0 }\n";
+        assert_eq!(close_open_blocks(media).as_deref(), Some("}"));
+        let nested = "@media screen { p { margin: 0";
+        assert_eq!(close_open_blocks(nested).as_deref(), Some("}}"));
+    }
+
+    /// The equivalence is styloria's: a `}` swallowed by a comment leaves the
+    /// block open, and one taken into a string changes the CSS.
+    #[test]
+    fn unterminated_declines_where_the_brace_would_not_close_the_block() {
+        for css in [
+            "p { margin: 0; /* end",
+            "p { content: \"x",
+            "p[title { margin: 0 }",
+            "p { margin: 0 }",
+        ] {
+            assert_eq!(close_open_blocks(css), None, "{css}");
+        }
+    }
+
+    #[test]
+    fn unterminated_closes_an_inline_style() {
+        let doc = "<html xmlns=\"http://www.w3.org/1999/xhtml\"><head><style>p { margin: 0</style></head><body/></html>";
+        let out = apply_edits(doc, plan_unterminated_file("a.xhtml", doc).unwrap());
+        assert!(out.contains("<style>p { margin: 0}</style>"), "{out}");
+    }
+
+    /// Through the real detector: the finding is reported, planned, and gone
+    /// after the repair, with every other byte of the stylesheet kept. A
+    /// stylesheet that does not decode losslessly is declined, the finding
+    /// still there.
+    #[test]
+    fn unterminated_clears_the_finding() {
+        let book = |css: &[u8]| {
+            use std::io::Write;
+            let mut buf = Vec::new();
+            {
+                let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+                let opts = zip::write::SimpleFileOptions::default();
+                let stored = opts.compression_method(zip::CompressionMethod::Stored);
+                zip.start_file("mimetype", stored).unwrap();
+                zip.write_all(b"application/epub+zip").unwrap();
+                for (name, body) in [
+                    (
+                        "META-INF/container.xml",
+                        br#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#.as_slice(),
+                    ),
+                    (
+                        "content.opf",
+                        br#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="id">x</dc:identifier></metadata>
+  <manifest><item href="s.css" id="css" media-type="text/css"/></manifest>
+  <spine/>
+</package>"#,
+                    ),
+                    ("s.css", css),
+                ] {
+                    zip.start_file(name, opts).unwrap();
+                    zip.write_all(body).unwrap();
+                }
+                zip.finish().unwrap();
+            }
+            Workspace::load(&buf).unwrap()
+        };
+        let rule = Some("css.stylesheet.unterminated");
+        let css = "body { color: black }\n@media amzn-mobi {\n  p { margin: 0 }\n";
+        let mut ws = book(css.as_bytes());
+        let report = ws.detect().unwrap();
+        assert!(report.messages.iter().any(|m| m.rule == rule));
+        let fixes = css_unterminated(&report, &ws);
+        assert_eq!(fixes.len(), 1);
+        (fixes.into_iter().next().unwrap().apply_fn)(&mut ws);
+        assert_eq!(ws.get_text("s.css").unwrap(), format!("{css}}}"));
+        let after = ws.detect().unwrap();
+        assert!(!after.messages.iter().any(|m| m.rule == rule));
+
+        let ws = book(b"p::before { content: \"\xff\" }\n@media amzn-mobi {\n");
+        let report = ws.detect().unwrap();
+        assert!(report.messages.iter().any(|m| m.rule == rule));
+        assert!(css_unterminated(&report, &ws).is_empty());
     }
 
     /// A substring match took the working `myfont.ttf` for the missing

@@ -17,7 +17,7 @@ apply → check → report) is solid. The check re-validates the book after
 applying, and a fix that made any finding more frequent is undone and reported
 as reverted — unless the fix let the validator see part of the book it could not
 see before, in which case what appears was always there and the run says so.
-Fifty-one fixers so far:
+Fifty-two fixers so far:
 
 - **`RSC-016`** — undeclared HTML entities (`&nbsp;`, `&mdash;`, …) → the exact
   character each denotes, for every name in the XHTML 1.x entity sets (the same
@@ -232,8 +232,16 @@ Fifty-one fixers so far:
   substitute. A rule with a second url is declined: one of them may work, and
   choosing between them would be editing a stylesheet rather than removing a dead
   declaration. The rule is found with styloria, the family's CSS parser, and
-  the stylesheet is written back in its own encoding. The rest of the `css.*`
-  family stays out of scope.
+  the stylesheet is written back in its own encoding.
+- **`CSS-008` / `css.stylesheet.unterminated`**: a `{` the stylesheet never
+  closes gets a `}` appended at the end of the file, one per open block. CSS
+  already closes open blocks at the end of the stylesheet, so readers see
+  nothing new. The block is closed where readers close it today, which may
+  not be where the author meant. Moving the `}` would change the rendering
+  and would be a guess. If a `}` would be swallowed (the file ends inside a
+  comment or a string), the fixer declines.
+  The other `css.*` findings stay out of scope: a malformed selector or
+  declaration has no single correct repair.
 
 The two before it clear *usage*-severity findings — report noise rather than a
 validity failure. They make no book valid that wasn't, and are listed here

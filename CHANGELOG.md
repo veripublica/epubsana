@@ -10,6 +10,19 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`fix.css_unterminated`** (`CSS-008`, ConfirmNeeded): a stylesheet whose
+  `{` is never closed gets one `}` per open block appended at the end. CSS
+  already closes open blocks there, so the stylesheet means the same thing
+  and readers see nothing new. The `}` goes where readers close the block
+  today, not where the author may have meant to close it. If the file ends
+  inside a comment or a string, the `}` would be swallowed, so the fixer
+  declines. It also works on inline `<style>` elements.
+  On our shelf: both such books, one finding each. One of them becomes valid.
+  In the other, an unclosed `@media` keeps the rest of the file inside it, as
+  readers already read it. 52 fixers.
+
 ### Changed
 
 - **epubveri 0.33.0 and styloria 0.16** are the new floors. epubveri's output

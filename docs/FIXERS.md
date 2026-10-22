@@ -2118,6 +2118,79 @@ declaration, so on those five books:
 
 Nothing else moves, and the shelf audit reports zero introduced findings.
 
+## CSS-008 — a stylesheet whose `{` is never closed
+
+**Finding.** `CSS-008` / `css.stylesheet.unterminated`, **Error**, reported on
+the stylesheet (or on the content document, for an inline `<style>`), at the
+`{` that is never closed: *CSS syntax error: '{' is never closed*. `params` is
+empty.
+
+**Fix** (`fix.css_unterminated`, ConfirmNeeded). Append one `}` per open block
+at the end of the text: the end of the file, or the end of the `<style>`
+element's text. Every other byte stays as it is. One proposal per file.
+
+    h6 {
+       text-align: center;
+    →
+    h6 {
+       text-align: center;
+    }
+
+**Why it is safe, and why there is exactly one repair.** CSS Syntax 3 closes
+every open block at the end of input (§5.4: "this is a parse error; return
+the block"). So a reading system that follows the spec already reads the
+stylesheet as if the `}` were there, and appending it changes nothing a reader
+sees. The repair adds what the parser already assumes. Any other place for the
+`}` would change which rules a block holds, so it would change the rendering
+and would be a guess.
+
+**The case where the author probably meant something else.** In one shelf
+book, `@media amzn-mobi {` is never closed, so every rule after it sits inside
+that block. The author probably meant to close it much earlier. Appending
+the `}` at the end keeps those rules where a reader puts them today, inside
+the block. It does not move them to where the author may have meant them to
+be: that would change what readers see, and it would be a guess. The proposal
+is ConfirmNeeded, so the user sees the file and decides (Baris, 2026-10-23:
+"keep what the reader sees" is the rule).
+
+**What proves the equivalence: one test, and why one is enough.** A `}`
+appended at the end does one of two things:
+
+- it closes a block, and then the tree is the one CSS already builds when it
+  closes that block at the end of input;
+- or a token takes it in (a comment, a string, an open `[` or `(`), and then
+  the block is still open.
+
+So the repair is proposed only if styloria, parsing the repaired text, finds
+**no block left open**. An open `[` or `(` is declined this way too.
+
+The first design had two more guards: "every open bracket is a `{`" and "the
+repaired text serializes as the original does". A mutation check showed that
+no test could make either of them fire. A probe then cut each of the shelf's
+878 stylesheets at 40 random points (35,120 cuts, 2026-10-23):
+
+- 28,429 cuts left a block open;
+- in 27,333 of them the appended `}`s closed every block. In every one of
+  those, the repaired text serialized exactly as the original did, and no
+  `[` or `(` was open.
+- In the other 1,096, the `}` was taken into a token and the block stayed
+  open, which the one guard declines.
+
+Neither extra guard ever fired on its own, so both were removed. Two guards
+remain, as for every CSS write:
+
+- the stylesheet must decode losslessly (`text_round_trips`);
+- for an inline `<style>`, the element's only child must be one text node with
+  no `&` and no `<`, as in `fix.font_face_missing_target`.
+
+**Measured (562 books, epubveri 0.33.0, 2026-10-23, before building).** 2
+books, one finding each:
+
+- *Beş Sevgi Dili*: the last rule, `h6 { … }`, has no `}`.
+- *Homo Deus*: the `@media amzn-mobi {` at line 25 is never closed.
+
+Both are external stylesheets, and both end outside a comment or a string.
+
 ## RSC-005 — an `id` that is not a valid NCName (the first cross-file fixer)
 
 **Finding.** `opf.content_document.schema_violation`, message *value of attribute
