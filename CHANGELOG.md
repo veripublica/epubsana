@@ -8,7 +8,10 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
-## [Unreleased]
+## [0.35.0] - 2026-10-23
+
+Two new CSS fixers, a fix to the font-face fixer that epubveri found in our
+code, and the move to epubveri 0.33.0 with styloria 0.16. 53 fixers.
 
 ### Added
 
