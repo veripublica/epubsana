@@ -1994,7 +1994,10 @@ already repairs the other two, so after repair this is each book's last error.
 
 **Finding.** `RSC-007` / `css.font_face.missing_target`, **Error**, reported on
 the stylesheet: *reference to a resource missing from the publication: 'X'*, with
-`params[0]` = the url exactly as written in the CSS (`../Fonts/arial.ttf`).
+`params[0]` = the url as CSS reads it, escapes resolved and not made absolute
+(`../Fonts/arial.ttf`; `url(a\26 b.ttf)` gives `a&b.ttf`). Since epubveri 0.33.0
+a test on its side pins this shape (id, key, location, decoded `params[0]`) as
+the contract this fixer dispatches on.
 epubveri resolves the url against the stylesheet's own directory and checks it
 against both the manifest and the container's name index, so a finding here means
 the file is genuinely absent, not merely undeclared.
@@ -2050,9 +2053,15 @@ styloria only says where the `@font-face` rules are and which urls each holds.
   before it, as before.
 - The rule's urls are `block_url_references` of its block: `url()`, `url("…")`,
   `src()`, and a bad-url token all count; a url in a comment does not.
-- The reported url must appear in the text of one of those url constructs
-  (`params[0]` is the url as written, so this is the same text match as before,
-  narrowed from the whole rule body to the url itself).
+- The rule's one url must **equal** a reported `params[0]`: styloria's value
+  for it, escapes resolved as epubveri resolves them. Until 0.35 this was a
+  substring match on the url's source text, which took a working
+  `url(myfont.ttf)` for a missing `font.ttf` and deleted both rules, and never
+  matched an escaped url (epubveri found both by reading the code,
+  2026-10-22). For a `<bad-url-token>`, which styloria gives as source text,
+  the value is the text inside `url(…)` trimmed of CSS whitespace; where
+  epubcheck's reading stops earlier (a `)` inside) or the name is escaped
+  (`\75rl(`), the two differ and the rule is declined.
 - The stylesheet is written back with `encode_stylesheet` in its own encoding
   and with its own BOM, so every byte outside the deleted rule is unchanged.
 - **Inline `<style>` in a content document** (9 of the 27 proposals on the
@@ -2087,8 +2096,9 @@ the text matcher too and is unchanged. To be measured before anyone decides.
 epubveri reads them as epubcheck does, up to the first `)`, and a missing font
 there draws RSC-007 like any other. The fix is the same deletion, and is safer
 here if anything: CSS calls such a url malformed, so no browser would load it
-even if the file were present. `params[0]` is the url as written, so the text
-match holds; a test runs all three shapes through the real detector. 0 cases on
+even if the file were present. `params[0]` is epubcheck's reading, the text
+inside `url(…)` up to the first `)` and trimmed, which is what the equality
+compares; a test runs all three shapes through the real detector. 0 cases on
 the shelf (2026-10-02).
 
 **Measured (2026-08-13): 21 findings across 5 books**, error severity — the only

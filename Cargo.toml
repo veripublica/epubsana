@@ -23,7 +23,7 @@ members = ["epubsana-wasm"]
 # into an error) and the `rule`/`params` sub-codes epubsana's fixers dispatch on
 # both arrived on the 0.5 line, the conventions-v0.4 one.
 #
-# **The floor is 0.29.** Most raises have been *correctness* floors, made for the
+# **The floor is 0.33.** Most raises have been *correctness* floors, made for the
 # same reason each time: below them, a detector false positive makes some fixer
 # here repair a book that was not broken. The last two are different classes —
 # 0.9.26 is completeness and 0.10.0 is capability — and each says which it is.
@@ -176,6 +176,21 @@ members = ["epubsana-wasm"]
 #   regressions). Not a vacuous null — this fixer carries 10 of those proposals
 #   and 50 renames, so a `params` answer that failed to arrive would have deleted
 #   every one of them.
+#
+#   **0.33.0 (2026-10-23) is a TRACKING floor, taken with styloria 0.16.**
+#   It spans 0.32.0 (styloria 0.16: `css.stylesheet.misplaced_at_rule`, a
+#   new CSS-008 key, by default; ADV-019..023 only under `advisory`, which we
+#   never set) and 0.33.0 (`check_style_text`/`style_text_urls`, not used
+#   here). `css.font_face.missing_target` is unchanged, and since 0.33.0 a
+#   test on their side pins it (id, key, location, decoded `params[0]`).
+#   No source change for the bump. Measured on 562 books (0.31.0 vs 0.33.0,
+#   the linked version printed by both binaries): per-book census, plan,
+#   outcomes and repaired-byte hash are identical. The gated pre-release
+#   build (`9834746` + its working tree, styloria `0463b27`) measured the
+#   same on 2026-10-22. The equality fix in `fix.font_face_missing_target`
+#   rides with this floor: it relies on the decoded `params[0]` this test
+#   pins. Separately measured: identical on the shelf (27 proposals, 18
+#   books).
 #
 #   **0.31.0 (2026-10-21) is a TRACKING floor.** It moves to styloria 0.15,
 #   which decodes stylesheets as CSS Syntax 3 says (a byte-exact `@charset`
@@ -398,16 +413,16 @@ members = ["epubsana-wasm"]
 #
 # For local co-development of epubveri, add an uncommitted override:
 #   [patch.crates-io] epubveri = { path = "../epubveri" }
-epubveri = "0.31.0"
+epubveri = "0.33.0"
 # CSS, located: the family's own parser, taken directly as a peer (Baris,
 # 2026-10-18; epubveri will not re-export it). Two conditions. **One styloria
-# in the lock**: the requirement is epubveri's own (`0.15`), so the text we
+# in the lock**: the requirement is epubveri's own (`0.16`), so the text we
 # parse is the text it parsed, and `scripts/preflight.sh` fails on any
 # duplicate in `cargo tree -d`. **styloria locates, it never decides**: which
 # url is missing or which id is invalid is still epubveri's finding; styloria
 # only says where a rule is, which selectors name an id, and how to decode and
 # re-encode a stylesheet byte for byte. None of its types is in our public API.
-styloria = "0.15"
+styloria = "0.16"
 # Pure-Rust only (no C deps), same philosophy as epubveri: zip's "deflate"
 # feature uses zlib-rs (Rust); bzip2/zstd (C) stay disabled.
 # Aligned to epubveri's zip major — the family shares one zip version because

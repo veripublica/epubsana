@@ -8,6 +8,27 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [Unreleased]
+
+### Changed
+
+- **epubveri 0.33.0 and styloria 0.16** are the new floors. epubveri's output
+  is unchanged for us. The CSS key we read, `css.font_face.missing_target`,
+  is now pinned by a test on epubveri's side, so it cannot change without
+  our agreement. On our shelf, the per-book findings, plan, fix outcomes and
+  repaired bytes are identical to 0.34.0's.
+
+### Fixed
+
+- **`fix.font_face_missing_target` matches the reported url exactly.** It
+  matched the url's source text as a substring, so with a missing
+  `font.ttf` and a working `myfont.ttf` in the same stylesheet, it would
+  have deleted both `@font-face` rules. An escaped url (`url(a\26 b.ttf)`)
+  never matched, so its rule was left in place. The url is now compared by
+  value, with escapes resolved, as epubveri reports it. Found by epubveri
+  in our code. On our shelf, neither case occurs: all 27 proposals in 18
+  books are unchanged.
+
 ## [0.34.0] - 2026-10-22
 
 Two new fixers, both suggested by epublift from what is left on our shelf

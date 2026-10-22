@@ -7420,8 +7420,7 @@ fn plan_font_face_drops(css: &str, urls: &BTreeSet<String>) -> Option<Vec<MetaEd
         let [only] = refs.as_slice() else {
             continue;
         };
-        let written = only.span.slice(css);
-        if !urls.iter().any(|u| written.contains(u.as_str())) {
+        if !urls.contains(font_face_url(only, css)) {
             continue;
         }
         edits.push(MetaEdit {
@@ -7430,6 +7429,27 @@ fn plan_font_face_drops(css: &str, urls: &BTreeSet<String>) -> Option<Vec<MetaEd
         });
     }
     (!edits.is_empty()).then_some(edits)
+}
+
+/// The url of `r` in the form epubveri's `params[0]` carries, to be compared
+/// by equality: a substring match took `url(myfont.ttf)` for a missing
+/// `font.ttf`. styloria resolves escapes as epubveri does, except in a
+/// `<bad-url-token>`, which it gives as source text; there epubcheck's reading
+/// is the text inside `url(…)`, trimmed of CSS whitespace. Where that reading
+/// would stop earlier (a `)` inside), the two differ and the rule is declined;
+/// so do they where the name is escaped (`\75rl(`), since the four bytes cut
+/// are then not `url(` and what is left still holds its `(`.
+fn font_face_url<'a>(r: &'a styloria::UrlReference<'_>, css: &'a str) -> &'a str {
+    if r.form != styloria::UrlForm::BadUrl {
+        return &r.url;
+    }
+    let inner = r
+        .span
+        .slice(css)
+        .get(4..)
+        .and_then(|s| s.strip_suffix(')'))
+        .unwrap_or("");
+    inner.trim_matches(|c| matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0C'))
 }
 
 /// The rules directly inside `rule`'s block, pushed for a depth-first walk.
@@ -11817,6 +11837,51 @@ mod tests {
         let css = "@font-face { src: url(x.woff), url(x.ttf); }";
         let urls = BTreeSet::from(["x.woff".to_string()]);
         assert!(plan_font_face_drops(css, &urls).is_none());
+    }
+
+    /// A substring match took the working `myfont.ttf` for the missing
+    /// `font.ttf` and deleted both rules (epubveri, 2026-10-22).
+    #[test]
+    fn font_face_matches_the_reported_url_exactly() {
+        let css = "@font-face { src: url(font.ttf); }\n@font-face { src: url(myfont.ttf); }\n@font-face { src: url(\"Fonts/font.ttf\"); }";
+        let urls = BTreeSet::from(["font.ttf".to_string()]);
+        let out = apply_edits(css, plan_font_face_drops(css, &urls).unwrap());
+        assert!(!out.contains("url(font.ttf)"), "{out}");
+        assert!(out.contains("url(myfont.ttf)"), "{out}");
+        assert!(out.contains("Fonts/font.ttf"), "{out}");
+    }
+
+    /// `params[0]` is the url with its escapes resolved, as styloria reads it,
+    /// so an escaped url is found, where the source text never matched.
+    #[test]
+    fn font_face_matches_an_escaped_url_by_its_value() {
+        let urls = BTreeSet::from(["a&b.ttf".to_string()]);
+        for css in [
+            "@font-face { src: url(a\\26 b.ttf); }",
+            "@font-face { src: url(\"a\\26 b.ttf\"); }",
+        ] {
+            let out = apply_edits(css, plan_font_face_drops(css, &urls).unwrap());
+            assert!(!out.contains("@font-face"), "{css}: {out}");
+        }
+    }
+
+    /// A `<bad-url-token>` is read as epubcheck reads it: the text inside
+    /// `url(…)`, trimmed. A `)` inside it stops that reading short of the
+    /// token, so the two cannot be equal and the rule is declined.
+    #[test]
+    fn font_face_reads_a_bad_url_as_its_trimmed_inside() {
+        let urls = BTreeSet::from(["a b.ttf".to_string()]);
+        let css = "@font-face { src: URL( a b.ttf\t); }";
+        let out = apply_edits(css, plan_font_face_drops(css, &urls).unwrap());
+        assert!(!out.contains("@font-face"), "{out}");
+        let partial = "@font-face { src: url(my a b.ttf); }";
+        assert!(plan_font_face_drops(partial, &urls).is_none());
+        let paren = BTreeSet::from(["a b\\".to_string()]);
+        let css = "@font-face { src: url(a b\\).ttf); }";
+        assert!(plan_font_face_drops(css, &paren).is_none());
+        // `\75` is `u`: the function is `url(`, its source text is not.
+        let escaped = "@font-face { src: \\75rl(a b.ttf); }";
+        assert!(plan_font_face_drops(escaped, &urls).is_none());
     }
 
     #[test]
