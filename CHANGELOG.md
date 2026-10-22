@@ -10,6 +10,32 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
 ## [Unreleased]
 
+Two new fixers, both suggested by epublift from what is left on our shelf
+after their pipeline. 51 fixers.
+
+### Added
+
+- **`fix.nested_list_in_list`** (`RSC-005`, ConfirmNeeded): a `<ul>` or
+  `<ol>` sitting directly in its parent list, right after an `<li>`, is moved
+  into that `<li>`. This is how a converter writes a nested table of
+  contents, and a list may hold only `<li>`. The edit moves the item's own
+  end tag past the list, so nothing is added or deleted. The book's own CSS is
+  checked rather than assumed: styloria matches every selector of every
+  stylesheet, and of the document's `<style>`, against the document before
+  and after, and one selector that would match any element differently (`li
+  > ul`, `li:last-child`), or that cannot be decided (`:hover`), declines
+  the document. A list with no `<li>` before it, or with text or a comment
+  between, is left alone. On our shelf: all 19 such lists, in 8 books.
+  After `repair -y`, 4 of the 8 are valid. 3 more hold only presentational
+  attributes that epublift's EPUB 3 upgrade converts.
+- **`fix.image_media_type`** (`OPF-029`, ConfirmNeeded): an image declared as
+  one core image type that holds another (a PNG declared `image/jpeg`) is
+  declared as the type the file holds. A reading system shows the bytes, so
+  the declaration is what is wrong; the file and its name are not changed. A
+  file of a type that is not core in both EPUB versions (TIFF, BMP, WebP)
+  needs converting and is left alone. On our shelf: the one such book,
+  whose only other error is a presentational attribute.
+
 ### Fixed
 
 - **`fix.content_document_invalid_id` moves a percent-encoded link with the

@@ -62,6 +62,7 @@ grows one carefully-argued entry at a time.
 | `RSC-005` | `opf.package.opf_identifier_not_empty` (an extra one) | ConfirmNeeded | An empty `<dc:identifier>` with no `id`, beside a real one | [Drop it; never the unique-identifier anchor](#rsc-005--an-empty-extra-dcidentifier) |
 | `OPF-001` | `opf.package.unrecognized_version` | ConfirmNeeded | The package declares a `version` that is not an EPUB version, so the book has never been validated | [Set it to `2.0` when only EPUB 2 fits](#opf-001--a-package-version-that-is-not-an-epub-version) |
 | `OPF-035` / `OPF-043` | *(none)* | ConfirmNeeded | An XHTML file is declared `text/html` (a warning in EPUB 2, an error in EPUB 3; either way the file is never fully checked) | [Declare it `application/xhtml+xml`, once the file is shown to be XHTML](#opf-035--opf-043--an-xhtml-file-declared-texthtml) |
+| `OPF-029` | `opf.manifest_item.declared_media_type_mismatch` (both types core raster) | ConfirmNeeded | An image is declared as one core image type and holds another (a PNG declared `image/jpeg`) | [Declare the type the file holds](#opf-029--an-image-declared-as-another-core-image-type) |
 | `OPF-030` / `RSC-005` | `opf.package.unique_identifier_unresolved`, `opf.package.opf_identifier_not_empty` | ConfirmNeeded | The package's declared unique identifier resolves to nothing usable | [Attach the declared id to the book's one real identifier](#opf-030--rsc-005--the-packages-declared-identifier-points-at-nothing-usable) |
 | `RSC-005` | `htm.epub2_dom.nested_anchor` | ConfirmNeeded | An `<a>` with only an `id` wraps a real link | [Unwrap it, moving the `id` to the child](#rsc-005--an-anchor-target-wrapped-around-a-link) |
 | `RSC-005` | `opf.content_document.no_interactive_in_a__a` | ConfirmNeeded | The same nesting, in an EPUB 3 document | [The same repair, under the same fix id](#rsc-005--an-anchor-target-wrapped-around-a-link) |
@@ -73,6 +74,7 @@ grows one carefully-argued entry at a time.
 | `RSC-005` / `RSC-025` | `svg.elements.element_not_allowed` (a lowercased camelCase name) | AutoSafe | An SVG element was lowercased by an HTML tool (`lineargradient`), so an XML reading system does not know it | [Restore the name's case from the HTML standard's own table](#rsc-005--rsc-025--an-svg-element-whose-name-lost-its-case) |
 | `RSC-005` | `opf.content_document.schema_violation` (`params[0] == "dir"`, an uppercase `LTR`/`RTL`) | AutoSafe | A `dir` value written in capitals, which the grammar does not accept | [Lowercase it to `ltr` / `rtl`](#rsc-005--a-dir-value-in-capitals) |
 | `RSC-005` | `ncx.schema_violation` (`missing_attribute`, `params` = `[element, "id"]`) | ConfirmNeeded | An NCX `navPoint` has no `id`, which the NCX grammar requires | [Give it a new id, unique in the NCX](#rsc-005--an-ncx-navpoint-with-no-id) |
+| `RSC-005` | `opf.content_document.schema_violation` (`element_not_allowed`, `params[0]` = `ul`/`ol`, inside a list) | ConfirmNeeded | A nested list sits directly in its parent list, after an `<li>`, instead of inside it | [Move it into the end of the `<li>` before it](#rsc-005--a-nested-list-sitting-directly-in-its-parent-list) |
 
 **A note on structural fixers.** Fixers that must locate an element (rather than
 match a token) parse the document with `roxmltree` using `allow_dtd: true`, the
@@ -1869,6 +1871,61 @@ inputs: 126 `OPF-035` in 5 books. The same 5 books after epublift's upgrade
 (`4.0.0+64375f5`) and an epubsana repair: 126 `OPF-043`, every one on a
 `text/html` item. One book holds 91 of them.
 
+## OPF-029 — an image declared as another core image type
+
+**Finding.** `OPF-029` / `opf.manifest_item.declared_media_type_mismatch`,
+error, located at the **image's container path** (not the package document),
+`params` = `[declared, actual]`: the type the manifest declares, and the type
+epubveri sniffed from the file's signature (`image/jpeg`, `image/png`,
+`image/gif`, `image/webp`, `image/tiff`, `image/bmp`). It is raised only when
+the two differ; a file whose signature matches nothing draws the same id with
+no rule and no `params`, and is not this fixer's.
+
+**Why it is one repair here, when the rule in general is not ours.** The
+declaration and the file disagree, and elsewhere choosing between them is not
+this crate's (see OPF-090). For one shape the choice is not open: when the file
+holds a **core image type**, the bytes are what every reading system shows
+(readers sniff images), and the only content-preserving edit is to the
+declaration. The other side would be re-encoding the image, which changes its
+pixels or at least its bytes, and is image work. The `text/html` fixer rests on
+the same argument: only the declaration can move, and to one value, the one
+the detector found.
+
+**Fix** (`fix.image_media_type`, ConfirmNeeded). In the package document,
+rewrite the `media-type` of the one manifest item whose `href` resolves to the
+reported path to `params[1]`. Nothing else changes: the file name keeps its
+extension (`kolektif.jpg` holding a PNG still draws the `PKG-022` warning,
+which is a separate, warning-level finding). One proposal per package
+document, covering every such image. ConfirmNeeded, like the other
+declaration fixers: the edit is determinate, but it rewrites what a publisher
+wrote.
+
+**When it declines.**
+
+- **The file holds a type that is not core in both EPUB versions**: anything
+  but `image/gif`, `image/jpeg`, `image/png`. A TIFF or BMP behind a core
+  declaration needs converting, which is not a repair. WebP is core in EPUB
+  3.3 but not in EPUB 2, so a WebP file declines too.
+- **The declared type is not a core raster type** (`image/gif`, `image/jpeg`,
+  `image/png`, `image/webp`). A foreign declaration may carry a fallback chain
+  that was written for it; that is outside the narrow shape this admits.
+- **The finding has fewer than two `params`.**
+- **No manifest item, or more than one, resolves to the reported path** (a
+  defective book breaks the uniqueness the lookup assumes), or the item's
+  declared type (parameters stripped) is not `params[0]` (a stale finding).
+- The package document does not parse.
+
+**Measured (562 books, epubveri 0.31.0, 2026-10-22, before building; from
+epublift's note, and `docs/COVERAGE.md` agrees on the count).** 4 books carry
+the rule. One (a PNG declared `image/jpeg`) is admitted. Three hold a TIFF
+behind a PNG or JPEG declaration and decline.
+
+**Measured after building (562 books, epubveri 0.31.0, 2026-10-22).** The
+whole-shelf A/B moves one book, *Sapiens*: one proposal, applied, `OPF-029`
+cleared, nothing else changed in any book. Its one remaining error is a
+`width` attribute, which epublift's upgrade converts; with it, the book is
+valid after their pipeline, as their note measured.
+
 ## RSC-007 — a `<script src>` whose file is not in the book
 
 > **Written spec-first on 2026-10-16**, on epublift's report. The finding shape
@@ -3148,3 +3205,92 @@ approve-all repair fall from 16,757 to 16,735 across the shelf. No regression
 at any severity, and the whole-shelf plan digest gains exactly that one line.
 The book is still not valid: its NCX names a `Text/kapak.xhtml` the book does
 not contain, which is not this fixer's to repair.
+
+## RSC-005 — a nested list sitting directly in its parent list
+
+**Finding.** `opf.content_document.schema_violation`, kind
+`element_not_allowed`, `params[0]` = `ul` or `ol` (`params[1..]` the
+elements allowed there: `li` in EPUB 2; `li`, `script`, `template` in EPUB 3),
+with an `element_path` naming the list. A `<ul>` or `<ol>` may hold only `<li>`
+(and script-supporting elements), so a list that is its direct child is
+invalid in both versions. The shape is what a converter writes for a nested
+table of contents:
+
+```html
+<ul><li><a href="main-1.xhtml">Uyanış</a></li><ul><li>…</li></ul><li>…</li></ul>
+→
+<ul><li><a href="main-1.xhtml">Uyanış</a><ul><li>…</li></ul></li><li>…</li></ul>
+```
+
+**Fix** (`fix.nested_list_in_list`, ConfirmNeeded). For each reported list
+whose parent is a `<ul>`/`<ol>` and whose nearest preceding sibling element is
+an `<li>`, move that `<li>`'s end tag to just after the list. Nothing is
+created and nothing is deleted: the end tag is the `<li>`'s own, byte for
+byte, so the edit is a move of five bytes. A run of reported lists after one
+`<li>` (`</li><ul>…</ul><ul>…</ul>`) all go into it, in order, by moving the
+end tag past the last of them. A reported list inside another reported list
+is handled the same way inside it. One proposal per document.
+
+**Why it is one repair.** The list must become the child of an `<li>`, and
+the only content-preserving way is to put it into an existing one. Of the
+existing ones, the `<li>` immediately before it is the item it nests under:
+that is what the indentation of a nested list means, and it is where every
+reader that recovers from the error shows it. Wrapping it in a new `<li>`
+instead would add an item (an empty marker in a `<ul>`, a number in an `<ol>`),
+which changes what is shown.
+
+**What the move does not change.** The elements and their order in the
+document are the same before and after: only the point where the `<li>`
+closes moves. The outer list's item count and an `<ol>`'s numbering count
+`<li>` children only, and the moved element is a list. The user-agent rules
+that indent and space nested lists (`ul ul`, `ol ul`, … in HTML §15) match the
+list as a descendant of the outer list in both positions.
+
+**The book's own CSS is checked, not assumed (styloria).** Author CSS could
+tell the two positions apart: `li > ul`, `ul > ul`, `li ul`, `li:last-child`,
+`:nth-child()`, `:empty`, `+` and `~`. So the document is parsed before and
+after the move. Every style rule in every `.css` entry of the book and in the
+document's `<style>` elements is matched with styloria against every element in
+both trees, paired by document order. The document is declined if any
+selector matches any element differently, or if any answer is `Unknown`
+(`:hover`, `:has()`, `&`, …). A selector with a pseudo-element (`li::before`)
+is matched without it, since the box it styles is generated by that element. A
+selector the browser drops (an invalid selector list) styles nothing and is
+skipped. Every sheet of the book is read, not only the ones the document links:
+that can only decline more.
+
+**When it declines.**
+
+- **The list's preceding sibling element is not an `<li>`**, or the list is
+  its parent's first child. The list would need an item we would have to
+  invent.
+- **Anything but whitespace between the `<li>` and the list**, or between
+  lists of a run: text, a comment, a processing instruction. Where it would
+  go is a choice.
+- **The `<li>` has no end tag of its own** (`<li/>`).
+- **The parent is not a `<ul>`/`<ol>`**, or the list, the parent or the `<li>`
+  is not in the XHTML namespace. A list in a `<p>` (one case on the shelf) is
+  a different defect.
+- **A selector tells the positions apart, or answers `Unknown`** (above).
+- **A stylesheet that does not decode losslessly**, one with `@namespace` (the
+  prefixes would have to be resolved per sheet), or a style rule nested in
+  another style rule: the whole document declines.
+- The document does not parse.
+
+**Measured (562 books, epubveri 0.31.0, 2026-10-22, before building).** 19
+lists in 8 books, as epublift's note counted. 7 books are invalid only over
+this. In 7 of them the lists are a converter's `main.xhtml` table of contents;
+the 8th has one in each of two body documents. One more finding of the same
+kind is a `<ul>` inside a `<p>`, which this fixer does not take. One book
+has reported lists nested three deep (`ul[3]/ul[1]/ul[1]`). The CSS of the 7
+TOC books has no combinator and no pseudo-class at all. The 8th book's has
+combinators and `:first-child`/`:last-child`, none on `ul`, `ol` or `li`.
+
+**Measured after building (562 books, epubveri 0.31.0, 2026-10-22).** The
+whole-shelf A/B (`bump_ab`, against `cca571f`) moves exactly the 8 books: one
+proposal per reported document (9), every one applied, none reverted, and
+every reported list cleared: `schema_violation` falls by exactly 19 there.
+The one left, in *Kadınlar*, is an `<img>` with no `alt`. No other book changes. After
+`repair -y`, 4 of the 8 are valid; 3 more hold only `clear` attributes
+(`htm.obsolete_attribute`), which epublift's EPUB 3 upgrade converts.
+

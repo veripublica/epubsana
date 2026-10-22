@@ -17,7 +17,7 @@ apply → check → report) is solid. The check re-validates the book after
 applying, and a fix that made any finding more frequent is undone and reported
 as reverted — unless the fix let the validator see part of the book it could not
 see before, in which case what appears was always there and the run says so.
-Forty-nine fixers so far:
+Fifty-one fixers so far:
 
 - **`RSC-016`** — undeclared HTML entities (`&nbsp;`, `&mdash;`, …) → the exact
   character each denotes, for every name in the XHTML 1.x entity sets (the same
@@ -178,6 +178,13 @@ Forty-nine fixers so far:
   EPUB 2 fits. The book is then checked for the first time and may show defects
   that were always in it; the run says so and suggests running again. Declines
   anything that could also be EPUB 3, and an OEB 1.x package.
+- **`RSC-005` / a nested list sitting directly in its parent list** —
+  `<li>A</li><ul>…</ul>` inside a `<ul>`/`<ol>`, a converter's nested table of
+  contents → the list moved into the `<li>` before it, by moving that item's
+  end tag. Nothing is added or deleted, and every selector of the book's own
+  CSS is matched against the document before and after: one that would style
+  anything differently declines. A list with no `<li>` before it, or with text
+  between, is left alone.
 - **`RSC-005` / a nested anchor** — `<a id="x"><sup><a href="#f">1</a></sup></a>`,
   where the outer element is an anchor *target* rather than a link → unwrapped,
   with the `id` moved to its child so the fragment still resolves in the same
@@ -208,6 +215,10 @@ Forty-nine fixers so far:
   XHTML; the file itself is not changed. epubveri never fully checks a file
   declared `text/html` (in EPUB 3 it does not open it at all), so the file is
   then checked for the first time and may show defects that were always in it.
+- **`OPF-029`** — an image declared as one core image type that holds another
+  (a PNG declared `image/jpeg`) → declared as the type the file holds. Only
+  the declaration changes; a file of a type that is not core in both EPUB
+  versions (TIFF, BMP, WebP) needs converting and is left alone.
 
 - **`RSC-007` / a `<script src>` naming a file not in the book** → the element
   deleted, and `scripted` dropped from its manifest item when nothing else in

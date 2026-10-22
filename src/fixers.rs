@@ -112,12 +112,14 @@ pub fn plan(report: &Report, ws: &Workspace, _goal: Goal) -> Vec<ProposedFix> {
     fixes.extend(package_identifier(report, ws));
     fixes.extend(package_version(report, ws));
     fixes.extend(nested_anchors(report, ws));
+    fixes.extend(nested_lists_in_lists(report, ws));
     fixes.extend(epub3_attrs_in_epub2_package(report, ws));
     fixes.extend(empty_dc_date(report, ws));
     fixes.extend(empty_metadata_element(report, ws));
     fixes.extend(empty_extra_identifier(report, ws));
     fixes.extend(non_preferred_media_type(report, ws));
     fixes.extend(html_media_type(report, ws));
+    fixes.extend(image_media_type(report, ws));
     fixes.extend(font_face_missing_target(report, ws));
     fixes.extend(navdoc_empty_navs(report, ws));
     fixes.extend(mimetype_packaging(report, ws));
@@ -186,6 +188,8 @@ pub fn handled_rules() -> &'static [&'static str] {
         "opf.guide.duplicate_reference",
         "opf.guide.reference_fragment_not_defined",
         "opf.guide.reference_missing_resource",
+        // One shape inside it: a core image declared as another core image.
+        "opf.manifest_item.declared_media_type_mismatch",
         "opf.manifest_item.missing_resource",
         "opf.manifest_item.non_preferred_media_type",
         "opf.manifest_item.unencoded_space_in_href",
@@ -7441,6 +7445,314 @@ fn push_nested_rules<'s, 'a>(
     }
 }
 
+/// `RSC-005` / `opf.content_document.schema_violation` (`element_not_allowed`
+/// on a `ul`/`ol`): a nested list sits directly in its parent list, after an
+/// `<li>`, where only `<li>` may stand. Moves that `<li>`'s end tag to just
+/// after the list, so the list nests in the item before it.
+///
+/// **A move, not an invention.** The end tag is the `<li>`'s own, byte for
+/// byte, and the element sequence is the same before and after; only the
+/// point where the item closes moves. A list with anything but whitespace
+/// between it and an `<li>`, or with no `<li>` before it, declines: where it
+/// would go, or what item it would need, is a choice.
+///
+/// **The book's CSS is asked, not assumed** ([`styling_unchanged`]): author
+/// selectors such as `li > ul` or `li:last-child` can tell the two positions
+/// apart, so every selector is matched against both trees with styloria and
+/// one different (or `Unknown`) answer declines the document.
+fn nested_lists_in_lists(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    // document -> the reported lists' element paths
+    let mut by_doc: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for m in &report.messages {
+        if !is_schema_violation(
+            m,
+            "opf.content_document.schema_violation",
+            ViolationKind::ElementNotAllowed,
+        ) || !matches!(m.params.first().map(String::as_str), Some("ul" | "ol"))
+        {
+            continue;
+        }
+        let (Some(doc), Some(path)) = (
+            m.location.as_deref(),
+            m.element_path.as_ref().and_then(svg_reported_path),
+        ) else {
+            continue;
+        };
+        by_doc.entry(doc.to_string()).or_default().insert(path);
+    }
+    if by_doc.is_empty() {
+        return Vec::new();
+    }
+    let Some(sheets) = book_stylesheets(ws) else {
+        return Vec::new();
+    };
+
+    let mut fixes = Vec::new();
+    for (doc, reported) in by_doc {
+        let Some(text) = ws.get_text(&doc) else {
+            continue;
+        };
+        let Some((_, moved)) = plan_list_moves(&text, &reported, &sheets) else {
+            continue;
+        };
+        let doc_for_apply = doc.clone();
+        fixes.push(ProposedFix {
+            fix_id: "fix.nested_list_in_list",
+            addresses_id: "RSC-005".to_string(),
+            addresses_rule: Some("opf.content_document.schema_violation"),
+            addresses_severity: addressed_severity(
+                report,
+                "RSC-005",
+                Some("opf.content_document.schema_violation"),
+            ),
+            tier: Tier::ConfirmNeeded,
+            title: format!("Nest {moved} list(s) inside the list item before them in {doc}"),
+            rationale: "A <ul> or <ol> may hold only <li> elements, and each of these lists \
+                        sits directly in its parent list, right after an <li>. Moving that \
+                        <li>'s end tag past the list puts the list inside the item it nests \
+                        under. Nothing is added or deleted, and the book's own stylesheets \
+                        were checked: every selector in them matches the same elements \
+                        before and after the move."
+                .to_string(),
+            preview: vec![Change {
+                path: doc.clone(),
+                note: format!("move {moved} nested list(s) into the <li> before them"),
+            }],
+            apply_fn: Box::new(move |ws: &mut Workspace| {
+                if let Some(text) = ws.get_text(&doc_for_apply)
+                    && let Some(sheets) = book_stylesheets(ws)
+                    && let Some((edits, _)) = plan_list_moves(&text, &reported, &sheets)
+                {
+                    ws.set_text(&doc_for_apply, apply_edits(&text, edits));
+                }
+            }),
+        });
+    }
+    fixes
+}
+
+/// Every stylesheet of the book, decoded. `None` (decline) when one does not
+/// decode losslessly: its selectors might be misread.
+fn book_stylesheets(ws: &Workspace) -> Option<Vec<String>> {
+    let mut out = Vec::new();
+    for name in ws.names().filter(|n| crate::workspace::is_stylesheet(n)) {
+        if !ws.text_round_trips(name) {
+            return None;
+        }
+        out.push(ws.get_text(name)?);
+    }
+    Some(out)
+}
+
+/// The edits nesting every reported list in `text` into the `<li>` before it,
+/// and how many lists move. `None` (decline) when nothing can move, the
+/// document does not parse, or the book's CSS would style it differently.
+fn plan_list_moves(
+    text: &str,
+    reported: &BTreeSet<String>,
+    sheets: &[String],
+) -> Option<(Vec<MetaEdit>, usize)> {
+    const XHTML: &str = "http://www.w3.org/1999/xhtml";
+    let is_list = |n: &roxmltree::Node| {
+        n.is_element()
+            && n.tag_name().namespace() == Some(XHTML)
+            && matches!(n.tag_name().name(), "ul" | "ol")
+    };
+    let is_reported = |n: &roxmltree::Node| {
+        is_list(n)
+            && n.parent().is_some_and(|p| is_list(&p))
+            && svg_element_path(*n).is_some_and(|p| reported.contains(&p))
+    };
+    let is_blank =
+        |n: &roxmltree::Node| n.is_text() && n.text().is_some_and(epubveri::xmlext::is_xml_blank);
+
+    let prepared = prepare_content_doc(text);
+    let doc = prepared.parse()?;
+    let mut edits = Vec::new();
+    let mut moved = 0;
+    for list in doc.descendants().filter(is_reported) {
+        // Only the last list of a run moves the end tag, past all of them.
+        if list
+            .next_siblings()
+            .skip(1)
+            .find(|n| !is_blank(n))
+            .is_some_and(|n| is_reported(&n))
+        {
+            continue;
+        }
+        let mut run = 1;
+        let mut item = None;
+        for n in list.prev_siblings().skip(1) {
+            if is_blank(&n) {
+                continue;
+            }
+            if is_reported(&n) {
+                run += 1;
+                continue;
+            }
+            if n.is_element()
+                && n.tag_name().namespace() == Some(XHTML)
+                && n.tag_name().name() == "li"
+            {
+                item = Some(n);
+            }
+            break;
+        }
+        let Some(item) = item else {
+            continue;
+        };
+        let r = item.range();
+        let source = &prepared.working[r.clone()];
+        let Some(lt) = source.rfind('<') else {
+            continue;
+        };
+        if !source[lt..].starts_with("</") {
+            continue; // `<li/>` has no end tag to move
+        }
+        let end_tag = prepared.unshift(r.start + lt..r.end);
+        let after = prepared.unshift(list.range()).end;
+        edits.push(MetaEdit {
+            range: after..after,
+            replacement: text[end_tag.clone()].to_string(),
+        });
+        edits.push(MetaEdit {
+            range: end_tag,
+            replacement: String::new(),
+        });
+        moved += run;
+    }
+    if edits.is_empty() || !styling_unchanged(&doc, &apply_edits(text, edits.clone()), sheets) {
+        return None;
+    }
+    Some((edits, moved))
+}
+
+/// Whether every style rule of `sheets` and of `before`'s own `<style>`
+/// elements matches every element of `after_text` exactly as it matches the
+/// same element (by document order) of `before`. `false` on any `Unknown`
+/// answer, and on what this does not evaluate: `@namespace`, and a style rule
+/// nested in another.
+fn styling_unchanged(before: &roxmltree::Document, after_text: &str, sheets: &[String]) -> bool {
+    let prepared = prepare_content_doc(after_text);
+    let Some(after) = prepared.parse() else {
+        return false;
+    };
+    // Paired by document order: moving an end tag moves no start tag, so the
+    // two sequences are the same elements.
+    let b: Vec<_> = before.descendants().filter(|n| n.is_element()).collect();
+    let a: Vec<_> = after.descendants().filter(|n| n.is_element()).collect();
+    let inline: Vec<String> = b
+        .iter()
+        .filter(|n| {
+            n.tag_name().namespace() == Some("http://www.w3.org/1999/xhtml")
+                && n.tag_name().name() == "style"
+        })
+        .map(|n| {
+            n.descendants()
+                .filter(|d| d.is_text())
+                .filter_map(|d| d.text())
+                .collect()
+        })
+        .collect();
+    let parsed: Vec<_> = sheets
+        .iter()
+        .chain(&inline)
+        .map(|t| styloria::parse_stylesheet(t).0)
+        .collect();
+    let mut selectors = Vec::new();
+    for sheet in &parsed {
+        if !style_selectors(&sheet.rules.iter().collect::<Vec<_>>(), &mut selectors) {
+            return false;
+        }
+    }
+    let ns = styloria::Namespaces::default();
+    selectors.iter().all(|s| {
+        b.iter().zip(&a).all(|(x, y)| {
+            let before = s.matches(&StyledNode(*x), &ns);
+            before != styloria::Match::Unknown && s.matches(&StyledNode(*y), &ns) == before
+        })
+    })
+}
+
+/// Every selector of the style rules in `rules`, at any depth of at-rules,
+/// with any pseudo-element cut off: the box it styles is generated by the
+/// element the rest matches. A selector list the browser drops is skipped.
+/// `false` for `@namespace` and for a style rule nested in a style rule.
+fn style_selectors<'a>(
+    rules: &[&styloria::Spanned<styloria::Rule<'a>>],
+    out: &mut Vec<styloria::ComplexSelector<'a>>,
+) -> bool {
+    for rule in rules {
+        let mut nested = Vec::new();
+        push_nested_rules(&rule.node, &mut nested);
+        match &rule.node {
+            styloria::Rule::Qualified(q) => {
+                if !nested.is_empty() {
+                    return false;
+                }
+                let Ok(list) = styloria::parse_selector_list(&q.prelude) else {
+                    continue;
+                };
+                for s in list.selectors {
+                    let mut s = s.node;
+                    for c in &mut s.compounds {
+                        if let Some(i) = c.node.simples.iter().position(|x| {
+                            matches!(x.node, styloria::SimpleSelector::PseudoElement(_))
+                        }) {
+                            c.node.simples.truncate(i);
+                        }
+                    }
+                    out.push(s);
+                }
+            }
+            styloria::Rule::At(a) => {
+                if a.name.eq_ignore_ascii_case("namespace") || !style_selectors(&nested, out) {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
+/// A parsed element, as styloria's matching asks about it. XHTML is XML, so
+/// names compare case-sensitively; `:empty` counts text and elements only.
+#[derive(Clone, Copy)]
+struct StyledNode<'a, 'i>(roxmltree::Node<'a, 'i>);
+
+impl styloria::Element for StyledNode<'_, '_> {
+    fn parent(&self) -> Option<Self> {
+        self.0.parent_element().map(StyledNode)
+    }
+    fn prev_sibling(&self) -> Option<Self> {
+        self.0.prev_sibling_element().map(StyledNode)
+    }
+    fn next_sibling(&self) -> Option<Self> {
+        self.0.next_sibling_element().map(StyledNode)
+    }
+    fn has_children(&self) -> bool {
+        self.0.children().any(|c| c.is_element() || c.is_text())
+    }
+    fn local_name(&self) -> &str {
+        self.0.tag_name().name()
+    }
+    fn namespace(&self) -> Option<&str> {
+        self.0.tag_name().namespace()
+    }
+    fn attribute(&self, local_name: &str) -> Option<&str> {
+        self.0
+            .attributes()
+            .find(|a| a.namespace().is_none() && a.name() == local_name)
+            .map(|a| a.value())
+    }
+    fn attribute_ns(&self, namespace_uri: &str, local_name: &str) -> Option<&str> {
+        self.0.attribute((namespace_uri, local_name))
+    }
+    fn is_html_document(&self) -> bool {
+        false
+    }
+}
+
 /// The rule this fixer dispatches on, spelled once.
 const NON_PREFERRED_MEDIA_TYPE: &str = "opf.manifest_item.non_preferred_media_type";
 
@@ -7727,6 +8039,145 @@ fn html_media_type(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
         });
     }
     fixes
+}
+
+/// The rule [`image_media_type`] dispatches on, spelled once.
+const DECLARED_MEDIA_TYPE_MISMATCH: &str = "opf.manifest_item.declared_media_type_mismatch";
+
+/// The image types core in EPUB 2 **and** EPUB 3: the only ones a file may hold
+/// for [`image_media_type`] to declare it. WebP is core in 3.3 alone.
+const CORE_IMAGE_TYPES: [&str; 3] = ["image/gif", "image/jpeg", "image/png"];
+
+/// `OPF-029` / `opf.manifest_item.declared_media_type_mismatch`: an image
+/// declared as one core image type holds another (a PNG declared `image/jpeg`).
+/// Rewrites the declaration to the type the detector sniffed (`params[1]`).
+///
+/// **One repair, not a choice, for this shape only.** Elsewhere the declaration
+/// and the file disagree and choosing between them is not ours. But a reader
+/// shows the bytes, and the one content-preserving edit is the declaration:
+/// re-encoding the image is image work. So the file must hold a type core in
+/// both versions ([`CORE_IMAGE_TYPES`]), and the declaration must name a core
+/// raster type too; a TIFF or BMP behind it, or a foreign declaration that may
+/// carry a fallback written for it, declines.
+///
+/// The finding is located at the **image's** path, so the manifest item is
+/// found by resolving every `href`; none or two is a decline.
+fn image_media_type(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    // image path -> (declared type, base; the type the file holds)
+    let mut wanted: BTreeMap<String, (String, String)> = BTreeMap::new();
+    for m in report
+        .messages
+        .iter()
+        .filter(|m| m.rule == Some(DECLARED_MEDIA_TYPE_MISMATCH))
+    {
+        let (Some(path), Some(declared), Some(actual)) =
+            (m.location.as_deref(), m.params.first(), m.params.get(1))
+        else {
+            continue;
+        };
+        let declared = base_media_type(declared);
+        if !CORE_IMAGE_TYPES.contains(&actual.as_str())
+            || !(CORE_IMAGE_TYPES.contains(&declared) || declared == "image/webp")
+        {
+            continue;
+        }
+        wanted.insert(path.to_string(), (declared.to_string(), actual.clone()));
+    }
+    if wanted.is_empty() {
+        return Vec::new();
+    }
+    let Some(opf) = opf_path(ws) else {
+        return Vec::new();
+    };
+    let Some(text) = ws.get_text(&opf) else {
+        return Vec::new();
+    };
+    let Some(renamed) = compute_image_media_type_edits(&text, &opf, &wanted) else {
+        return Vec::new();
+    };
+    let n = renamed.len();
+    let opf_for_apply = opf.clone();
+    vec![ProposedFix {
+        fix_id: "fix.image_media_type",
+        addresses_id: "OPF-029".to_string(),
+        addresses_rule: Some(DECLARED_MEDIA_TYPE_MISMATCH),
+        addresses_severity: addressed_severity(
+            report,
+            "OPF-029",
+            Some(DECLARED_MEDIA_TYPE_MISMATCH),
+        ),
+        tier: Tier::ConfirmNeeded,
+        title: format!("Declare {n} image(s) as the type the file holds in {opf}"),
+        rationale: "Each image is declared as one core image type and its bytes are another, \
+                    which epubveri read from the file's signature. A reading system shows the \
+                    bytes, so the declaration is what is wrong, and it has one right value. \
+                    The images are not changed, nor their file names. A file holding a type \
+                    that is not core in both EPUB versions (TIFF, BMP, WebP) is left alone: \
+                    it needs converting, which is not a repair."
+            .to_string(),
+        preview: renamed
+            .iter()
+            .map(|(path, declared, actual, _)| Change {
+                path: opf.clone(),
+                note: format!("{path}: {declared} → {actual}"),
+            })
+            .collect(),
+        apply_fn: Box::new(move |ws: &mut Workspace| {
+            if let Some(text) = ws.get_text(&opf_for_apply)
+                && let Some(renamed) =
+                    compute_image_media_type_edits(&text, &opf_for_apply, &wanted)
+            {
+                let edits = renamed.into_iter().map(|(_, _, _, e)| e).collect();
+                ws.set_text(&opf_for_apply, apply_edits(&text, edits));
+            }
+        }),
+    }]
+}
+
+/// For each image in `wanted`, the edit to the one manifest item whose `href`
+/// resolves to it, as `(path, declared, actual, edit)`. An image is skipped when
+/// no item or two resolve to it, or the item no longer declares the reported
+/// type. `None` when the package does not parse or nothing is left.
+fn compute_image_media_type_edits(
+    opf: &str,
+    opf_path: &str,
+    wanted: &BTreeMap<String, (String, String)>,
+) -> Option<Vec<(String, String, String, MetaEdit)>> {
+    let doc = parse_xml(opf)?;
+    let base = dir_of(opf_path);
+    let items: Vec<_> = doc
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "manifest")
+        .flat_map(|m| m.children())
+        .filter(|n| n.is_element() && n.tag_name().name() == "item")
+        .collect();
+    let mut out = Vec::new();
+    for (path, (declared, actual)) in wanted {
+        let key = nfc(path);
+        let mut hits = items.iter().filter(|n| {
+            n.attr_no_ns("href")
+                .is_some_and(|h| nfc(&resolve(&base, h)) == key)
+        });
+        let (Some(item), None) = (hits.next(), hits.next()) else {
+            continue;
+        };
+        if item.attr_no_ns("media-type").map(base_media_type) != Some(declared.as_str()) {
+            continue;
+        }
+        let Some(attr) = item.attribute_node("media-type") else {
+            continue;
+        };
+        out.push((
+            path.clone(),
+            declared.clone(),
+            actual.clone(),
+            MetaEdit {
+                range: attr.range(),
+                replacement: format!("media-type=\"{actual}\""),
+            },
+        ));
+    }
+    (!out.is_empty()).then_some(out)
 }
 
 /// Whether a declared media type is `text/html`, compared as epubveri compares it
@@ -12982,6 +13433,339 @@ mod tests {
             column: at.col,
         });
         assert!(html_media_type(&report, &ws).is_empty());
+    }
+
+    // ---- fix.image_media_type -----------------------------------------
+
+    /// A 1×1 greyscale PNG, whole enough that epubveri reads its dimensions.
+    const PNG_1X1: [u8; 67] = [
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x00, 0x00, 0x00, 0x00, 0x3a,
+        0x7e, 0x9b, 0x55, 0x00, 0x00, 0x00, 0x0a, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x60,
+        0x00, 0x00, 0x00, 0x02, 0x00, 0x01, 0x48, 0xaf, 0xa4, 0x71, 0x00, 0x00, 0x00, 0x00, 0x49,
+        0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ];
+
+    /// [`html_mt_book`]'s valid book plus `images/a.<ext>`, holding `bytes` and
+    /// declared `declared`, under `items` manifest entries.
+    fn image_book(
+        version: &str,
+        declared: &str,
+        ext: &str,
+        bytes: &[u8],
+        items: usize,
+    ) -> Workspace {
+        let mut ws = html_mt_book(version, "application/xhtml+xml", XHTML_CHAPTER);
+        let opf = ws.get_text("content.opf").unwrap();
+        let item: String = (0..items)
+            .map(|i| {
+                format!(r#"<item id="img{i}" href="images/a.{ext}" media-type="{declared}"/>"#)
+            })
+            .collect();
+        ws.set_text(
+            "content.opf",
+            opf.replace("</manifest>", &format!("{item}</manifest>")),
+        );
+        ws.set_bytes(&format!("images/a.{ext}"), bytes.to_vec());
+        ws
+    }
+
+    /// Sapiens on the shelf: `kolektif.jpg` holds a PNG and is declared
+    /// `image/jpeg`. The declaration moves; the name keeps its extension.
+    #[test]
+    fn a_png_declared_jpeg_is_declared_png() {
+        for version in ["2.0", "3.0"] {
+            let mut ws = image_book(version, "image/jpeg", "jpg", &PNG_1X1, 1);
+            assert_eq!(count_id(&ws, "OPF-029"), 1, "the fixture must carry it");
+            let fixes = image_media_type(&ws.detect().unwrap(), &ws);
+            assert_eq!(fixes.len(), 1, "{version}");
+            assert_eq!(fixes[0].tier, Tier::ConfirmNeeded);
+            fixes.into_iter().next().unwrap().apply(&mut ws);
+            let opf = ws.get_text("content.opf").unwrap();
+            assert!(
+                opf.contains(r#"href="images/a.jpg" media-type="image/png""#),
+                "{opf}"
+            );
+            assert_eq!(count_id(&ws, "OPF-029"), 0, "{version}");
+            assert!(ws.names().any(|n| n == "images/a.jpg"));
+        }
+    }
+
+    /// With a `.png` name the detector goes on to read the dimensions once the
+    /// declaration agrees; a whole PNG has them, and nothing new is reported.
+    #[test]
+    fn a_relabelled_image_draws_no_new_finding() {
+        let mut ws = image_book("3.0", "image/gif", "png", &PNG_1X1, 1);
+        let before = ws.detect().unwrap().messages.len();
+        let fixes = image_media_type(&ws.detect().unwrap(), &ws);
+        fixes.into_iter().next().unwrap().apply(&mut ws);
+        assert_eq!(ws.detect().unwrap().messages.len(), before - 1);
+    }
+
+    /// A TIFF or a WebP behind a core declaration needs converting.
+    #[test]
+    fn a_file_of_a_type_not_core_in_both_versions_declines() {
+        let tiff = [b"II\x2a\x00".as_slice(), &[0u8; 64]].concat();
+        let webp = [b"RIFF\x00\x00\x00\x00WEBP".as_slice(), &[0u8; 64]].concat();
+        for (bytes, actual) in [(tiff, "image/tiff"), (webp, "image/webp")] {
+            let ws = image_book("3.0", "image/png", "png", &bytes, 1);
+            let report = ws.detect().unwrap();
+            assert!(
+                report
+                    .messages
+                    .iter()
+                    .any(|m| m.rule == Some(DECLARED_MEDIA_TYPE_MISMATCH)
+                        && m.params.get(1).map(String::as_str) == Some(actual)),
+                "the fixture must carry {actual}"
+            );
+            assert!(image_media_type(&report, &ws).is_empty(), "{actual}");
+        }
+    }
+
+    fn mismatch(path: &str, declared: &str, actual: &str) -> epubveri::report::Message {
+        epubveri::report::Message {
+            location: Some(path.to_string()),
+            params: vec![declared.to_string(), actual.to_string()],
+            ..fixture("OPF-029", DECLARED_MEDIA_TYPE_MISMATCH)
+        }
+    }
+
+    fn report_of(messages: Vec<epubveri::report::Message>) -> Report {
+        Report {
+            messages,
+            ..Default::default()
+        }
+    }
+
+    /// A foreign declaration may carry a fallback chain written for it.
+    #[test]
+    fn a_declaration_that_is_not_core_raster_declines() {
+        let ws = image_book("3.0", "image/bmp", "jpg", &PNG_1X1, 1);
+        let r = report_of(vec![mismatch("images/a.jpg", "image/bmp", "image/png")]);
+        assert!(image_media_type(&r, &ws).is_empty());
+        let ws = image_book("3.0", "image/webp", "jpg", &PNG_1X1, 1);
+        let r = report_of(vec![mismatch("images/a.jpg", "image/webp", "image/png")]);
+        assert_eq!(
+            image_media_type(&r, &ws).len(),
+            1,
+            "WebP is core as a declaration"
+        );
+    }
+
+    #[test]
+    fn two_items_for_one_image_decline() {
+        let ws = image_book("3.0", "image/jpeg", "jpg", &PNG_1X1, 2);
+        let r = report_of(vec![mismatch("images/a.jpg", "image/jpeg", "image/png")]);
+        assert!(image_media_type(&r, &ws).is_empty());
+    }
+
+    /// The item no longer declares what the finding says it does.
+    #[test]
+    fn a_stale_finding_declines() {
+        let ws = image_book("3.0", "image/gif", "jpg", &PNG_1X1, 1);
+        let r = report_of(vec![mismatch("images/a.jpg", "image/jpeg", "image/png")]);
+        assert!(image_media_type(&r, &ws).is_empty());
+    }
+
+    /// The finding names the container path; the item names it relative to
+    /// the package document, percent-encoded.
+    #[test]
+    fn the_item_is_found_by_resolving_its_href() {
+        let ws = container(&[
+            (
+                "META-INF/container.xml",
+                r#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#,
+            ),
+            (
+                "OEBPS/content.opf",
+                r#"<package xmlns="http://www.idpf.org/2007/opf" version="3.0"><manifest><item id="i" href="Images/a%20b.jpg" media-type="image/jpeg"/></manifest></package>"#,
+            ),
+        ]);
+        let r = report_of(vec![mismatch(
+            "OEBPS/Images/a b.jpg",
+            "image/jpeg",
+            "image/png",
+        )]);
+        assert_eq!(image_media_type(&r, &ws).len(), 1);
+    }
+
+    /// The same `[declared, actual]` shape under another rule is not ours.
+    #[test]
+    fn only_the_mismatch_rule_is_read() {
+        let ws = image_book("3.0", "image/jpeg", "jpg", &PNG_1X1, 1);
+        let m = epubveri::report::Message {
+            rule: Some("opf.manifest_item.non_preferred_media_type"),
+            ..mismatch("images/a.jpg", "image/jpeg", "image/png")
+        };
+        assert!(image_media_type(&report_of(vec![m]), &ws).is_empty());
+    }
+
+    #[test]
+    fn a_finding_without_both_params_declines() {
+        let ws = image_book("3.0", "image/jpeg", "jpg", &PNG_1X1, 1);
+        let mut m = mismatch("images/a.jpg", "image/jpeg", "image/png");
+        m.params.pop();
+        assert!(image_media_type(&report_of(vec![m]), &ws).is_empty());
+    }
+
+    // ---- fix.nested_list_in_list -------------------------------------
+
+    /// A valid book of `version` whose chapter has `head` extra in its head
+    /// and `body` as its body, plus `css` as `s.css` when given.
+    fn list_book(version: &str, head: &str, body: &str, css: Option<&str>) -> Workspace {
+        let chapter = format!(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml"><head><title>t</title>{head}</head><body>{body}</body></html>"#
+        );
+        let mut ws = html_mt_book(version, "application/xhtml+xml", &chapter);
+        if let Some(css) = css {
+            ws.set_bytes("s.css", css.as_bytes().to_vec());
+        }
+        ws
+    }
+
+    /// The body after the one proposal is applied, or `None` if there was none.
+    fn nested_moved(mut ws: Workspace) -> Option<String> {
+        let mut fixes = nested_lists_in_lists(&ws.detect().unwrap(), &ws);
+        assert!(fixes.len() <= 1);
+        let fix = fixes.pop()?;
+        assert_eq!(fix.tier, Tier::ConfirmNeeded);
+        fix.apply(&mut ws);
+        assert!(
+            !ws.detect()
+                .unwrap()
+                .messages
+                .iter()
+                .any(|m| is_schema_violation(
+                    m,
+                    "opf.content_document.schema_violation",
+                    ViolationKind::ElementNotAllowed
+                )),
+            "every misplaced list is nested"
+        );
+        let text = ws.get_text("c.html").unwrap();
+        let body = &text[text.find("<body>").unwrap() + 6..text.find("</body>").unwrap()];
+        Some(body.to_string())
+    }
+
+    const TOC: &str = r#"<ul><li><a href="c.html">A</a></li><ul><li>B</li></ul><li>C</li></ul>"#;
+
+    /// [`TOC`] with the misplaced list last, so `li:last-child` moves too.
+    const TOC_LAST: &str =
+        r#"<ul><li><a href="c.html">A</a></li><li>C</li><ul><li>B</li></ul></ul>"#;
+
+    /// The converter's table of contents, epublift's shape on 7 shelf books.
+    #[test]
+    fn a_list_after_an_item_nests_into_it() {
+        for version in ["2.0", "3.0"] {
+            assert_eq!(
+                nested_moved(list_book(version, "", TOC, None)).as_deref(),
+                Some(r#"<ul><li><a href="c.html">A</a><ul><li>B</li></ul></li><li>C</li></ul>"#),
+                "{version}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_run_of_lists_goes_into_the_one_item_before_it() {
+        let body = "<ol><li>A</li>\n<ul><li>B</li></ul>\n<ol><li>C</li></ol>\n<li>D</li></ol>";
+        assert_eq!(
+            nested_moved(list_book("3.0", "", body, None)).as_deref(),
+            Some("<ol><li>A\n<ul><li>B</li></ul>\n<ol><li>C</li></ol></li>\n<li>D</li></ol>")
+        );
+    }
+
+    /// One shelf book nests them three deep (`ul[3]/ul[1]/ul[1]`).
+    #[test]
+    fn misplaced_lists_inside_misplaced_lists_all_nest() {
+        let body = "<ul><li>A</li><ul><li>B</li><ul><li>C</li></ul></ul></ul>";
+        assert_eq!(
+            nested_moved(list_book("3.0", "", body, None)).as_deref(),
+            Some("<ul><li>A<ul><li>B<ul><li>C</li></ul></li></ul></li></ul>")
+        );
+    }
+
+    #[test]
+    fn a_list_with_no_item_before_it_declines() {
+        for body in [
+            "<ul><ul><li>B</li></ul><li>C</li></ul>",
+            "<ul><li>A</li>x<ul><li>B</li></ul></ul>",
+            "<ul><li>A</li><!-- c --><ul><li>B</li></ul></ul>",
+            "<ul><li>A</li><p>x</p><ul><li>B</li></ul></ul>",
+            "<ul><li/><ul><li>B</li></ul></ul>",
+            "<p><ul><li>B</li></ul></p>",
+            "<p><li>A</li><ul><li>B</li></ul></p>",
+            r#"<ul><x:li xmlns:x="urn:x">A</x:li><ul><li>B</li></ul></ul>"#,
+            r#"<ul><li>A</li><ul xmlns="http://www.w3.org/2000/svg"><li>B</li></ul></ul>"#,
+        ] {
+            assert_eq!(
+                nested_moved(list_book("3.0", "", body, None)),
+                None,
+                "{body}"
+            );
+        }
+    }
+
+    /// A selector that matches the same elements either way leaves the move.
+    #[test]
+    fn css_the_move_cannot_change_leaves_it() {
+        let css = "ul ul { margin: 0 } li { color: red } .x::before { content: 'x' } \
+                   @media print { ol li { margin: 0 } } li:first-child {} [";
+        assert!(nested_moved(list_book("3.0", "", TOC, Some(css))).is_some());
+        // An item holding only text is not `:empty`, before or after.
+        let body = "<ul><li>A</li><ul><li>B</li></ul></ul>";
+        assert!(nested_moved(list_book("3.0", "", body, Some("li:empty {}"))).is_some());
+    }
+
+    /// Each of these matches some element of its body differently once the
+    /// list moves (`:link` and `:hover` answer `Unknown`, which declines).
+    #[test]
+    fn css_that_tells_the_positions_apart_declines() {
+        for (css, body) in [
+            ("li > ul { margin: 0 }", TOC),
+            ("ul > ul { margin: 0 }", TOC),
+            ("li ul { margin: 0 }", TOC),
+            ("li:nth-child(3) { color: red }", TOC),
+            ("li + li { color: red }", TOC),
+            ("ul + li { color: red }", TOC),
+            ("li:last-child { color: red }", TOC_LAST),
+            ("li:last-child::after { content: '' }", TOC_LAST),
+            (
+                "li:empty { color: red }",
+                "<ul><li></li><ul><li>B</li></ul></ul>",
+            ),
+            ("@media screen { li > ul { margin: 0 } }", TOC),
+            ("a:hover { color: red }", TOC),
+            ("a:link { color: red }", TOC),
+            ("@namespace h url(http://www.w3.org/1999/xhtml); p {}", TOC),
+            ("p { a { color: red } }", TOC),
+        ] {
+            assert!(
+                nested_moved(list_book("3.0", "", body, None)).is_some(),
+                "{body}"
+            );
+            assert_eq!(
+                nested_moved(list_book("3.0", "", body, Some(css))),
+                None,
+                "{css}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_inline_style_is_read_too() {
+        let style = "<style type=\"text/css\">li > ul { margin: 0 }</style>";
+        assert_eq!(nested_moved(list_book("3.0", style, TOC, None)), None);
+    }
+
+    #[test]
+    fn a_stylesheet_that_does_not_decode_declines() {
+        let mut ws = list_book("3.0", "", TOC, None);
+        ws.set_bytes(
+            "s.css",
+            b"@charset \"utf-8\"; p { content: '\xff' }".to_vec(),
+        );
+        assert_eq!(nested_moved(ws), None);
     }
 
     // ---- fix.dir_case ------------------------------------------------
