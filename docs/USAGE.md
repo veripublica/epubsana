@@ -318,11 +318,12 @@ neither is a file edit. If you see one, either re-save the container yourself or
 use epubsana's own output file for that book.
 
 **You do not need to diff the repaired EPUB against the original.** epubsana
-copies every entry it did not touch through byte-for-byte — same bytes, same
-compression method, same date and time — so an untouched file is identical, and
-`data.changes` already tells you which ones those aren't. What the ZIP writer
-cannot carry is the optional *extra field* in each entry's header (extended
-timestamps and permissions, mostly), so those are not in the written book.
+copies every entry it did not touch through byte-for-byte — its data and both
+of its ZIP headers, extra fields included — so an untouched file is identical,
+and `data.changes` already tells you which ones those aren't. Since 0.36.0 a
+book no fix touched is written back byte-identical to its input, unless it
+holds bytes outside every entry (before the first one, say), which are not
+written.
 
 A complete Python round trip, which is roughly what a Sigil or calibre plugin
 does:
@@ -763,11 +764,11 @@ These invariants hold for every fixer:
 - **No mutation without an approved fix.** In the default mode you approve each
   one; `--auto-safe` auto-approves only *AutoSafe* fixes; `--yes` approves all.
 - **Surgical and content-preserving.** A fix edits only what it must. An entry
-  no fix touched is never decompressed and recompressed — its compressed bytes,
-  compression method and timestamp are copied through as-is, and entry order and
-  directory entries are kept. (The zip local headers themselves are rebuilt by
-  the writer, so a repaired container is not *byte*-identical to its input; every
-  byte of every entry's data is.)
+  no fix touched is never decompressed and recompressed — its data and its
+  local and central ZIP headers are copied through as they are, and entry order
+  (in the file and in the central directory) and directory entries are kept. A
+  rewritten entry keeps its header fields too; only its CRC and sizes follow
+  the new data.
 - **The container is never quietly normalized.** epubsana does not repackage
   anything as a side effect of writing output — not even a `mimetype` entry that
   violates OCF. If your packaging is wrong, epubveri reports it and it stays

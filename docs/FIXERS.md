@@ -550,12 +550,12 @@ carries an extra field, so its contents do not sit at the fixed offset a reader
 looks at. On the test shelf it is a 36-byte field in eight books.
 
 **Fix** (`fix.mimetype_packaging`, AutoSafe). Re-emit the `mimetype` entry first
-and stored, with a header the writer derives, which carries no extra field. One
-edit repairs both findings; when both are present the proposal names `PKG-006`.
-Every other entry keeps its original order, bytes and compression.
+and stored, with its own header fields but no local extra field. One edit
+repairs both findings; when both are present the proposal names `PKG-006`.
+Every other entry keeps its original order, bytes, headers and compression.
 
 **`PKG-005` was invisible until 0.22.0, and that was a bug, not a decline.** The
-writer cannot carry local-header extra fields, and epubsana's "before" report
+writer could not carry local-header extra fields until 0.36.0, and epubsana's "before" report
 used to validate the writer's output rather than the book itself. So `PKG-005`
 never appeared, and three shelf books whose only error it was were reported
 valid, with exit status 0, while the file on disk was not. The before report now

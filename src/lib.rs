@@ -29,6 +29,7 @@ pub mod entities;
 pub mod envelope;
 pub mod fixers;
 pub mod workspace;
+mod zipwrite;
 
 pub use workspace::{Error, Workspace};
 

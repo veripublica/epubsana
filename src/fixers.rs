@@ -8953,8 +8953,8 @@ fn plan_empty_nav_drops(text: &str) -> Option<Vec<MetaEdit>> {
 /// preserves packaging, and this proposes the repair in the open.
 fn mimetype_packaging(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
     // PKG-006 (not first) and PKG-005 (an extra field in its ZIP header) are
-    // repaired by the same edit: re-emit `mimetype` first, stored, with a header
-    // the writer derives — which carries no extra field. PKG-006 leads when both
+    // repaired by the same edit: re-emit `mimetype` first, stored, with its own
+    // header fields but no local extra field. PKG-006 leads when both
     // are present, since moving the entry is the larger change.
     let id = ["PKG-006", "PKG-005"]
         .into_iter()

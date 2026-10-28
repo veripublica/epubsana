@@ -4,33 +4,28 @@
 //! read-only) nor epublift's (which *transforms* — a fixer must preserve, not
 //! modernize).
 //!
-//! **An entry a fix did not touch is never decoded and re-encoded.** The
-//! original archive is retained and such entries are *raw-copied*: identical
-//! compressed bytes, compression method, timestamps and order, directory
-//! entries included. Only entries a fix actually rewrote are re-encoded, and
-//! those keep the compression method the original used.
+//! **An entry a fix did not touch goes out as the bytes it came in as.** The
+//! original archive is retained, and the writer (`zipwrite`, our own
+//! since 0.36.0) copies such an entry's local header, data and data descriptor
+//! verbatim, and its central-directory record verbatim but for the offset of
+//! the local header. Entry order is kept in the file and in the central
+//! directory, each its own, and so is the archive comment. Only entries a fix
+//! actually rewrote are re-encoded; those keep the original's compression
+//! method and header fields, extra fields included, and only CRC, sizes and
+//! the data-descriptor flag follow the new data.
 //!
-//! What this does *not* claim is container byte-identity. The zip writer
-//! derives each local header rather than copying it, so the version-needed
-//! field and the general-purpose hint bits (deflate level, data-descriptor)
-//! come out as the writer's own — measured at ~180 bytes of header per book,
-//! with every byte of every entry's data preserved. Nothing semantic is lost:
-//! the one flag that carries meaning, bit 11 (UTF-8 entry names), is re-derived
-//! from the name itself. Preserving raw headers is not reachable through `zip`'s
-//! public API.
+//! What is *not* kept: bytes outside every entry (before the first local
+//! header, between entries, after the end record), and a ZIP64 field on a
+//! rewritten entry, whose sizes the 32-bit fields then state.
 //!
-//! **Nor does it preserve local-header extra fields, and that one matters.**
-//! The writer derives local headers without them, so every entry of a written
-//! book loses its local extra field (measured 2026-10-01: 338 entries in 10 of
-//! 544 shelf books; mostly timestamp and permission records, never entry data).
-//! One of those fields is a defect: an extra field on `mimetype` is `PKG-005`,
-//! and losing it clears that finding. That is why [`Workspace::detect`] reads
-//! the **original** bytes while nothing has been changed — before 0.22.0 it
-//! validated the writer's output instead, so `PKG-005` was invisible to every
-//! report and three shelf books whose only error it was were called valid.
-//! `fix.mimetype_packaging` now proposes the repair; when another fix writes the
-//! book and that one is declined, the extra field still goes, and the
-//! after-report says so.
+//! Before 0.36.0, `zip`'s writer derived both headers, so every written book
+//! lost its local-header extra fields and an extra field on `mimetype`
+//! (`PKG-005`) was cleared without a fix. That is why [`Workspace::detect`]
+//! reads the **original** bytes while nothing has been changed: from 0.22.0
+//! to 0.35.0, validating the writer's output instead would have hidden
+//! `PKG-005` from every report. It still does, for the bytes outside every
+//! entry. `fix.mimetype_packaging` is the repair for `PKG-005`; when another
+//! fix writes the book and that one is declined, the field stays.
 //!
 //! Otherwise nothing here normalizes the container — not even `mimetype`. If a
 //! book's packaging violates OCF, that is a defect for epubveri to report and a
@@ -42,12 +37,13 @@
 //! is now the only way it can happen, and only a fix calls it.)
 
 use std::collections::{BTreeSet, HashMap};
-use std::io::{Cursor, Read, Write};
+use std::io::{Cursor, Read};
 
 use flate2::read::DeflateDecoder;
 
-use zip::write::SimpleFileOptions;
-use zip::{CompressionMethod, DateTime, ZipArchive, ZipWriter};
+use zip::{CompressionMethod, ZipArchive};
+
+use crate::zipwrite::{Writer, layout};
 
 /// Errors from loading, serializing, or re-validating a [`Workspace`].
 #[derive(Debug)]
@@ -489,97 +485,62 @@ impl Workspace {
 
     /// Re-zip the container, preserving everything a fix did not rewrite.
     ///
-    /// Walks the *original* archive in its own order and raw-copies each entry
-    /// — still compressed, so its bytes, compression method, timestamps and
-    /// directory entries survive exactly. Only [`Workspace::set_bytes`] entries
-    /// are re-encoded, and those keep whatever method the original used. Entries
-    /// added after load (which have no original to preserve) are deflated and
-    /// appended.
+    /// Walks the *original* archive and copies each entry verbatim, headers
+    /// included, in its file order and its central-directory order. Only
+    /// [`Workspace::set_bytes`] entries are re-encoded, and those keep the
+    /// original's method and header fields. Entries added after load (which
+    /// have no original to preserve) are deflated and appended.
     ///
-    /// A book nothing touched therefore serializes with every entry's data
-    /// bit-for-bit intact and its entry order and compression as they arrived —
-    /// but **without local-header extra fields**, which the writer cannot carry
-    /// (see the module docs). That is why [`Workspace::detect`] does not read
-    /// this output while the workspace is untouched.
+    /// A book nothing touched therefore serializes byte-identically, apart from
+    /// bytes outside every entry (see the module docs), which is why
+    /// [`Workspace::detect`] still reads the original while the workspace is
+    /// untouched.
     pub fn serialize(&self) -> Result<Vec<u8>, Error> {
-        let mut buf = Vec::new();
-        {
-            let mut src = ZipArchive::new(Cursor::new(self.original.as_slice()))?;
-            let mut zip = ZipWriter::new(Cursor::new(&mut buf));
-            let mut seen: BTreeSet<String> = BTreeSet::new();
+        let src = self.original.as_slice();
+        let comment = ZipArchive::new(Cursor::new(src))?.comment().to_vec();
+        let mut zip = Writer::new(src);
+        let mut seen: BTreeSet<String> = BTreeSet::new();
 
-            // An approved fix.mimetype_packaging asked for OCF order: mimetype
-            // leads, stored. Its bytes are copied verbatim — only where it sits
-            // and how it is compressed change.
-            let hoisted = self.repackage_mimetype && self.entries.contains_key("mimetype");
-            if hoisted {
-                let stored =
-                    SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
-                zip.start_file("mimetype", stored)?;
-                zip.write_all(&self.entries["mimetype"])?;
-                seen.insert("mimetype".to_string());
+        // An approved fix.mimetype_packaging asked for OCF order: mimetype
+        // leads, stored, with no local extra field. Its bytes are written
+        // unchanged; only where it sits and how it is packaged change.
+        let hoisted = self.repackage_mimetype && self.entries.contains_key("mimetype");
+        for raw in layout(src)? {
+            if raw.is_dir {
+                if !self.dropped_directories.contains(&raw.name) {
+                    zip.copy(&raw); // unless an approved fix dropped it
+                }
+                continue;
             }
-
-            for i in 0..src.len() {
-                let f = src.by_index_raw(i)?;
-                let name = f.name()?.into_owned();
-                if hoisted && name == "mimetype" {
-                    continue; // already written, in its rightful place
-                }
-                if f.is_dir() && self.dropped_directories.contains(&name) {
-                    continue; // an approved fix dropped this empty directory
-                }
-                if !f.is_dir() {
-                    seen.insert(name.clone());
-                }
-                if !self.dirty.contains(&name) {
-                    // Untouched (or a directory entry): copy it through as-is.
-                    // Not `raw_copy_file`: since zip 9 it writes the central
-                    // directory's extra fields into the local header too, which
-                    // can give `mimetype` a local extra field it never had
-                    // (PKG-005), and refuses an Info-ZIP Unix field (0x7875)
-                    // outright. `_touch` with the entry's own time copies what
-                    // zip 8's `raw_copy_file` did: no extra field, either header.
-                    let time = f
-                        .last_modified()
-                        .filter(DateTime::is_valid)
-                        .unwrap_or_else(DateTime::default_for_write);
-                    zip.raw_copy_file_touch(f, time, None)?;
-                    continue;
-                }
-                // Rewritten by a fix: re-encode, but keep the original's method
-                // so a Stored entry does not silently become Deflated.
-                let method = f.compression();
-                drop(f);
-                zip.start_file(
-                    &name,
-                    SimpleFileOptions::default().compression_method(method),
-                )?;
-                zip.write_all(&self.entries[&name])?;
+            seen.insert(raw.name.clone());
+            if hoisted && raw.name == "mimetype" {
+                zip.rewrite(&raw, &self.entries["mimetype"], true)?;
+            } else if self.dirty.contains(&raw.name) {
+                // Rewritten by a fix: re-encoded with the original's method, so
+                // a Stored entry does not silently become Deflated.
+                zip.rewrite(&raw, &self.entries[&raw.name], false)?;
+            } else {
+                zip.copy(&raw);
             }
-
-            // Entries a fix added that the original never had.
-            for name in &self.order {
-                if seen.contains(name) {
-                    continue;
-                }
-                let opts =
-                    SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
-                zip.start_file(name, opts)?;
-                zip.write_all(&self.entries[name])?;
-            }
-            zip.finish()?;
         }
-        Ok(buf)
+
+        // Entries a fix added that the original never had.
+        for name in &self.order {
+            if !seen.contains(name) {
+                zip.add(name, &self.entries[name])?;
+            }
+        }
+        zip.finish(&comment)
     }
 
     /// Run epubveri against the current container state.
     ///
     /// **While nothing has been changed, that state is the original bytes**, and
-    /// they are what is validated. The writer drops local-header extra fields
-    /// (see the module docs), so validating its output instead hid `PKG-005`
-    /// from every "before" report: three shelf books whose only error it was
-    /// were reported valid, with exit status 0, while the file on disk was not.
+    /// they are what is validated. Until 0.36.0 the writer dropped local-header
+    /// extra fields, so validating its output instead hid `PKG-005` from every
+    /// "before" report: three shelf books whose only error it was were reported
+    /// valid, with exit status 0, while the file on disk was not. It still
+    /// leaves out bytes outside every entry (see the module docs).
     /// Once any change is made, the bytes that would be written are the state,
     /// and those are validated.
     pub fn detect(&self) -> Result<epubveri::report::Report, Error> {
@@ -591,7 +552,7 @@ impl Workspace {
 
     /// No entry rewritten and no packaging change requested: what
     /// [`Workspace::serialize`] would write is the book as it arrived, apart from
-    /// what the writer cannot carry. A [`Workspace::seek`] back to the start
+    /// bytes outside every entry. A [`Workspace::seek`] back to the start
     /// restores this, since the journal restores the dirty set and the flag.
     fn is_untouched(&self) -> bool {
         self.dirty.is_empty() && !self.repackage_mimetype && self.dropped_directories.is_empty()
@@ -601,6 +562,9 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+    use zip::ZipWriter;
+    use zip::write::SimpleFileOptions;
 
     /// A container that deliberately breaks OCF: `mimetype` is neither first nor
     /// stored. It also carries a directory entry and a Stored non-mimetype entry
@@ -720,7 +684,7 @@ mod tests {
     }
 
     /// **The bug this guards against:** `detect()` used to validate the
-    /// writer's output, which cannot carry local-header extra fields, so an
+    /// writer's output, which until 0.36.0 dropped local-header extra fields, so an
     /// untouched book's `PKG-005` was invisible and a book whose only error it
     /// was got called valid.
     #[test]
@@ -732,21 +696,23 @@ mod tests {
         );
         let ws = Workspace::load(&bytes).unwrap();
         assert!(has_pkg005(&ws.detect().unwrap()));
-        // The limit the fix works around, pinned so a zip upgrade that starts
-        // carrying extra fields is noticed rather than assumed.
-        assert!(!has_pkg005(&epubveri::validate_bytes(
+        // Since 0.36.0 the writer copies the field too, so its output carries
+        // the finding as well.
+        assert!(has_pkg005(&epubveri::validate_bytes(
             ws.serialize().unwrap()
         )));
     }
 
-    /// Once anything changes, the bytes that would be written are validated,
-    /// and a seek back to the start makes the book untouched again.
+    /// Once anything changes, the bytes that would be written are validated:
+    /// an edit elsewhere leaves `mimetype`'s extra field where it was, and
+    /// only the approved repackaging removes it.
     #[test]
     fn a_changed_book_is_validated_as_it_would_be_written() {
         let mut ws = Workspace::load(&mimetype_with_extra_field()).unwrap();
         let start = ws.checkpoint();
         ws.set_text("META-INF/container.xml", "<container />".to_string());
-        assert!(!has_pkg005(&ws.detect().unwrap()));
+        assert!(!ws.is_untouched());
+        assert!(has_pkg005(&ws.detect().unwrap()));
         ws.seek(start);
         assert!(has_pkg005(&ws.detect().unwrap()));
         ws.repackage_mimetype();
@@ -863,12 +829,11 @@ mod tests {
         (at(b"PK\x03\x04", 30, 28), at(b"PK\x01\x02", 46, 30))
     }
 
-    /// An untouched entry is copied with no extra field in either header, as
-    /// under zip 8. zip 9's `raw_copy_file` refuses an Info-ZIP Unix field
-    /// (0x7875) without its "unreserved" feature, which stopped a shelf book
-    /// from being written.
+    /// An untouched entry keeps an Info-ZIP Unix field (0x7875) in both
+    /// headers. zip 9.0's `raw_copy_file` refused one, which stopped a shelf
+    /// book from being written; our writer copies the headers it was given.
     #[test]
-    fn an_untouched_entry_with_a_unix_extra_field_is_copied_without_it() {
+    fn an_untouched_entry_keeps_a_unix_extra_field() {
         let mut epub = Vec::new();
         {
             let mut zip = ZipWriter::new(Cursor::new(&mut epub));
@@ -892,7 +857,349 @@ mod tests {
         }
         assert_eq!(extra_lengths(&epub, "text.html"), (9, 9));
         let out = Workspace::load(&epub).unwrap().serialize().unwrap();
-        assert_eq!(extra_lengths(&out, "text.html"), (0, 0));
+        assert_eq!(out, epub);
+    }
+
+    /// An archive with what `zip`'s writer cannot copy: a local-only and a
+    /// central-only extra field, an entry comment, unusual external attributes,
+    /// a stored entry with version 2.0 (zip 9.1.3 rewrote it to 1.0), and an
+    /// archive comment.
+    fn header_rich_epub() -> Vec<u8> {
+        let mut buf = Vec::new();
+        {
+            let mut zip = ZipWriter::new(Cursor::new(&mut buf));
+            let stored = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+            zip.start_file("mimetype", stored).unwrap();
+            zip.write_all(b"application/epub+zip").unwrap();
+            let mut local_only = zip::write::FullFileOptions::default()
+                .compression_method(CompressionMethod::Deflated)
+                .unix_permissions(0o600);
+            local_only
+                .add_extra_field(0x5455, [1u8, 1, 2, 3, 4], false)
+                .unwrap();
+            zip.start_file("a.html", local_only).unwrap();
+            zip.write_all(b"<html><body>a a a a</body></html>").unwrap();
+            let mut central_only = zip::write::FullFileOptions::default()
+                .compression_method(CompressionMethod::Stored)
+                .with_file_comment("an entry comment");
+            central_only
+                .add_extra_field(0x6666, [9u8, 8, 7], true)
+                .unwrap();
+            zip.start_file("b.css", central_only).unwrap();
+            zip.write_all(b"p { a: b }").unwrap();
+            zip.set_comment("an archive comment").unwrap();
+            zip.finish().unwrap();
+        }
+        // b.css's version fields to 2.0, in both headers.
+        let at = |buf: &[u8], sig: &[u8], name_at: usize| {
+            (0..buf.len())
+                .find(|&i| buf[i..].starts_with(sig) && buf[i + name_at..].starts_with(b"b.css"))
+                .unwrap()
+        };
+        let l = at(&buf, b"PK\x03\x04", 30);
+        buf[l + 4] = 20;
+        let c = at(&buf, b"PK\x01\x02", 46);
+        buf[c + 4] = 20;
+        buf[c + 6] = 20;
+        buf
+    }
+
+    /// The writer's promise in its strongest form: an archive with no bytes
+    /// outside its entries comes back byte-identical when nothing touched it.
+    #[test]
+    fn an_untouched_book_is_written_byte_identically() {
+        for epub in [
+            awkward_epub(),
+            header_rich_epub(),
+            mimetype_with_extra_field(),
+        ] {
+            let out = Workspace::load(&epub).unwrap().serialize().unwrap();
+            assert_eq!(out, epub);
+        }
+    }
+
+    /// A streamed archive puts sizes and CRC in a data descriptor after each
+    /// entry's data (bit 3): untouched, the descriptor is copied with it; a
+    /// rewritten entry states its sizes in its header and drops the flag.
+    #[test]
+    fn a_data_descriptor_is_copied_or_dropped_with_its_entry() {
+        let mut epub = Vec::new();
+        {
+            let mut zip = ZipWriter::new_stream(&mut epub);
+            let stored = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+            zip.start_file("mimetype", stored).unwrap();
+            zip.write_all(b"application/epub+zip").unwrap();
+            for name in ["a.html", "b.html"] {
+                zip.start_file(name, SimpleFileOptions::default()).unwrap();
+                zip.write_all(b"<html><body>streamed</body></html>")
+                    .unwrap();
+            }
+            zip.finish().unwrap();
+        }
+        let raws = layout(&epub).unwrap();
+        assert!(raws.iter().any(|r| epub[r.local.start + 6] & 0x08 != 0));
+        assert_eq!(Workspace::load(&epub).unwrap().serialize().unwrap(), epub);
+
+        let mut ws = Workspace::load(&epub).unwrap();
+        ws.set_text("a.html", "<html>new</html>".into());
+        let out = ws.serialize().unwrap();
+        let after = layout(&out).unwrap();
+        let a = after.iter().find(|r| r.name == "a.html").unwrap();
+        assert_eq!(out[a.local.start + 6] & 0x08, 0);
+        assert_eq!(out[a.central.start + 8] & 0x08, 0);
+        let b = |raws: &[crate::zipwrite::Raw], bytes: &[u8]| {
+            let r = raws.iter().find(|r| r.name == "b.html").unwrap();
+            bytes[r.local.clone()].to_vec()
+        };
+        assert_eq!(
+            b(&after, &out),
+            b(&raws, &epub),
+            "b.html was not copied whole"
+        );
+        let mut z = ZipArchive::new(Cursor::new(out)).unwrap();
+        for (name, want) in [
+            ("a.html", &b"<html>new</html>"[..]),
+            ("b.html", b"<html><body>streamed</body></html>"),
+        ] {
+            let mut got = Vec::new();
+            z.by_name(name).unwrap().read_to_end(&mut got).unwrap();
+            assert_eq!(got, want, "{name}");
+        }
+    }
+
+    /// A streamed archive: every entry is followed by a data descriptor, 24
+    /// bytes long when `large` makes the local headers carry a ZIP64 field.
+    fn streamed_epub(large: bool) -> Vec<u8> {
+        let mut epub = Vec::new();
+        {
+            let mut zip = ZipWriter::new_stream(&mut epub);
+            let opts = SimpleFileOptions::default().large_file(large);
+            for name in ["a.html", "b.html"] {
+                zip.start_file(name, opts).unwrap();
+                zip.write_all(b"<html><body>streamed</body></html>")
+                    .unwrap();
+            }
+            zip.finish().unwrap();
+        }
+        epub
+    }
+
+    /// `epub` without the bytes `cut`, which lie inside one entry's local
+    /// part, with every offset after them moved back.
+    fn without(epub: &[u8], cut: std::ops::Range<usize>) -> Vec<u8> {
+        let len = cut.len();
+        let moved = |o: usize| if o >= cut.end { o - len } else { o };
+        let mut out = epub.to_vec();
+        out.drain(cut.clone());
+        for r in layout(epub).unwrap() {
+            let c = moved(r.central.start);
+            let o = u32::from_le_bytes(out[c + 42..c + 46].try_into().unwrap()) as usize;
+            out[c + 42..c + 46].copy_from_slice(&(moved(o) as u32).to_le_bytes());
+        }
+        let e = out.len() - 22;
+        let cd = u32::from_le_bytes(out[e + 16..e + 20].try_into().unwrap()) as usize;
+        out[e + 16..e + 20].copy_from_slice(&(moved(cd) as u32).to_le_bytes());
+        out
+    }
+
+    /// The end of `name`'s data in `epub`, where its descriptor begins.
+    fn data_end(epub: &[u8], name: &str) -> usize {
+        let mut z = ZipArchive::new(Cursor::new(epub.to_vec())).unwrap();
+        let f = z.by_name(name).unwrap();
+        (f.data_start().unwrap() + f.compressed_size()) as usize
+    }
+
+    /// Every form a descriptor takes is copied whole and alone: with or
+    /// without its signature, 16 or 24 bytes, or missing, where the next
+    /// entry's header follows the data at once.
+    #[test]
+    fn every_form_of_data_descriptor_is_copied_whole_and_alone() {
+        let plain = streamed_epub(false);
+        let large = streamed_epub(true);
+        let d = data_end(&large, "a.html");
+        assert_eq!(&large[d..d + 4], b"PK\x07\x08");
+        assert!(
+            large[d + 24..].starts_with(b"PK\x03\x04"),
+            "a 24-byte descriptor"
+        );
+        let d = data_end(&plain, "a.html");
+        let unsigned = without(&plain, d..d + 4);
+        let missing = without(&plain, d..d + 16);
+        assert!(missing[d..].starts_with(b"PK\x03\x04"));
+        for epub in [plain, large, unsigned, missing] {
+            let out = Workspace::load(&epub).unwrap().serialize().unwrap();
+            assert_eq!(out, epub);
+            let mut ws = Workspace::load(&epub).unwrap();
+            ws.set_text("b.html", "<html/>".into());
+            let out = ws.serialize().unwrap();
+            let pick = |bytes: &[u8]| {
+                let r = layout(bytes).unwrap().into_iter().next().unwrap();
+                bytes[r.local].to_vec()
+            };
+            assert_eq!(pick(&out), pick(&epub), "a.html took a neighbour's bytes");
+            let mut got = Vec::new();
+            ZipArchive::new(Cursor::new(out))
+                .unwrap()
+                .by_name("b.html")
+                .unwrap()
+                .read_to_end(&mut got)
+                .unwrap();
+            assert_eq!(got, b"<html/>");
+        }
+    }
+
+    /// An entry whose stated size runs into the next entry's header (the
+    /// shape of a "cloaked" archive, which `zip` loads) is still copied with
+    /// all the data it claims: the descriptor search starts where the data
+    /// ends, not where the next header does.
+    #[test]
+    fn an_entry_overlapping_the_next_is_copied_with_all_its_data() {
+        let mut epub = streamed_epub(false);
+        let a = layout(&epub).unwrap().remove(0);
+        let c = a.central.start;
+        let csize = u32::from_le_bytes(epub[c + 20..c + 24].try_into().unwrap()) + 20;
+        epub[c + 20..c + 24].copy_from_slice(&csize.to_le_bytes());
+        let claimed = a.local.start..data_end(&epub, "a.html");
+        assert!(
+            claimed.end > layout(&epub).unwrap()[1].local.start,
+            "must overlap"
+        );
+        let out = Workspace::load(&epub).unwrap().serialize().unwrap();
+        let copied = layout(&out).unwrap().remove(0).local;
+        assert!(out[copied].starts_with(&epub[claimed]));
+    }
+
+    /// `zip` loads an entry that claims more bytes than the archive holds, as
+    /// far as they go. There is no whole entry to copy, so nothing is written.
+    #[test]
+    fn an_entry_past_the_end_of_the_archive_is_not_written() {
+        let epub = patch_headers(awkward_epub(), "text.html", 18, 20, 0x7FFF_FFFF);
+        let ws = Workspace::load(&epub).unwrap();
+        assert!(refused_write(ws.serialize()));
+    }
+
+    fn refused_write(r: Result<Vec<u8>, Error>) -> bool {
+        matches!(r, Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::InvalidData)
+    }
+
+    /// The bytes of `epub` with its central directory's records reversed, so
+    /// the file order and the central-directory order of its entries differ.
+    fn with_central_reversed(epub: &[u8]) -> Vec<u8> {
+        let raws = layout(epub).unwrap();
+        let cd = raws.iter().map(|r| r.central.start).min().unwrap();
+        let mut out = epub[..cd].to_vec();
+        for r in raws.iter().rev() {
+            out.extend_from_slice(&epub[r.central.clone()]);
+        }
+        let end = raws.iter().map(|r| r.central.end).max().unwrap();
+        out.extend_from_slice(&epub[end..]);
+        out
+    }
+
+    /// epubveri judges `PKG-006` on the file's leading bytes since 0.35.0, so
+    /// the file order is packaging and is kept, apart from the central
+    /// directory's.
+    #[test]
+    fn file_order_and_central_order_are_each_kept() {
+        let epub = with_central_reversed(&header_rich_epub());
+        assert_eq!(entry_names(&epub), ["b.css", "a.html", "mimetype"]);
+        assert_eq!(Workspace::load(&epub).unwrap().serialize().unwrap(), epub);
+        let mut ws = Workspace::load(&epub).unwrap();
+        ws.set_text("a.html", "<html/>".into());
+        let out = ws.serialize().unwrap();
+        assert_eq!(entry_names(&out), ["b.css", "a.html", "mimetype"]);
+        assert!(out.starts_with(b"PK\x03\x04") && out[30..].starts_with(b"mimetype"));
+    }
+
+    /// Bytes before the first entry are not part of any entry, and are not
+    /// written; every entry still is, at its new offset.
+    #[test]
+    fn bytes_before_the_first_entry_are_not_written() {
+        let epub = header_rich_epub();
+        let mut prefixed = b"junk!".to_vec();
+        prefixed.extend_from_slice(&epub);
+        let ws = Workspace::load(&prefixed).unwrap();
+        assert_eq!(ws.serialize().unwrap(), epub);
+    }
+
+    /// A rewritten entry keeps every header field but those its new data
+    /// decides: time, extra fields, comment and attributes stay.
+    #[test]
+    fn a_rewritten_entry_keeps_its_header_fields() {
+        let epub = header_rich_epub();
+        let mut ws = Workspace::load(&epub).unwrap();
+        ws.set_text("a.html", "<html>edited</html>".into());
+        ws.set_text("b.css", "p { a: c }".into());
+        let out = ws.serialize().unwrap();
+        let (before, after) = (layout(&epub).unwrap(), layout(&out).unwrap());
+        for name in ["a.html", "b.css"] {
+            let pick = |raws: &[crate::zipwrite::Raw], bytes: &[u8]| {
+                let r = raws.iter().find(|r| r.name == name).unwrap().clone();
+                let (l, c) = (&bytes[r.local.clone()], &bytes[r.central.clone()]);
+                let ln = u16::from_le_bytes([l[26], l[27]]) as usize;
+                let lx = u16::from_le_bytes([l[28], l[29]]) as usize;
+                // Local: version, flags, method, time, date; name and extra.
+                let mut keep = l[4..14].to_vec();
+                keep.extend_from_slice(&l[30..30 + ln + lx]);
+                // Central: made by .. date, then attributes, name, extra, comment.
+                keep.extend_from_slice(&c[4..16]);
+                keep.extend_from_slice(&c[28..42]);
+                keep.extend_from_slice(&c[46..]);
+                keep
+            };
+            assert_eq!(pick(&after, &out), pick(&before, &epub), "{name}");
+        }
+        let mut z = ZipArchive::new(Cursor::new(out)).unwrap();
+        assert_eq!(z.comment(), b"an archive comment");
+        let mut got = String::new();
+        z.by_name("b.css")
+            .unwrap()
+            .read_to_string(&mut got)
+            .unwrap();
+        assert_eq!(got, "p { a: c }");
+    }
+
+    /// A ZIP64 field states sizes the writer now puts in the 32-bit fields, so
+    /// a rewritten entry goes without it; an untouched one keeps it.
+    #[test]
+    fn a_rewritten_entry_drops_its_zip64_field() {
+        let mut epub = Vec::new();
+        {
+            let mut zip = ZipWriter::new(Cursor::new(&mut epub));
+            let large = SimpleFileOptions::default().large_file(true);
+            for name in ["a.html", "b.html"] {
+                zip.start_file(name, large).unwrap();
+                zip.write_all(b"<html/>").unwrap();
+            }
+            zip.finish().unwrap();
+        }
+        let has_zip64 = |bytes: &[u8], name: &str| {
+            let r = layout(bytes)
+                .unwrap()
+                .into_iter()
+                .find(|r| r.name == name)
+                .unwrap();
+            let l = &bytes[r.local.clone()];
+            let (ln, lx) = (
+                u16::from_le_bytes([l[26], l[27]]) as usize,
+                u16::from_le_bytes([l[28], l[29]]) as usize,
+            );
+            l[30 + ln..30 + ln + lx].starts_with(&[1, 0])
+        };
+        assert!(has_zip64(&epub, "a.html") && has_zip64(&epub, "b.html"));
+        let mut ws = Workspace::load(&epub).unwrap();
+        ws.set_text("a.html", "<html>x</html>".into());
+        let out = ws.serialize().unwrap();
+        assert!(!has_zip64(&out, "a.html"));
+        assert!(has_zip64(&out, "b.html"));
+        let mut got = String::new();
+        ZipArchive::new(Cursor::new(out))
+            .unwrap()
+            .by_name("a.html")
+            .unwrap()
+            .read_to_string(&mut got)
+            .unwrap();
+        assert_eq!(got, "<html>x</html>");
     }
 
     fn refused(r: Result<Workspace, Error>) -> bool {
