@@ -43,6 +43,7 @@ zip 9.1.3.
   engine reads it that way today.
 - A stylesheet labelled with the `replacement` encoding (`iso-2022-kr` and
   four others) is read as UTF-8, as epubveri and epubcheck read it.
+- The demo page uses family-web template v7 (no visible change).
 
 ## [0.35.0] - 2026-10-23
 
