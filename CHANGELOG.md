@@ -8,7 +8,7 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
-## [Unreleased]
+## [0.36.0] - 2026-10-28
 
 epubsana now writes EPUB containers itself, so a book nothing touched comes
 back byte-identical. Also the move to epubveri 0.35.0, with styloria 0.17 and
