@@ -11979,6 +11979,21 @@ mod tests {
         assert!(IdSelector::Id("ID_09".into()).tells_apart("09", "id_09"));
     }
 
+    /// `◰` is a name character before w3c/csswg-drafts#7129 and a delim after
+    /// it, so these references hold in one reading only (`narrowed_ident`).
+    /// They count: every engine today reads the old way, and renaming the id
+    /// without the selector would break the rule there.
+    #[test]
+    fn a_reference_held_in_one_reading_counts() {
+        let mut out = Vec::new();
+        collect_id_selectors("#\u{25f0} { a: b }\n[id=\u{25f0}] { a: b }", &mut out);
+        assert!(matches!(
+            &out[..],
+            [IdSelector::Id(a), IdSelector::Attr { value: b, .. }]
+                if a == "\u{25f0}" && b == "\u{25f0}"
+        ));
+    }
+
     /// A cover image reliably contains the bytes `#1` somewhere. Scanning it
     /// cost ten repairable ids on a real book before this filter existed.
     #[test]

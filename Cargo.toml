@@ -177,6 +177,18 @@ members = ["epubsana-wasm"]
 #   and 50 renames, so a `params` answer that failed to arrive would have deleted
 #   every one of them.
 #
+#   **0.35.0 (2026-10-28) is a TRACKING floor, taken with styloria 0.17 and
+#   zip 9.1.3.** It spans 0.34.0 (styloria 0.17, zip 9.1.3; byte-identical on
+#   their 1677 books) and 0.35.0 (a damaged ZIP read as epubcheck's Java reader
+#   reads it; `PKG-006`, which `fix.mimetype_packaging` dispatches on, judged on
+#   the file's leading bytes). Measured on 562 books (0.33.0 vs 0.35.0, the
+#   linked version printed by both binaries): per-book census, plan and
+#   outcomes identical. With it: `narrowed_ident` references count as live in
+#   `collect_id_selectors`, and `get_text` keeps lossy UTF-8 for a
+#   `replacement`-labelled sheet, as epubveri does. zip 9.1.3 changed what its
+#   writer derives for entries we copy, so 0.36.0 writes containers itself
+#   (`src/zipwrite.rs`); see the zip line below.
+#
 #   **0.33.0 (2026-10-23) is a TRACKING floor, taken with styloria 0.16.**
 #   It spans 0.32.0 (styloria 0.16: `css.stylesheet.misplaced_at_rule`, a
 #   new CSS-008 key, by default; ADV-019..023 only under `advisory`, which we
@@ -413,27 +425,29 @@ members = ["epubsana-wasm"]
 #
 # For local co-development of epubveri, add an uncommitted override:
 #   [patch.crates-io] epubveri = { path = "../epubveri" }
-epubveri = "0.33.0"
+epubveri = "0.35.0"
 # CSS, located: the family's own parser, taken directly as a peer (Baris,
 # 2026-10-18; epubveri will not re-export it). Two conditions. **One styloria
-# in the lock**: the requirement is epubveri's own (`0.16`), so the text we
+# in the lock**: the requirement is epubveri's own (`0.17`), so the text we
 # parse is the text it parsed, and `scripts/preflight.sh` fails on any
 # duplicate in `cargo tree -d`. **styloria locates, it never decides**: which
 # url is missing or which id is invalid is still epubveri's finding; styloria
 # only says where a rule is, which selectors name an id, and how to decode and
 # re-encode a stylesheet byte for byte. None of its types is in our public API.
-styloria = "0.16"
+styloria = "0.17"
 # Pure-Rust only (no C deps), same philosophy as epubveri: zip's "deflate"
 # feature uses zlib-rs (Rust); bzip2/zstd (C) stay disabled.
-# Aligned to epubveri's zip major — the family shares one zip version because
-# epubsana re-emits containers epubveri reads. 9.x because every zip below 9.0.0
-# fails `cargo audit` (RUSTSEC-2026-0367/0368/0369, all in `extract`, which we
-# never call). NB: 8.x's deflate backend differs from 2.x, so
-# repaired files' bytes change (same content, still deterministic).
-zip = { version = "9.0.4", default-features = false, features = ["deflate"] }
+# Aligned to epubveri's zip — the family shares one zip version because
+# epubsana reads containers as epubveri reads them. **Reading only** since
+# 0.36.0: `src/zipwrite.rs` writes, copying untouched entries verbatim. 9.1.3
+# because 9.0.4 carries GHSA-m665-v7pm-7grj (critical; fixed in 9.0.5),
+# GHSA-gmfj-vffv-32pw and GHSA-wjr6-mhvj-cjvm (fixed in 9.1.0); family
+# dependency report 2026-10-28. All three are about reading, which we do.
+zip = { version = "9.1.3", default-features = false, features = ["deflate"] }
 # Inflates stored and deflated entries from their raw bytes in
 # `Workspace::load`, as epubveri does: zip 9 refuses an entry longer than its
-# header declares, and one with a wrong CRC, where epubcheck reads both. Same
+# header declares, and one with a wrong CRC, where epubcheck reads both. It
+# also deflates rewritten and added entries in `src/zipwrite.rs`. Same
 # version and pure-Rust backend as zip's own "deflate" feature selects.
 flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
 # NFC, to compare a resolved reference with a ZIP entry name as the validator

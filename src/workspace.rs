@@ -307,12 +307,16 @@ impl Workspace {
     /// Syntax 3 says and as epubveri decodes it (`styloria::decode_stylesheet`
     /// with no protocol or referring-document label: a BOM, then a byte-exact
     /// `@charset`, then UTF-8), without its BOM, so a span from parsing it is
-    /// a span in the text epubveri parsed. Everything else, and a stylesheet in
-    /// an encoding styloria does not decode, is UTF-8 (lossy).
+    /// a span in the text epubveri parsed. Everything else, a stylesheet in an
+    /// encoding styloria does not decode, and one labelled with the
+    /// `replacement` encoding is UTF-8 (lossy): styloria decodes `replacement`
+    /// to one U+FFFD as the Encoding Standard says, but epubcheck reads such a
+    /// sheet as UTF-8, and so does epubveri.
     pub fn get_text(&self, name: &str) -> Option<String> {
         let bytes = self.entries.get(name)?;
         if is_stylesheet(name)
             && let Ok(d) = styloria::decode_stylesheet(bytes, None, None)
+            && d.encoding.name() != "replacement"
         {
             return Some(d.text.into_owned());
         }
@@ -653,6 +657,17 @@ mod tests {
         assert_eq!(text, "p { a: b }", "the BOM is not text");
         ws.set_text("s.css", "p { a: c }".to_string());
         assert_eq!(ws.entries["s.css"], b"\xef\xbb\xbfp { a: c }");
+    }
+
+    /// `iso-2022-kr` is a `replacement` label: styloria decodes the sheet to
+    /// one U+FFFD, while epubcheck and epubveri read it as UTF-8. A span
+    /// from parsing it must be a span in the text epubveri parsed.
+    #[test]
+    fn a_replacement_labelled_stylesheet_is_read_as_utf8() {
+        let css = b"@charset \"iso-2022-kr\";\np { a: b }";
+        let ws = with_entries(&[("s.css", css)]);
+        assert_eq!(ws.get_text("s.css").unwrap(), String::from_utf8_lossy(css));
+        assert!(!ws.text_round_trips("s.css"));
     }
 
     /// A stylesheet with a byte that does not decode cannot be written back

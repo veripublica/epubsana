@@ -43,4 +43,4 @@ tsify = { version = "0.5", features = ["js"] }
 
 [dev-dependencies]
 # Only to build fixture EPUBs in the tests; the same zip the core uses.
-zip = { version = "9.0.4", default-features = false, features = ["deflate"] }
+zip = { version = "9.1.3", default-features = false, features = ["deflate"] }

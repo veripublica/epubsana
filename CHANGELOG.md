@@ -8,6 +8,42 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [Unreleased]
+
+epubsana now writes EPUB containers itself, so a book nothing touched comes
+back byte-identical. Also the move to epubveri 0.35.0, with styloria 0.17 and
+zip 9.1.3.
+
+### Changed
+
+- **Our own container writer.** An entry no fix touched is copied as it
+  arrived: its data, its local header and its central-directory record, extra
+  fields included. Only the local header's offset changes. Entry order is kept
+  in the file and in the central directory, and so is the archive comment. An
+  entry a fix rewrote keeps its header fields (time, extra fields, comment,
+  attributes); only CRC and sizes follow the new data. Bytes outside every
+  entry (before the first, between two, after the end record) are not written.
+  - Before, `zip`'s writer derived both headers. Every written book lost its
+    local-header extra fields, and zip 9.1.3 would also have rewritten the
+    version fields of stored entries and copied some extra fields from one
+    header into the other.
+  - Measured on our 562-book shelf (2026-10-28): every book, written without
+    a fix, is byte-identical to its input. Findings, plans and fix outcomes
+    are identical to 0.35.0's in all 562 books.
+  - Since local extra fields are now kept, a `mimetype` entry's extra field
+    (`PKG-005`) is no longer cleared as a side effect when other fixes are
+    applied and `fix.mimetype_packaging` is declined. The after-report shows
+    it, as it is in the file.
+- **epubveri 0.35.0** (was 0.33.0), **styloria 0.17** (was 0.16) and **zip
+  9.1.3** (was 9.0.4). zip 9.0.4 carries three advisories about reading
+  archives (GHSA-m665-v7pm-7grj, GHSA-gmfj-vffv-32pw, GHSA-wjr6-mhvj-cjvm).
+  epubveri 0.35.0 reads a damaged ZIP as epubcheck's Java reader does.
+- An id rename now counts a selector that names the id only under the CSS
+  Syntax reading before w3c/csswg-drafts#7129 (`#◰`) as naming it, since every
+  engine reads it that way today.
+- A stylesheet labelled with the `replacement` encoding (`iso-2022-kr` and
+  four others) is read as UTF-8, as epubveri and epubcheck read it.
+
 ## [0.35.0] - 2026-10-23
 
 Two new CSS fixers, a fix to the font-face fixer that epubveri found in our
