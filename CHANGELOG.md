@@ -8,6 +8,13 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [Unreleased]
+
+### Changed
+
+- The demo page uses family-web template v8: its family nav lists imagoverto
+  and paginaverto even when the page is offline.
+
 ## [0.36.0] - 2026-10-28
 
 epubsana now writes EPUB containers itself, so a book nothing touched comes
