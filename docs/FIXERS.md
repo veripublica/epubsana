@@ -811,14 +811,16 @@ shorten the reading order and can remove the book's cover declaration. Both are
 visible in a reading system's UI, and epubsana does not delete visible structure
 unattended, however sound the argument.
 
-**We do not re-resolve the href — and that is the point.** epubveri hands us the
-`id` in `params[0]`; the fixer finds the element by that id and never touches
-path resolution. So the "is this href a remote URL rather than a container path?"
-question does not arise here: whether a remote `href` is a missing resource is
-epubveri's call, and if it ever answers that wrongly, the fix is an epubveri
-issue, not a guard bolted on here. epubveri detects; epubsana repairs what it
-reports. A second opinion about what counts as missing would make epubsana a
-second detector.
+**We do not re-resolve the href to judge the finding.** epubveri hands us the
+`id` in `params[0]`; the fixer finds the element by that id. Whether a remote
+`href` is a missing resource is epubveri's call, and if it ever answers that
+wrongly, the fix is an epubveri issue, not a guard bolted on here. epubveri
+detects; epubsana repairs what it reports. A second opinion about what counts as
+missing would make epubsana a second detector.
+
+The two guards below do not contest the finding. They ask a different question:
+is deletion the one correct repair of it? Their shape is outside the argument
+above, so the finding stays in the report and nothing is deleted.
 
 (For the record, epubveri already gets this right: its `RSC-001` site is guarded
 by `if !is_external(href)`, so a remote `href` never reaches us as a missing
@@ -828,6 +830,16 @@ check — if it ever regressed, a guard here would hide the bug rather than fix 
 **When it declines.**
 
 - If the OPF won't parse, or no manifest item carries the reported `id`.
+- **If the `href` has a fragment and the part before it names a file in the
+  container.** Since epubveri 0.36.0, `c2.xhtml#here` names no file: `RSC-001`,
+  matching epubcheck. But the bytes are there, and the href records what it was
+  meant to point at, so "nothing in the book records it" does not hold. Dropping
+  the item can take a chapter out of the reading order: when another item declares
+  `c2.xhtml` without the fragment, no count rises and rollback does not catch it.
+  Whether to delete the fragment instead is a separate repair, not this fixer's.
+  When the file is absent too (`gone.xhtml#a`), the drop stands.
+- **If the `href` is in a special scheme without `//`** (`https:x`, `https:/x`).
+  See [the section on that shape](#a-special-scheme-without-).
 - **If more than one manifest item carries it.** An `id` is meant to be unique,
   and a book that breaks that is reporting a second defect rather than granting a
   guess. `compute_dangling_item_edits` used to take the first match, and on the
@@ -1208,7 +1220,9 @@ paths** — whether an `href` resolves is the detector's call, not a second opin
 here.
 
 **When it declines.** If the OPF won't parse, or no `<reference>` carries the
-reported `href`.
+reported `href`. Also a reference whose `href` is in a special scheme without
+`//` ([why](#a-special-scheme-without-)); it does not count as dangling when
+deciding whether the whole `<guide>` goes.
 
 ### `opf.guide.duplicate_reference` — `fix.guide_duplicate_reference`, ConfirmNeeded
 
@@ -1273,6 +1287,9 @@ some other `id`** is inventing.
 **When it declines.**
 
 - The OPF won't parse, or no `<reference>` carries the exact reported `href`.
+- The `href` is in a special scheme without `//`
+  ([why](#a-special-scheme-without-)): `https:c1.xhtml#x` would become
+  `https:c1.xhtml`, leaving the defect that matters.
 - **Dropping the fragment would collide with another reference.** If the
   post-edit `(type, href)` pair equals that of any other reference in the same
   guide, the edit would clear an `RSC-012` and create an `RSC-017`
@@ -1990,6 +2007,23 @@ Siyasallaşması*, *İmparatorluğun En Uzun Yüzyılı*, *Türklerin Tarihi 2*)
 has three errors: this one, `OPF-014` (`scripted`) and `NCX-001`. epubsana
 already repairs the other two, so after repair this is each book's last error.
 
+## A special scheme without `//`
+
+Since epubveri 0.36.0, `https:x` and `https:/x` draw `RSC-007` or `RSC-001` when
+nothing is at that path, because epubcheck treats them as paths inside the
+container. The finding is right by that measure, and it stays in the report.
+
+The repair is not determinate. A URL parser reading `https:x` against a base in
+another scheme gets the remote `https://x/`, so a reading system may treat it as a
+remote resource. Nothing here says which the author meant, or that the resource is
+unreachable. A fixer is admitted only with exactly one correct repair, so
+`fix.manifest_dangling_item`, `fix.guide_dangling_reference`,
+`fix.guide_dangling_fragment`, `fix.font_face_missing_target` and
+`fix.css_missing_image` all decline it.
+
+The test is the url's own spelling: after leading whitespace, a case-insensitive
+`http`, `https`, `ftp`, `ws`, `wss` or `file`, then `:`, then anything but `//`.
+
 ## RSC-007 — a `@font-face` whose font file is not in the book
 
 **Finding.** `RSC-007` / `css.font_face.missing_target`, **Error**, reported on
@@ -2073,6 +2107,8 @@ styloria only says where the `@font-face` rules are and which urls each holds.
 
 **When it declines.**
 
+- **A url in a special scheme without `//`** (`https:no.ttf`;
+  [why](#a-special-scheme-without-)).
 - **More than one url in the rule** — a second source may be present and
   working, and choosing which line to cut is editing CSS rather than deleting a
   dead rule. 0 cases on the shelf. (`local()` is not a url and does not count,
@@ -2164,6 +2200,8 @@ other repairs are not equivalent:
 
 **When it declines.**
 
+- A url in a special scheme without `//` (`https:x.png`;
+  [why](#a-special-scheme-without-)).
 - A file with the url's file name is in the container under another path,
   compared after percent-decoding and without a query or fragment.
   Then the reference may be stale rather than dead, and that is a different

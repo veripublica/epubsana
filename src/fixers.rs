@@ -4128,15 +4128,62 @@ fn nav_item_ids(opf: &str) -> BTreeSet<String> {
 /// "would a reading order survive every deletion these fixers could propose?",
 /// so counting a deletion that will never be proposed would make it decline
 /// runs that are perfectly safe.
-fn dangling_item_ids<'r>(report: &'r Report, opf: &str) -> BTreeSet<&'r str> {
+fn dangling_item_ids<'r>(
+    report: &'r Report,
+    opf: &str,
+    opf_path: &str,
+    ws: &Workspace,
+) -> BTreeSet<&'r str> {
     let nav = nav_item_ids(opf);
     report
         .messages
         .iter()
         .filter(|m| m.rule == Some("opf.manifest_item.missing_resource"))
+        .filter(|m| {
+            m.params
+                .get(1)
+                .is_none_or(|href| !dangling_href_is_declined(href, opf_path, ws))
+        })
         .filter_map(|m| m.params.first().map(String::as_str))
         .filter(|id| !nav.contains(*id))
         .collect()
+}
+
+/// Is `url` in a special scheme, spelled without `//`?
+///
+/// `https:x` is a path inside the container to epubcheck, and so to epubveri,
+/// which reports it missing when nothing is there. A URL parser reading it
+/// against a base in another scheme gets the remote `https://x/`. So the finding
+/// does not settle the repair: the fixers that delete on a missing resource
+/// decline this shape and leave the finding in the report.
+fn is_special_scheme_without_slashes(url: &str) -> bool {
+    let url = url.trim_start_matches(|c: char| c <= ' ');
+    let Some((scheme, rest)) = url.split_once(':') else {
+        return false;
+    };
+    ["http", "https", "ftp", "ws", "wss", "file"]
+        .iter()
+        .any(|s| scheme.eq_ignore_ascii_case(s))
+        && !rest.starts_with("//")
+}
+
+/// Should `fix.manifest_dangling_item` leave this `RSC-001` alone?
+///
+/// A fragment makes the href name no file (epubveri 0.36.0, as in epubcheck),
+/// but when the part before it names a file the bytes are present and the item
+/// says what it meant. Dropping it can take a chapter out of the reading order,
+/// and rollback does not see that if another item declares the file.
+fn dangling_href_is_declined(href: &str, opf_path: &str, ws: &Workspace) -> bool {
+    if is_special_scheme_without_slashes(href) {
+        return true;
+    }
+    let Some((path, _)) = href.split_once('#') else {
+        return false;
+    };
+    resolve_against(opf_path, path).is_some_and(|target| {
+        let target = nfc(&target);
+        ws.names().any(|n| nfc(n) == target)
+    })
 }
 
 /// Would the book still have a reading order if **every** spine deletion this
@@ -4305,7 +4352,7 @@ fn manifest_dangling_items(report: &Report, ws: &Workspace) -> Vec<ProposedFix> 
     let Some(opf) = ws.get_text(&opf_path) else {
         return Vec::new();
     };
-    if !spine_survives_dangling_drops(&opf, &dangling_item_ids(report, &opf)) {
+    if !spine_survives_dangling_drops(&opf, &dangling_item_ids(report, &opf, &opf_path, ws)) {
         return Vec::new();
     }
     let nav = nav_item_ids(&opf);
@@ -4315,6 +4362,9 @@ fn manifest_dangling_items(report: &Report, ws: &Workspace) -> Vec<ProposedFix> 
 
     let mut fixes = Vec::new();
     for (id, href) in items {
+        if dangling_href_is_declined(&href, &opf_path, ws) {
+            continue;
+        }
         // The navigation document is not droppable. A publication that declares
         // one must have it, so deleting the item clears `RSC-001` and produces
         // `opf.package.missing_nav_document` in its place — the book is still
@@ -4508,7 +4558,7 @@ fn spine_dangling_itemrefs(report: &Report, ws: &Workspace) -> Vec<ProposedFix> 
     let Some(opf) = ws.get_text(&opf_path) else {
         return Vec::new();
     };
-    if !spine_survives_dangling_drops(&opf, &dangling_item_ids(report, &opf)) {
+    if !spine_survives_dangling_drops(&opf, &dangling_item_ids(report, &opf, &opf_path, ws)) {
         return Vec::new();
     }
 
@@ -4745,6 +4795,9 @@ fn guide_dangling_references(report: &Report, ws: &Workspace) -> Vec<ProposedFix
         let (Some(file), Some(href)) = (m.location.as_deref(), m.params.first()) else {
             continue;
         };
+        if is_special_scheme_without_slashes(href) {
+            continue;
+        }
         by_file
             .entry(file.to_string())
             .or_default()
@@ -5049,6 +5102,9 @@ fn compute_guide_fragment_edits(
         let Some((path, frag)) = href.split_once('#') else {
             continue;
         };
+        if is_special_scheme_without_slashes(href) {
+            continue;
+        }
         if !flagged.contains(&(frag.to_string(), resolve(&base, href))) {
             continue;
         }
@@ -7270,6 +7326,9 @@ fn font_face_missing_target(report: &Report, ws: &Workspace) -> Vec<ProposedFix>
         let (Some(file), Some(url)) = (m.location.as_deref(), m.params.first()) else {
             continue;
         };
+        if is_special_scheme_without_slashes(url) {
+            continue;
+        }
         by_file
             .entry(file.to_string())
             .or_default()
@@ -7596,6 +7655,9 @@ fn css_missing_image(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
         let (Some(file), Some(url)) = (m.location.as_deref(), m.params.first()) else {
             continue;
         };
+        if is_special_scheme_without_slashes(url) {
+            continue;
+        }
         by_file
             .entry(file.to_string())
             .or_default()
@@ -16182,7 +16244,7 @@ mod tests {
 
         let report = report_with_dangling(&["gone"]);
         assert!(
-            dangling_item_ids(&report, &opf).is_empty(),
+            dangling_item_ids(&report, &opf, "content.opf", &container(&[])).is_empty(),
             "a declined deletion must not count against the spine guard either"
         );
     }
@@ -16210,11 +16272,177 @@ mod tests {
             );
             let report = report_with_dangling(&["gone"]);
             assert_eq!(
-                dangling_item_ids(&report, &opf),
+                dangling_item_ids(&report, &opf, "content.opf", &container(&[])),
                 BTreeSet::from(["gone"]),
                 "so it is still droppable"
             );
         }
+    }
+
+    #[test]
+    fn a_special_scheme_without_slashes_is_recognized_by_its_spelling() {
+        for url in [
+            "https:x", "https:/x", "HTTPS:x", " https:x", "http:x", "ftp:x", "ws:x", "wss:x",
+            "file:x", "https:",
+        ] {
+            assert!(is_special_scheme_without_slashes(url), "{url}");
+        }
+        for url in [
+            "https://x",
+            " https://x",
+            "file:///x",
+            "x.png",
+            "a/b:c.png",
+            "mailto:x",
+            "urn:x",
+            "httpsx:y",
+            "#https:x",
+        ] {
+            assert!(!is_special_scheme_without_slashes(url), "{url}");
+        }
+    }
+
+    /// The manifest item named by the only itemref carries `href`; `extra` adds
+    /// more manifest items, and `c1.xhtml`/`c2.xhtml` are in the container.
+    fn fragment_book(href: &str, extra: &str) -> (Workspace, Report) {
+        let opf = format!(
+            r#"<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><manifest><item id="a" href="c1.xhtml" media-type="application/xhtml+xml"/><item id="b" href="{href}" media-type="application/xhtml+xml"/>{extra}</manifest><spine><itemref idref="a"/><itemref idref="b"/></spine></package>"#
+        );
+        let ws = container(&[
+            (
+                "META-INF/container.xml",
+                r#"<?xml version="1.0"?><container xmlns="urn:oasis:names:tc:opendocument:xmlns:container:1.0"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#,
+            ),
+            ("content.opf", opf.as_str()),
+            ("c1.xhtml", "<html/>"),
+            ("c2.xhtml", "<html/>"),
+        ]);
+        let mut report = Report::default();
+        report.messages = vec![epubveri::report::Message {
+            params: vec!["b".to_string(), href.to_string()],
+            ..fixture("RSC-001", "opf.manifest_item.missing_resource")
+        }];
+        (ws, report)
+    }
+
+    /// `c2.xhtml#here` names no file, but the file is there. With a second item
+    /// declaring it, no count rises when the spine entry goes, so rollback
+    /// would keep a book that has lost a chapter from its reading order.
+    #[test]
+    fn a_fragment_href_whose_file_exists_is_declined() {
+        let (ws, report) = fragment_book(
+            "c2.xhtml#here",
+            r#"<item id="bare" href="c2.xhtml" media-type="application/xhtml+xml"/>"#,
+        );
+        assert!(manifest_dangling_items(&report, &ws).is_empty());
+    }
+
+    /// macOS-made containers hold NFD names, and hrefs are usually NFC.
+    #[test]
+    fn a_fragment_href_finds_its_file_whatever_the_normalization() {
+        let ws = container(&[("OEBPS/ce\u{301}.xhtml", "<html/>")]);
+        assert!(dangling_href_is_declined(
+            "c\u{e9}.xhtml#a",
+            "OEBPS/content.opf",
+            &ws
+        ));
+    }
+
+    #[test]
+    fn a_fragment_href_whose_file_is_absent_is_still_dropped() {
+        let (ws, report) = fragment_book("gone.xhtml#a", "");
+        assert_eq!(manifest_dangling_items(&report, &ws).len(), 1);
+    }
+
+    /// The spine guard counts only what would be proposed, as it does for nav.
+    #[test]
+    fn a_declined_dangling_href_does_not_count_against_the_spine_guard() {
+        let (ws, report) = fragment_book("c2.xhtml#here", "");
+        let opf = ws.get_text("content.opf").unwrap();
+        assert!(dangling_item_ids(&report, &opf, "content.opf", &ws).is_empty());
+        let (ws, report) = fragment_book("gone.xhtml#a", "");
+        let opf = ws.get_text("content.opf").unwrap();
+        assert_eq!(
+            dangling_item_ids(&report, &opf, "content.opf", &ws),
+            BTreeSet::from(["b"])
+        );
+    }
+
+    #[test]
+    fn a_dangling_item_in_a_special_scheme_without_slashes_is_declined() {
+        let (ws, report) = fragment_book("https:gone.xhtml", "");
+        assert!(manifest_dangling_items(&report, &ws).is_empty());
+        let opf = ws.get_text("content.opf").unwrap();
+        assert!(dangling_item_ids(&report, &opf, "content.opf", &ws).is_empty());
+    }
+
+    #[test]
+    fn a_missing_image_in_a_special_scheme_without_slashes_is_declined() {
+        let ws = css_book(b"p { background-image: url(https:x.png); }", &[]);
+        let report = ws.detect().unwrap();
+        assert!(
+            report
+                .messages
+                .iter()
+                .any(|m| m.rule == Some("css.url.missing_resource"))
+        );
+        assert!(css_missing_image(&report, &ws).is_empty());
+    }
+
+    #[test]
+    fn a_missing_font_in_a_special_scheme_without_slashes_is_declined() {
+        let ws = css_book(
+            b"@font-face { font-family: f; src: url(https:no.ttf); }",
+            &[],
+        );
+        let report = ws.detect().unwrap();
+        assert!(
+            report
+                .messages
+                .iter()
+                .any(|m| m.rule == Some("css.font_face.missing_target"))
+        );
+        assert!(font_face_missing_target(&report, &ws).is_empty());
+    }
+
+    #[test]
+    fn a_guide_fragment_in_a_special_scheme_without_slashes_is_declined() {
+        let opf = FRAG_OPF.replace(
+            "Text/ch1.html#filepos16691",
+            "https:Text/ch1.html#filepos16691",
+        );
+        let f = flagged(&[(
+            "filepos16691",
+            resolve(
+                &dir_of("OEBPS/content.opf"),
+                "https:Text/ch1.html#filepos16691",
+            )
+            .as_str(),
+        )]);
+        assert!(compute_guide_fragment_edits(&opf, "OEBPS/content.opf", &f).is_none());
+    }
+
+    /// It keeps its place in the guide: a reference we decline is not dangling
+    /// for the "does the whole guide go?" question either.
+    #[test]
+    fn a_guide_reference_in_a_special_scheme_without_slashes_is_left_in_place() {
+        let opf = GUIDE_OPF.replace("cover.xhtml", "https:cover.xhtml");
+        let ws = container(&[("content.opf", opf.as_str())]);
+        let message = |href: &str| epubveri::report::Message {
+            params: vec![href.to_string()],
+            location: Some("content.opf".to_string()),
+            ..fixture("RSC-007", "opf.guide.reference_missing_resource")
+        };
+        let mut report = Report {
+            messages: vec![message("https:cover.xhtml")],
+            ..Report::default()
+        };
+        assert!(guide_dangling_references(&report, &ws).is_empty());
+
+        report.messages.push(message("gone.html"));
+        let fixes = guide_dangling_references(&report, &ws);
+        assert_eq!(fixes.len(), 1);
+        assert!(!fixes[0].title.contains("https:"), "{}", fixes[0].title);
     }
 
     #[test]

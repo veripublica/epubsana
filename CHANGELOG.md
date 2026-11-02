@@ -12,8 +12,29 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
 ### Changed
 
+- Moves to epubveri 0.36.0 and styloria 0.18. On the 562-book shelf, the count
+  of each finding, every proposal and outcome, and the repaired bytes are
+  unchanged. epubveri reports new wording for CSS-007 on 28 of those books.
+- A book whose central directory draws `PKG-027` (an entry comment that is not
+  UTF-8, for example) is now fatal in epubveri. epubsana proposes nothing for it
+  and leaves its contents as they were.
 - The demo page uses family-web template v8: its family nav lists imagoverto
   and paginaverto even when the page is offline.
+
+### Fixed
+
+- `fix.manifest_dangling_item` no longer drops an item whose href has a fragment
+  when the file is in the book. epubveri 0.36.0 reports `c2.xhtml#here` as
+  missing, as epubcheck does. When another item also declared the file, dropping it
+  could silently take a chapter out of the reading order.
+  This guards against what the new floor would have caused; no released version
+  did it. The finding stays in the report.
+- `fix.manifest_dangling_item`, `fix.guide_dangling_reference`,
+  `fix.guide_dangling_fragment`, `fix.font_face_missing_target` and
+  `fix.css_missing_image` decline a url in a special scheme without `//`
+  (`https:x`). epubcheck reads it as a path in the container, but a reading system
+  may read it as remote, so there is no one correct repair. No released version
+  acted on this shape either.
 
 ## [0.36.0] - 2026-10-28
 
