@@ -862,7 +862,7 @@ Key types:
 - **`Confirmer`** — implement `decide(&mut self, fix: &ProposedFix) -> Decision`
   (`Approve` / `Reject`).
 - **`ChangeReport`** — `fixes` (each a `ReportedFix` carrying its `Outcome`:
-  `Applied` / `Skipped` / `Proposed`), `fatals_before`/`fatals_after`,
+  `Applied` / `Skipped` / `Proposed` / `Reverted`), `fatals_before`/`fatals_after`,
   `errors_before`/`errors_after`, `goal`, and `goal_met` — the tool's `0`/`1`
   line. `applied()` / `skipped()` / `changed()` are conveniences over `fixes`.
 - **`Goal::is_met(&report)`** — `Valid` = no fatals and no errors; `Openable` =

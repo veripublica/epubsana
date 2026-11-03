@@ -141,7 +141,7 @@ else
   bad "cargo package --list failed"
 fi
 
-echo "  note: sweep README.md and docs/USAGE.md for stale counts (fixers, floor)"
+echo "  note: sweep AGENTS.md and docs/USAGE.md for stale counts (fixers, floor)"
 echo
 echo "$PASS passed, $FAIL failed, in $((SECONDS / 60)) min $((SECONDS % 60)) s"
 if [ "$FAIL" -gt 0 ]; then
