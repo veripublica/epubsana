@@ -15,6 +15,10 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 - Moves to epubveri 0.36.0 and styloria 0.18. On the 562-book shelf, the count
   of each finding, every proposal and outcome, and the repaired bytes are
   unchanged. epubveri reports new wording for CSS-007 on 28 of those books.
+- Moves to epubveri 0.37.0 and styloria 0.19. On the 562-book shelf, the count
+  of each finding, every proposal and outcome, and the repaired bytes are
+  unchanged. epubveri's new CSS value checks run only under its `--advisory`,
+  and epubsana does not ask for them, so it neither reports nor repairs them.
 - A book whose central directory draws `PKG-027` (an entry comment that is not
   UTF-8, for example) is now fatal in epubveri. epubsana proposes nothing for it
   and leaves its contents as they were.
