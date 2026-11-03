@@ -23,7 +23,7 @@ members = ["epubsana-wasm"]
 # into an error) and the `rule`/`params` sub-codes epubsana's fixers dispatch on
 # both arrived on the 0.5 line, the conventions-v0.4 one.
 #
-# **The floor is 0.37.** Most raises have been *correctness* floors, made for the
+# **The floor is 0.37.1.** Most raises have been *correctness* floors, made for the
 # same reason each time: below them, a detector false positive makes some fixer
 # here repair a book that was not broken. The last two are different classes —
 # 0.9.26 is completeness and 0.10.0 is capability — and each says which it is.
@@ -434,9 +434,12 @@ members = ["epubsana-wasm"]
 # shelf is byte-identical across it. It takes styloria 0.19 with it. Its CSS
 # value checks (ADV-024) run only under `--advisory`, which we do not pass.
 #
+# **0.37.1 (2026-11-04) carries zip 9.3.0 and roxmltree 0.21.2,** which we also
+# raise ourselves below.
+#
 # For local co-development of epubveri, add an uncommitted override:
 #   [patch.crates-io] epubveri = { path = "../epubveri" }
-epubveri = "0.37.0"
+epubveri = "0.37.1"
 # CSS, located: the family's own parser, taken directly as a peer (Baris,
 # 2026-10-18; epubveri will not re-export it). Two conditions. **One styloria
 # in the lock**: the requirement is epubveri's own (`0.19`), so the text we
@@ -454,7 +457,8 @@ styloria = "0.19"
 # because 9.0.4 carries GHSA-m665-v7pm-7grj (critical; fixed in 9.0.5),
 # GHSA-gmfj-vffv-32pw and GHSA-wjr6-mhvj-cjvm (fixed in 9.1.0); family
 # dependency report 2026-10-28. All three are about reading, which we do.
-zip = { version = "9.1.3", default-features = false, features = ["deflate"] }
+# 9.3.0 (2026-11-04) carries reader security merges no advisory lists yet.
+zip = { version = "9.3.0", default-features = false, features = ["deflate"] }
 # Inflates stored and deflated entries from their raw bytes in
 # `Workspace::load`, as epubveri does: zip 9 refuses an entry longer than its
 # header declares, and one with a wrong CRC, where epubcheck reads both. It
@@ -472,7 +476,8 @@ unicode-normalization = "0.1.25"
 # weight, and byte ranges line up with the positions epubveri reports.
 # 0.21 matches attributes by local name (ignoring namespace); see the
 # `attr_no_ns` helper in src/fixers.rs for how no-namespace lookups stay exact.
-roxmltree = "0.21"
+# 0.21.2 parses element content without recursing per level.
+roxmltree = "0.21.2"
 # `--format json`: the shared veripublica envelope (FORMATS.md). serde_json is
 # the CLI's only user, but the envelope types are public so the wasm binding and
 # any embedder emit the identical shape.
@@ -481,13 +486,3 @@ serde_json = "1"
 
 [profile.release]
 opt-level = 2
-
-# roxmltree's parser recurses once per nesting level. Unoptimised, it aborts
-# a 2 MiB thread (the `cargo test` default) at 125 levels, below the 256
-# `epubveri::xmlguard` admits, so a debug build could be crashed by a document
-# the guard accepts. Optimising this one crate is enough: it then parses 800.
-# Measured by epubveri (2026-09-23) after we reported the debug-build gap.
-# Cargo ignores a dependency's profile settings, so this has to live in the
-# root manifest of whoever builds; it does not reach crates that depend on us.
-[profile.dev.package.roxmltree]
-opt-level = 1

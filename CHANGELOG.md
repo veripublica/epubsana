@@ -8,6 +8,22 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [Unreleased]
+
+### Security
+
+- Moves to zip 9.3.0, which carries reader security fixes no advisory lists yet,
+  and to epubveri 0.37.1, which requires it. Their severity is not known. On the
+  562-book shelf, every book still opens, and the count of each finding, every
+  proposal and outcome, and the repaired bytes are unchanged.
+
+### Changed
+
+- Moves to roxmltree 0.21.2, which parses element content without recursing per
+  level, and to wasm-bindgen 0.2.130.
+- A debug build no longer needs `[profile.dev.package.roxmltree]`, so the
+  manifest drops it.
+
 ## [0.37.0] - 2026-11-03
 
 ### Changed
