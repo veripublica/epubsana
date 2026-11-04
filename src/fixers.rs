@@ -84,6 +84,7 @@ pub fn plan(report: &Report, ws: &Workspace, _goal: Goal) -> Vec<ProposedFix> {
     fixes.extend(manifest_href_spaces(report, ws));
     fixes.extend(ncx_content_src_spaces(report, ws));
     fixes.extend(content_url_spaces(report, ws));
+    fixes.extend(email_as_http_url(report, ws));
     fixes.extend(content_properties(report, ws));
     fixes.extend(missing_scripts(report, ws));
     fixes.extend(empty_titles(report, ws));
@@ -123,6 +124,7 @@ pub fn plan(report: &Report, ws: &Workspace, _goal: Goal) -> Vec<ProposedFix> {
     fixes.extend(font_face_missing_target(report, ws));
     fixes.extend(css_unterminated(report, ws));
     fixes.extend(css_missing_image(report, ws));
+    fixes.extend(css_direction_ltr(report, ws));
     fixes.extend(navdoc_empty_navs(report, ws));
     fixes.extend(mimetype_packaging(report, ws));
     fixes.extend(empty_directories(report, ws));
@@ -149,7 +151,8 @@ pub fn plan(report: &Report, ws: &Workspace, _goal: Goal) -> Vec<ProposedFix> {
 /// this list, since a census that reads it would otherwise file two rules we
 /// fix under *no fixer at all*, which is precisely the mislabelling this list
 /// exists to prevent. `OPF-054` is still rule-less, and so are `OPF-035` and
-/// `OPF-043`, which `fix.html_media_type` dispatches on.
+/// `OPF-043`, which `fix.html_media_type` dispatches on, and `CSS-001`, which
+/// `fix.css_direction_ltr` does.
 ///
 /// **Keep this in sync with [`plan`].** Nothing enforces it at compile time; the
 /// census cross-checks at runtime and reports any rule a proposal addressed that
@@ -183,6 +186,7 @@ pub fn handled_rules() -> &'static [&'static str] {
         "opf.content_document.invalid_content_type_meta",
         "opf.content_document.lang_xmllang_mismatch",
         // One shape inside it: an interior space.
+        "opf.content_document.malformed_absolute_url",
         "opf.content_document.malformed_relative_url",
         "opf.content_document.no_interactive_in_a__a",
         "opf.content_document.property_used_undeclared",
@@ -2159,7 +2163,13 @@ fn content_url_spaces(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
     }
 
     // Ask the detector about the result before proposing it.
-    let Some(still_reported) = url_spaces_still_reported(ws, &planned, &by_doc) else {
+    let Some(still_reported) = urls_still_reported(
+        ws,
+        &planned,
+        &by_doc,
+        MALFORMED_RELATIVE_URL_RULE,
+        plan_url_space_encoding,
+    ) else {
         return Vec::new();
     };
 
@@ -2295,19 +2305,24 @@ fn plan_url_space_encoding(
     Some(edits)
 }
 
-/// Apply every planned encoding to a copy of the book and return the
+/// How a URL fixer plans its edits to one document, from the reported values.
+type UrlPlan = fn(&str, &BTreeMap<String, BTreeSet<String>>) -> Option<Vec<UrlSpaceEdit>>;
+
+/// Apply every planned rewrite to a copy of the book and return the
 /// `(document, element path, value)` triples the detector still reports under
-/// this rule. `None` if the copy cannot be built or read, and the caller then
+/// `rule`. `None` if the copy cannot be built or read, and the caller then
 /// declines.
-fn url_spaces_still_reported(
+fn urls_still_reported(
     ws: &Workspace,
     planned: &BTreeMap<String, Vec<UrlSpaceEdit>>,
     reported: &BTreeMap<String, BTreeMap<String, BTreeSet<String>>>,
+    rule: &str,
+    plan: UrlPlan,
 ) -> Option<BTreeSet<(String, String, String)>> {
     let mut trial = Workspace::load(&ws.serialize().ok()?).ok()?;
     for doc in planned.keys() {
         let text = trial.get_text(doc)?;
-        let edits = plan_url_space_encoding(&text, &reported[doc])?;
+        let edits = plan(&text, &reported[doc])?;
         trial.set_text(doc, apply_edits(&text, url_space_edits(edits)));
     }
     let report = trial.detect().ok()?;
@@ -2315,7 +2330,7 @@ fn url_spaces_still_reported(
         report
             .messages
             .iter()
-            .filter(|m| m.rule == Some(MALFORMED_RELATIVE_URL_RULE))
+            .filter(|m| m.rule == Some(rule))
             .filter_map(|m| {
                 Some((
                     m.location.clone()?,
@@ -2325,6 +2340,193 @@ fn url_spaces_still_reported(
             })
             .collect(),
     )
+}
+
+const MALFORMED_ABSOLUTE_URL_RULE: &str = "opf.content_document.malformed_absolute_url";
+
+/// `RSC-020` / `opf.content_document.malformed_absolute_url`, where the URL is
+/// an email address written as a web address: `<a
+/// href="http://kitap%40kapital.com.tr">kitap@kapital.com.tr</a>`. The `href`
+/// becomes `mailto:kitap@kapital.com.tr`, only when the link's own text is
+/// exactly that address. `ConfirmNeeded`: the text is the evidence, but the
+/// link now goes somewhere else.
+///
+/// Every planned rewrite is tried on a copy of the book, and one the detector
+/// still reports is declined, the pattern of [`content_url_spaces`].
+fn email_as_http_url(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    // document -> (reported element path -> the reported values)
+    let mut by_doc: BTreeMap<String, BTreeMap<String, BTreeSet<String>>> = BTreeMap::new();
+    for m in &report.messages {
+        if m.rule != Some(MALFORMED_ABSOLUTE_URL_RULE) {
+            continue;
+        }
+        let (Some(doc), Some(np), Some(value)) = (
+            m.location.as_deref(),
+            m.element_path.as_ref(),
+            m.params.first(),
+        ) else {
+            continue;
+        };
+        let Some(path) = svg_reported_path(np) else {
+            continue;
+        };
+        by_doc
+            .entry(doc.to_string())
+            .or_default()
+            .entry(path)
+            .or_default()
+            .insert(value.clone());
+    }
+
+    let mut planned: BTreeMap<String, Vec<UrlSpaceEdit>> = BTreeMap::new();
+    for (doc, reported) in &by_doc {
+        let Some(text) = ws.get_text(doc) else {
+            continue;
+        };
+        let Some(edits) = plan_email_links(&text, reported) else {
+            continue; // won't parse: decline
+        };
+        if !edits.is_empty() {
+            planned.insert(doc.clone(), edits);
+        }
+    }
+    if planned.is_empty() {
+        return Vec::new();
+    }
+
+    let Some(still_reported) = urls_still_reported(
+        ws,
+        &planned,
+        &by_doc,
+        MALFORMED_ABSOLUTE_URL_RULE,
+        plan_email_links,
+    ) else {
+        return Vec::new();
+    };
+
+    let mut fixes = Vec::new();
+    for (doc, edits) in planned {
+        let mut kept: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        let mut preview = Vec::new();
+        for e in edits {
+            if still_reported.contains(&(doc.clone(), e.path.clone(), e.encoded.clone())) {
+                continue;
+            }
+            preview.push(Change {
+                path: doc.clone(),
+                note: format!("\"{}\" → \"{}\"", e.value, e.encoded),
+            });
+            kept.entry(e.path).or_default().insert(e.value);
+        }
+        let n = preview.len();
+        if n == 0 {
+            continue;
+        }
+        let doc_for_apply = doc.clone();
+        fixes.push(ProposedFix {
+            fix_id: "fix.email_as_http_url",
+            addresses_id: "RSC-020".to_string(),
+            addresses_rule: Some(MALFORMED_ABSOLUTE_URL_RULE),
+            addresses_severity: addressed_severity(
+                report,
+                "RSC-020",
+                Some(MALFORMED_ABSOLUTE_URL_RULE),
+            ),
+            tier: Tier::ConfirmNeeded,
+            title: format!(
+                "Turn {n} email address{} written as a web address into mailto: links in {doc}",
+                if n == 1 { "" } else { "es" }
+            ),
+            rationale: "The link is written as a web address, with the @ percent-encoded, which \
+                 is not a valid URL. The link's own text is exactly that email address, so the \
+                 link becomes a mailto: link to it. The text does not change, but where the link \
+                 goes does, so this asks first."
+                .to_string(),
+            preview,
+            apply_fn: Box::new(move |ws: &mut Workspace| {
+                if let Some(text) = ws.get_text(&doc_for_apply)
+                    && let Some(edits) = plan_email_links(&text, &kept)
+                {
+                    ws.set_text(&doc_for_apply, apply_edits(&text, url_space_edits(edits)));
+                }
+            }),
+        });
+    }
+    fixes
+}
+
+/// The address in `http://name%40domain` or `https://name%40domain`. `None`
+/// for anything else after the scheme: a path, a query, a fragment, a port, a
+/// raw `@`, another percent-escape, a second `%40`.
+fn email_in_http_url(url: &str) -> Option<String> {
+    let scheme_end = url.find("://")?;
+    let scheme = &url[..scheme_end];
+    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+        return None;
+    }
+    let (local, domain) = url[scheme_end + 3..].split_once("%40")?;
+    let plain = |part: &str| {
+        !part.is_empty()
+            && !part.chars().any(|c| {
+                c <= ' '
+                    || c.is_whitespace()
+                    || matches!(c, '%' | '@' | '/' | '\\' | '?' | '#' | ':')
+            })
+    };
+    (plain(local) && plain(domain)).then(|| format!("{local}@{domain}"))
+}
+
+/// The `mailto:` rewrites for every reported `(element path, value)`: an element
+/// whose `href` is the value, spelled so in the file, holding an address
+/// that its text, trimmed of XML whitespace, equals exactly. `None` (decline)
+/// if the document doesn't parse.
+fn plan_email_links(
+    text: &str,
+    reported: &BTreeMap<String, BTreeSet<String>>,
+) -> Option<Vec<UrlSpaceEdit>> {
+    let prepared = prepare_content_doc(text);
+    let doc = prepared.parse()?;
+    let mut edits = Vec::new();
+    for node in doc.descendants().filter(|n| n.is_element()) {
+        let Some(path) = svg_element_path(node) else {
+            continue;
+        };
+        let Some(values) = reported.get(&path) else {
+            continue;
+        };
+        let Some(attr) = node
+            .attributes()
+            .find(|a| a.name() == "href" && a.namespace().is_none())
+        else {
+            continue;
+        };
+        let value = attr.value();
+        if !values.contains(value) {
+            continue;
+        }
+        let Some(address) = email_in_http_url(value) else {
+            continue;
+        };
+        let link_text: String = node
+            .descendants()
+            .filter(|n| n.is_text())
+            .filter_map(|n| n.text())
+            .collect();
+        if link_text.trim_matches(is_xml_space) != address {
+            continue;
+        }
+        let range = prepared.unshift(attr.range_value());
+        if text.get(range.clone()) != Some(value) {
+            continue; // spelled with a reference in the file
+        }
+        edits.push(UrlSpaceEdit {
+            path: path.clone(),
+            value: value.to_string(),
+            range,
+            encoded: format!("mailto:{address}"),
+        });
+    }
+    Some(edits)
 }
 
 /// The byte range of the non-whitespace span within `range`, or `None` when it
@@ -7528,6 +7730,212 @@ fn push_nested_rules<'s, 'a>(
     }
 }
 
+/// `CSS-001`: `direction: ltr` in an EPUB 3 book, where EPUB 3.3 §6.3.1.2 says a
+/// style sheet "MUST NOT include the `direction` property". `ltr` is the
+/// property's initial value, so deleting it changes nothing unless something
+/// sets another direction, and [`book_may_set_direction`] checks the whole book
+/// for that first. `ConfirmNeeded`: the check is ours and the edit deletes CSS
+/// a reader does read, so the book's owner decides.
+///
+/// Stylesheets and inline `<style>` only. A `style` attribute stays reported.
+fn css_direction_ltr(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    let files: BTreeSet<&str> = report
+        .messages
+        .iter()
+        .filter(|m| m.id == "CSS-001")
+        .filter_map(|m| m.location.as_deref())
+        .collect();
+    if files.is_empty() || book_may_set_direction(ws) {
+        return Vec::new();
+    }
+
+    let mut fixes = Vec::new();
+    for file in files {
+        let Some(text) = ws.get_text(file) else {
+            continue;
+        };
+        let edits = plan_direction_file(file, &text);
+        let n = edits.len();
+        if n == 0 {
+            continue;
+        }
+        let file_for_apply = file.to_string();
+        fixes.push(ProposedFix {
+            fix_id: "fix.css_direction_ltr",
+            addresses_id: "CSS-001".to_string(),
+            addresses_rule: None,
+            addresses_severity: addressed_severity(report, "CSS-001", None),
+            tier: Tier::ConfirmNeeded,
+            title: format!(
+                "Delete {n} `direction: ltr` declaration{} in {file}",
+                if n == 1 { "" } else { "s" }
+            ),
+            rationale: "EPUB 3 does not allow the direction property in CSS. ltr is its initial \
+                 value, and nothing in this book sets another text direction, so deleting the \
+                 declaration changes nothing a reader sees."
+                .to_string(),
+            preview: vec![Change {
+                path: file.to_string(),
+                note: format!("delete {n} `direction: ltr` declaration(s)"),
+            }],
+            apply_fn: Box::new(move |ws: &mut Workspace| {
+                if let Some(text) = ws.get_text(&file_for_apply) {
+                    let edits = plan_direction_file(&file_for_apply, &text);
+                    ws.set_text(&file_for_apply, apply_edits(&text, edits));
+                }
+            }),
+        });
+    }
+    fixes
+}
+
+/// Whether anything in the book can set a text direction other than `ltr`, or
+/// a file that would have to be read to say so cannot be. The list is in
+/// `docs/FIXERS.md`.
+fn book_may_set_direction(ws: &Workspace) -> bool {
+    ws.names().any(|name| {
+        if crate::workspace::is_stylesheet(name) {
+            if !ws.text_round_trips(name) {
+                return true;
+            }
+            return ws.get_text(name).is_none_or(|css| css_sets_direction(&css));
+        }
+        let Some(text) = ws.get_text(name) else {
+            return is_markup_entry(name) || name.to_ascii_lowercase().ends_with(".opf");
+        };
+        if name.to_ascii_lowercase().ends_with(".opf") {
+            let Some(doc) = parse_xml(&text) else {
+                return true;
+            };
+            return doc.descendants().any(|n| {
+                n.attribute("page-progression-direction")
+                    .is_some_and(|v| v.eq_ignore_ascii_case("rtl"))
+            });
+        }
+        if !is_markup_entry(name) {
+            return false;
+        }
+        let prepared = prepare_content_doc(&text);
+        let Some(doc) = prepared.parse() else {
+            return true;
+        };
+        doc.descendants().filter(|n| n.is_element()).any(|n| {
+            let tag = n.tag_name().name();
+            tag == "bdi"
+                || (tag == "style"
+                    && css_sets_direction(
+                        &n.children().filter_map(|c| c.text()).collect::<String>(),
+                    ))
+                || n.attributes()
+                    .filter(|a| a.namespace().is_none())
+                    .any(|a| match a.name() {
+                        "dir" | "direction" => !a.value().eq_ignore_ascii_case("ltr"),
+                        "unicode-bidi" => true,
+                        "style" => {
+                            let (items, _) = styloria::parse_block_contents(a.value());
+                            items_set_direction(a.value(), &items)
+                        }
+                        _ => false,
+                    })
+        })
+    })
+}
+
+fn css_sets_direction(css: &str) -> bool {
+    let (sheet, _) = styloria::parse_stylesheet(css);
+    sheet.rules.iter().any(|r| {
+        r.node
+            .block()
+            .is_some_and(|b| items_set_direction(css, &b.node))
+    })
+}
+
+/// Whether `items` hold, at any depth, a `unicode-bidi` declaration or a
+/// `direction` one whose value is not exactly `ltr`.
+fn items_set_direction(css: &str, items: &[styloria::BlockItem<'_>]) -> bool {
+    items.iter().any(|item| match item {
+        styloria::BlockItem::Declaration(d) => {
+            d.node.name.eq_ignore_ascii_case("unicode-bidi")
+                || (d.node.name.eq_ignore_ascii_case("direction")
+                    && !is_direction_ltr(css, &d.node))
+        }
+        styloria::BlockItem::Rule(r) => r
+            .node
+            .block()
+            .is_some_and(|b| items_set_direction(css, &b.node)),
+    })
+}
+
+/// Whether a `direction` declaration's value, as written, is `ltr` and nothing
+/// else. A comment or an escape in it reads as something else.
+fn is_direction_ltr(css: &str, d: &styloria::Declaration<'_>) -> bool {
+    let (Some(first), Some(last)) = (d.value.first(), d.value.last()) else {
+        return false;
+    };
+    css.get(first.span.start..last.span.end)
+        .is_some_and(|v| v.eq_ignore_ascii_case("ltr"))
+}
+
+/// The deletions in `file`: the whole text when it is a stylesheet, each inline
+/// `<style>` when it is a markup document. A stylesheet that does not decode
+/// losslessly never gets here: [`book_may_set_direction`] declined the book.
+fn plan_direction_file(file: &str, text: &str) -> Vec<MetaEdit> {
+    if !is_markup_entry(file) {
+        return plan_direction_drops(text);
+    }
+    let mut edits = Vec::new();
+    for at in inline_style_ranges(text) {
+        for e in plan_direction_drops(&text[at.clone()]) {
+            edits.push(MetaEdit {
+                range: e.range.start + at.start..e.range.end + at.start,
+                replacement: e.replacement,
+            });
+        }
+    }
+    edits
+}
+
+fn plan_direction_drops(css: &str) -> Vec<MetaEdit> {
+    fn walk(css: &str, items: &[styloria::BlockItem<'_>], out: &mut Vec<MetaEdit>) {
+        for item in items {
+            match item {
+                styloria::BlockItem::Declaration(d) => {
+                    if d.node.name.eq_ignore_ascii_case("direction")
+                        && is_direction_ltr(css, &d.node)
+                    {
+                        // The declaration, the whitespace before it, its `;`.
+                        let range = with_leading_whitespace(css, d.span.start..d.span.end);
+                        let mut end = range.end;
+                        if !css[range.clone()].ends_with(';') {
+                            let rest = css[end..].trim_start_matches(is_xml_space);
+                            if rest.starts_with(';') {
+                                end = css.len() - rest.len() + 1;
+                            }
+                        }
+                        out.push(MetaEdit {
+                            range: range.start..end,
+                            replacement: String::new(),
+                        });
+                    }
+                }
+                styloria::BlockItem::Rule(r) => {
+                    if let Some(b) = r.node.block() {
+                        walk(css, &b.node, out);
+                    }
+                }
+            }
+        }
+    }
+    let (sheet, _) = styloria::parse_stylesheet(css);
+    let mut out = Vec::new();
+    for r in &sheet.rules {
+        if let Some(b) = r.node.block() {
+            walk(css, &b.node, &mut out);
+        }
+    }
+    out
+}
+
 /// `CSS-008` / `css.stylesheet.unterminated`: a `{` the stylesheet never
 /// closes. Appends one `}` per open block at the end of the text, which is
 /// where CSS Syntax already closes them (§5.4), so a reader sees nothing new.
@@ -12602,6 +13010,330 @@ mod tests {
             "the finding is there, so the decline is ours"
         );
         assert!(font_face_missing_target(&report, &ws).is_empty());
+    }
+
+    // ---- fix.email_as_http_url -------------------------------------
+
+    /// Applies the one proposal and returns the chapter, or `None` when the
+    /// fixer declined. The fixture must carry the finding.
+    fn email_fix(body: &str) -> Option<String> {
+        let mut ws = url_book(body);
+        let report = ws.detect().unwrap();
+        assert!(
+            report
+                .messages
+                .iter()
+                .any(|m| m.rule == Some(MALFORMED_ABSOLUTE_URL_RULE)),
+            "the fixture must carry the finding, or this test proves nothing"
+        );
+        let fix = email_as_http_url(&report, &ws).into_iter().next()?;
+        assert_eq!(fix.tier, Tier::ConfirmNeeded);
+        assert_eq!(fix.addresses_id, "RSC-020");
+        fix.apply(&mut ws);
+        assert!(
+            !ws.detect()
+                .unwrap()
+                .messages
+                .iter()
+                .any(|m| m.rule == Some(MALFORMED_ABSOLUTE_URL_RULE)),
+            "nothing left under the rule"
+        );
+        ws.get_text("c.xhtml")
+    }
+
+    /// The shelf's shape.
+    #[test]
+    fn an_email_written_as_a_web_address_becomes_mailto() {
+        let out =
+            email_fix(r#"<p><a class="x" href="http://ka%40kakitap.com">ka@kakitap.com</a></p>"#)
+                .expect("proposed");
+        assert!(
+            out.contains(r#"<a class="x" href="mailto:ka@kakitap.com">ka@kakitap.com</a>"#),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn an_email_link_may_hold_markup_and_whitespace_and_https() {
+        let out = email_fix("<p><a href=\"HTTPS://a%40b.com\">\n <b>a@</b>b.com </a></p>")
+            .expect("proposed");
+        assert!(out.contains(r#"href="mailto:a@b.com""#), "{out}");
+    }
+
+    /// Only the reported link changes.
+    #[test]
+    fn an_email_fix_leaves_the_other_links_alone() {
+        let out = email_fix(
+            r#"<p><a href="http://a%40b.com">a@b.com</a><a href="http://c.com">c.com</a></p>"#,
+        )
+        .expect("proposed");
+        assert!(out.contains(r#"<a href="http://c.com">c.com</a>"#), "{out}");
+    }
+
+    /// The text is the evidence: without it the address is a guess.
+    #[test]
+    fn an_email_link_whose_text_differs_is_declined() {
+        for body in [
+            r#"<p><a href="http://a%40b.com">write to us</a></p>"#,
+            r#"<p><a href="http://a%40b.com"></a></p>"#,
+            r#"<p><a href="http://a%40b.com">A@b.com</a></p>"#,
+        ] {
+            assert_eq!(email_fix(body), None, "{body}");
+        }
+    }
+
+    /// The file spells the value with a character reference, so a span in the
+    /// file is not the value epubveri reported.
+    #[test]
+    fn an_email_href_spelled_with_a_reference_is_declined() {
+        assert_eq!(
+            email_fix(r#"<p><a href="http://a%40b&#46;com">a@b.com</a></p>"#),
+            None
+        );
+    }
+
+    /// `^` is allowed in nothing here, and the detector says so of the result.
+    #[test]
+    fn an_email_the_detector_still_rejects_is_declined() {
+        assert_eq!(
+            email_fix(r#"<p><a href="http://a^b%40c.com">a^b@c.com</a></p>"#),
+            None
+        );
+    }
+
+    #[test]
+    fn only_a_bare_encoded_address_reads_as_an_email() {
+        assert_eq!(
+            email_in_http_url("http://a%40b.com").as_deref(),
+            Some("a@b.com")
+        );
+        assert_eq!(
+            email_in_http_url("HtTpS://a%40b.com").as_deref(),
+            Some("a@b.com")
+        );
+        for url in [
+            "ftp://a%40b.com",
+            "mailto:a%40b.com",
+            "http://a%40b.com/",
+            "http://a%40b.com?x",
+            "http://a%40b.com#x",
+            "http://a%40b.com:80",
+            "http://%40b.com",
+            "http://a%40",
+            "http://a%40b%40c.com",
+            "http://a%20x%40b.com",
+            "http://a@x%40b.com",
+            "http://a b%40c.com",
+            "http://a\u{a0}b%40c.com",
+            "http://a\\b%40c.com",
+            "http://a.com",
+        ] {
+            assert_eq!(email_in_http_url(url), None, "{url}");
+        }
+    }
+
+    // ---- fix.css_direction_ltr -------------------------------------
+
+    /// An EPUB 3 book with one stylesheet. `body` is the chapter's whole body
+    /// element, `spine_attr` goes on `<spine>`.
+    fn direction_book(css: &str, body: &str, spine_attr: &str) -> Workspace {
+        let chapter = format!(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"><head><title>t</title><link rel="stylesheet" type="text/css" href="s.css"/></head>{body}</html>"#
+        );
+        let opf = format!(
+            r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="id">x</dc:identifier><dc:title>t</dc:title><dc:language>en</dc:language><meta property="dcterms:modified">2026-01-01T00:00:00Z</meta></metadata>
+  <manifest><item href="c.xhtml" id="c" media-type="application/xhtml+xml"/><item href="s.css" id="s" media-type="text/css"/></manifest>
+  <spine {spine_attr}><itemref idref="c"/></spine>
+</package>"#
+        );
+        container(&[
+            (
+                "META-INF/container.xml",
+                r#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#,
+            ),
+            ("content.opf", &opf),
+            ("c.xhtml", &chapter),
+            ("s.css", css),
+        ])
+    }
+
+    fn direction_fix(ws: &mut Workspace) -> bool {
+        let report = ws.detect().unwrap();
+        assert!(
+            report.messages.iter().any(|m| m.id == "CSS-001"),
+            "the fixture must carry the finding, or this test proves nothing"
+        );
+        match css_direction_ltr(&report, ws).into_iter().next() {
+            Some(fix) => {
+                assert_eq!(fix.tier, Tier::ConfirmNeeded);
+                fix.apply(ws);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The shelf's shape, and where the declaration sits in its rule.
+    #[test]
+    fn direction_ltr_is_deleted_from_a_stylesheet() {
+        for (css, want) in [
+            (
+                ".a { color: red; direction: ltr; margin: 0 }",
+                ".a { color: red; margin: 0 }",
+            ),
+            (
+                ".a {\n  direction: LTR;\n  margin: 0\n}",
+                ".a {\n  margin: 0\n}",
+            ),
+            (".a { margin: 0; direction: ltr }", ".a { margin: 0; }"),
+            (".a { direction: ltr !important; }", ".a { }"),
+            (".a { direction : ltr ; margin: 0 }", ".a { margin: 0 }"),
+            (
+                "@media print { .a { direction: ltr; } }",
+                "@media print { .a { } }",
+            ),
+        ] {
+            let mut ws = direction_book(css, r#"<body dir="ltr"><p>x</p></body>"#, "");
+            assert!(direction_fix(&mut ws), "{css}");
+            assert_eq!(ws.get_text("s.css").unwrap(), want);
+            assert!(
+                !ws.detect()
+                    .unwrap()
+                    .messages
+                    .iter()
+                    .any(|m| m.id == "CSS-001"),
+                "{css}"
+            );
+        }
+    }
+
+    /// Each line is a way for a book to set another direction.
+    #[test]
+    fn direction_ltr_is_kept_where_the_book_may_set_another_direction() {
+        let ltr = ".a { direction: ltr; }";
+        let plain = "<body><p>x</p></body>";
+        for (css, body, spine) in [
+            (ltr, r#"<body dir="rtl"><p>x</p></body>"#, ""),
+            (ltr, r#"<body><p dir="RTL">x</p></body>"#, ""),
+            (ltr, r#"<body><p dir="auto">x</p></body>"#, ""),
+            (ltr, "<body><p><bdi>x</bdi></p></body>", ""),
+            (ltr, r#"<body><p style="direction: rtl">x</p></body>"#, ""),
+            (
+                ltr,
+                r#"<body><p style="unicode-bidi: plaintext">x</p></body>"#,
+                "",
+            ),
+            (
+                ltr,
+                r#"<body><svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><text direction="rtl">x</text></svg></body>"#,
+                "",
+            ),
+            (
+                ltr,
+                r#"<body><svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><text unicode-bidi="embed">x</text></svg></body>"#,
+                "",
+            ),
+            (".a { direction: ltr; } .b { direction: rtl; }", plain, ""),
+            (".a { direction: ltr; unicode-bidi: embed; }", plain, ""),
+            (
+                "@media print { .b { direction: rtl; } } .a { direction: ltr; }",
+                plain,
+                "",
+            ),
+            (ltr, plain, r#"page-progression-direction="rtl""#),
+        ] {
+            let mut ws = direction_book(css, body, spine);
+            assert!(!direction_fix(&mut ws), "{css} / {body} / {spine}");
+            assert_eq!(ws.get_text("s.css").unwrap(), css);
+        }
+    }
+
+    /// A value other than exactly `ltr` is not this fixer's: nothing moves.
+    #[test]
+    fn a_value_other_than_ltr_is_declined() {
+        for value in ["inherit", "l\\74r", "ltr /* c */ ltr"] {
+            let css = format!(".a {{ direction: {value}; }}");
+            let mut ws = direction_book(&css, "<body><p>x</p></body>", "");
+            assert!(!direction_fix(&mut ws), "{css}");
+        }
+    }
+
+    /// A `<style>` in the book is checked and repaired like a stylesheet.
+    #[test]
+    fn inline_style_is_repaired_and_checked() {
+        let mut ws = direction_book("p { margin: 0 }", "<body><p>x</p></body>", "");
+        let chapter = ws.get_text("c.xhtml").unwrap().replace(
+            "<title>t</title>",
+            "<title>t</title><style>.a { direction: ltr; }</style>",
+        );
+        ws.set_text("c.xhtml", chapter.clone());
+        assert!(direction_fix(&mut ws));
+        assert!(
+            ws.get_text("c.xhtml")
+                .unwrap()
+                .contains("<style>.a { }</style>")
+        );
+
+        let mut ws = direction_book(".a { direction: ltr; }", "<body><p>x</p></body>", "");
+        let chapter = ws.get_text("c.xhtml").unwrap().replace(
+            "<title>t</title>",
+            "<title>t</title><style>.b { direction: rtl; }</style>",
+        );
+        ws.set_text("c.xhtml", chapter);
+        assert!(!direction_fix(&mut ws));
+    }
+
+    /// A `style` attribute stays reported, and is not a reason to touch more.
+    #[test]
+    fn direction_ltr_in_a_style_attribute_is_left() {
+        let mut ws = direction_book(
+            "p { margin: 0 }",
+            r#"<body><p style="direction: ltr">x</p></body>"#,
+            "",
+        );
+        assert!(!direction_fix(&mut ws));
+    }
+
+    /// A stylesheet that does not decode losslessly cannot be read for this.
+    #[test]
+    fn an_unreadable_stylesheet_declines_direction() {
+        use std::io::Write;
+        let mut buf = Vec::new();
+        {
+            let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            let opts = zip::write::SimpleFileOptions::default();
+            for (name, body) in [
+                ("mimetype", &b"application/epub+zip"[..]),
+                ("s.css", b"p::before { content: \"\xff\" }"),
+            ] {
+                zip.start_file(name, opts).unwrap();
+                zip.write_all(body).unwrap();
+            }
+            zip.finish().unwrap();
+        }
+        assert!(book_may_set_direction(&Workspace::load(&buf).unwrap()));
+    }
+
+    /// A file the check cannot read declines the book.
+    #[test]
+    fn an_unreadable_document_declines_direction() {
+        let ws = direction_book(".a { direction: ltr; }", "<body><p>x</p></body>", "");
+        let mut names: Vec<(String, String)> = ws
+            .names()
+            .filter(|n| n.as_str() != "mimetype")
+            .map(|n| (n.clone(), ws.get_text(n).unwrap()))
+            .collect();
+        names.push(("broken.xhtml".to_string(), "<html><body>".to_string()));
+        let files: Vec<(&str, &str)> = names
+            .iter()
+            .map(|(a, b)| (a.as_str(), b.as_str()))
+            .collect();
+        assert!(book_may_set_direction(&container(&files)));
+        assert!(!book_may_set_direction(&ws));
     }
 
     // ---- fix.content_url_spaces ------------------------------------

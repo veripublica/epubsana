@@ -33,6 +33,8 @@ grows one carefully-argued entry at a time.
 | `RSC-020` | `opf.manifest_item.unencoded_space_in_href` | AutoSafe | A manifest `href` contains a raw space | [Percent-encode the space as `%20`](#rsc-020--unencoded-space-in-a-manifest-href) |
 | `RSC-020` | `opf.ncx.content_src_unencoded_space` | AutoSafe | An NCX `<content src>` contains a raw space | [Percent-encode the space as `%20`](#rsc-020--unencoded-space-in-an-ncx-content-src) |
 | `RSC-020` | `opf.content_document.malformed_relative_url` (a space) | AutoSafe | A link or image reference in a content document contains a raw space | [Percent-encode the space, where the validator then accepts the URL](#rsc-020--unencoded-space-in-a-content-documents-url) |
+| `RSC-020` | `opf.content_document.malformed_absolute_url` (an email address) | ConfirmNeeded | A link is `http://name%40domain` and its text is `name@domain` | [Point it at `mailto:name@domain`](#rsc-020--an-email-address-written-as-a-web-address) |
+| `CSS-001` | *(none)* | ConfirmNeeded | A stylesheet says `direction: ltr` in an EPUB 3 book where nothing can set another direction | [Delete the declaration](#css-001--direction-ltr-where-nothing-sets-another-direction) |
 | `OPF-014` | `opf.content_document.property_used_undeclared` | AutoSafe | A content document uses a feature its manifest item doesn't declare | [Add the token to that item's `properties`](#opf-014--undeclared-content-property) |
 | `PKG-006` / `PKG-005` | *(none)* | AutoSafe | The `mimetype` entry is not first in the ZIP, or its header carries an extra field | [Re-emit it first and stored, touching no content](#pkg-006--pkg-005--the-mimetype-entrys-packaging) |
 | `PKG-014` | *(none)* | AutoSafe | A ZIP directory entry has nothing inside it | [Leave the entry out of the archive](#pkg-014--an-empty-directory-entry) |
@@ -536,6 +538,53 @@ book; declining is the repair. A package whose `version` cannot be read is not
 treated as EPUB 2, since declining there would withdraw a repair on a guess.
 
 ---
+
+## RSC-020 — an email address written as a web address
+
+> **Written spec-first on 2026-11-04**, before the code.
+
+**Finding.** `RSC-020` / `opf.content_document.malformed_absolute_url`,
+**error**, both versions. `params[0]` is the URL as the file holds it and
+`element_path` names the element. A percent-encoded `@` in a host is not
+allowed, so `http://kitap%40kapital.com.tr` does not parse as a URL.
+
+**Fix** (`fix.email_as_http_url`, ConfirmNeeded). On the reported link, replace
+the `href` with `mailto:name@domain`. Only the attribute value changes; the link
+text stays. One proposal per document.
+
+**Why it needs a yes.** The text says what the link is, and the URL as written
+leads nowhere, so there is one repair that matches the text. It still changes
+where the link goes, which is more than a spelling, so the reader decides.
+
+**Only where the detector then accepts the URL.** The same trial as
+[`fix.content_url_spaces`](#rsc-020--unencoded-space-in-a-content-documents-url):
+each planned rewrite is applied to a copy of the book, and one epubveri still
+reports under this rule is declined.
+
+**When it declines.**
+
+- **The link text, with XML whitespace trimmed, is not exactly the address.** A
+  link reading "write to us", or an empty one, would make the address a guess.
+- **Anything besides the address follows the scheme:** a path, a query, a
+  fragment, a port, a raw `@`, or any percent-escape other than the one `%40`.
+- **The decoded address does not hold exactly one `@`** with text on both sides.
+- **The scheme is not `http` or `https`.** `mailto:editor%40ithaki.com.tr` is
+  a different case and is not reported.
+- **The element's `href` is not `params[0]`, or is spelled differently in the
+  file** (a character reference inside it).
+- A document that will not parse, or whose reported element is not found.
+
+**Measured (562 books, epubveri 0.37.1, 2026-11-04, before building).** 4 links
+in 4 books have this shape, every one with text equal to the address. epubveri
+reports 3 of them; *Blink*, whose package says `version="1.0"`, has no such
+finding, so the fixer does not reach it.
+
+**Measured after building (562 books, epubveri 0.37.1, 2026-11-04).** The
+whole-shelf A/B (`bump_ab`, against `9858ae3`) moves exactly those 3 books: one
+proposal each, applied, none reverted, and no other line differs. After
+`repair -y`, 2 of the 3 are valid (*Ömer Seyfettin*, *Çocukluğun Soğuk
+Geceleri*); this was their last error. *Dahi Diktatör* keeps an empty
+`dc:identifier`. No reader opened the links.
 
 ## PKG-006 / PKG-005 — the `mimetype` entry's packaging
 
@@ -3485,3 +3534,63 @@ The one left, in *Kadınlar*, is an `<img>` with no `alt`. No other book changes
 `repair -y`, 4 of the 8 are valid; 3 more hold only `clear` attributes
 (`htm.obsolete_attribute`), which epublift's EPUB 3 upgrade converts.
 
+## CSS-001 — `direction: ltr` where nothing sets another direction
+
+> **Written spec-first on 2026-11-04**, before the code.
+
+**Finding.** `CSS-001`, no rule key, **error**, EPUB 3 only. EPUB 3.3 §6.3.1.2:
+a CSS style sheet "MUST NOT include the `direction` property". An EPUB 2 book
+may carry it, so it surfaces when the book is upgraded or when a package already
+declares EPUB 3. The note in that section gives the reason (reading systems may
+not implement CSS, or may switch it off) and names the `dir` attribute as the
+method to use.
+
+**Fix** (`fix.css_direction_ltr`, ConfirmNeeded). In each reported stylesheet or
+inline `<style>`, delete every declaration whose value is exactly `ltr`, with
+the whitespace before it and its `;`. A rule left empty stays. One proposal per
+file. A value other than `ltr` would need a `dir` attribute on the right
+elements, which is not this fixer's job.
+
+**Why it's safe.** `ltr` is the initial value of `direction`. It can only
+differ from having no declaration when something sets another direction, and
+this fixer first checks the whole book for every way to do that. A reading
+system "MUST NOT assume" a resource's base direction from the package
+(Reading Systems 3.3 §3.7), so `dc:language` is no such way. The same argument
+already removes `page-progression-direction="ltr"` in
+`fix.epub3_attr_in_epub2_package`.
+
+**Why it needs a yes.** Readers do apply this declaration, and the case for
+deleting it rests on this fixer's own check of the book, so the book's owner
+decides.
+
+**When it declines.** The whole book declines if any content document, SVG or
+stylesheet holds:
+
+- **A `dir` attribute** whose value is not `ltr`, in any case (`rtl`, `auto`, an
+  invalid value).
+- **A `<bdi>` element**, which isolates its text and takes its direction from
+  that text.
+- **An SVG `direction` attribute** that is not `ltr`, or a `unicode-bidi`
+  attribute.
+- **A `direction` declaration that is not `ltr`, or any `unicode-bidi`
+  declaration**, in a stylesheet, an inline `<style>` or a `style` attribute.
+- **`page-progression-direction="rtl"`** in the package. It sets page order, not
+  text direction, but a book declaring it is not one to assume about.
+- **A file that cannot be read for this check:** a markup document or package
+  that does not parse, or a stylesheet that does not decode losslessly.
+
+**It leaves alone** `direction: ltr` in a `style` attribute: there is no such
+case on the shelf, so it has not been built.
+
+**Measured (562 books, epubveri 0.37.1, 2026-11-04, before building).** 2 books
+hold the declaration in a stylesheet (*Demirciler Çarşısı Cinayeti*, *Mutluluk*),
+both EPUB 2, one rule each at `stylesheet.css:11`. Neither holds a `dir` other
+than `ltr`, a `<bdi>`, or `page-progression-direction="rtl"`. The finding appears
+only when they are checked as EPUB 3.
+
+**Measured after building (562 books, epubveri 0.37.1, 2026-11-04).** The
+whole-shelf A/B does not move: no book on the shelf reports `CSS-001` as it
+stands. On copies of the 2 books upgraded by epublift, the fixer proposes one
+deletion each, `CSS-001` goes to 0, and the only line removed from
+`stylesheet.css` is `direction: ltr;`. Both copies keep other errors. No reader
+opened them.

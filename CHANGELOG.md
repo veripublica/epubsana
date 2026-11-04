@@ -8,6 +8,18 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [Unreleased]
+
+### Added
+
+- `fix.email_as_http_url` (`RSC-020`, ConfirmNeeded): a link written as
+  `http://name%40domain` whose text is exactly `name@domain` becomes
+  `mailto:name@domain`.
+- `fix.css_direction_ltr` (`CSS-001`, ConfirmNeeded): deletes `direction: ltr` from a
+  stylesheet or `<style>` in an EPUB 3 book, where EPUB 3.3 does not allow the
+  property, unless anything in the book can set another text direction. An EPUB 2
+  book never reports this, so it mostly reaches books upgraded to EPUB 3.
+
 ## [0.38.0] - 2026-11-04
 
 ### Security

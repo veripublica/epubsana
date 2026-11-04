@@ -33,7 +33,7 @@ result and reports what changed.
   package and epublift. The same book with the same approvals comes back byte for
   byte the same from each.
 
-There are 53 fixers. Three act on findings below error severity
+There are 55 fixers. Three act on findings below error severity
 (`opf.metadata.empty_element`, `opf.manifest_item.non_preferred_media_type`,
 `opf.guide.duplicate_reference`), so they clear findings without moving the error
 count.
