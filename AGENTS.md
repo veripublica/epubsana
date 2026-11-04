@@ -223,9 +223,10 @@ about books unlike those. A zero means only that this library holds no such case
 | --- | --- | --- |
 | 2026-10-28, 0.36.0 | 562 | Written with no fix applied, each book comes back byte-identical. |
 | 2026-11-04, 0.37.0 → 0.38.0 | 562 | `(id, rule)` counts before and after, plan, outcomes and repaired bytes: no difference. No hostile file was tried. |
+| 2026-11-04, 0.38.0 → 0.39.0 | 562 | Every fix approved: exactly 3 books change, each through `fix.email_as_http_url`, with one fewer error and no fix reverted. |
 
-Before a release, `scripts/preflight.sh` runs everything CI runs. At 0.38.0,
-`cargo test --workspace` passes 528 tests. `examples/fuzz.rs` corrupts two defective
+Before a release, `scripts/preflight.sh` runs everything CI runs. At 0.39.0,
+`cargo test --workspace` passes 542 tests. `examples/fuzz.rs` corrupts two defective
 seed books and runs each result through `repair()` with every fix approved, looking
 for panics.
 
