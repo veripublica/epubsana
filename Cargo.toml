@@ -437,9 +437,19 @@ members = ["epubsana-wasm"]
 # **0.37.1 (2026-11-04) carries zip 9.3.0 and roxmltree 0.21.2,** which we also
 # raise ourselves below.
 #
+# **0.40.1 (2026-11-11) is a tracking floor, taken with zip 9.5.1 (R19).** It
+# spans 0.38 (the verdict follows the specification, `SPEC-*` ids), 0.39 and
+# 0.40. No source change. Measured on 562 books (0.37.1 vs 0.40.1, the linked
+# version printed by both arms): every plan, outcome and repaired-byte hash is
+# identical. 19 books gain error findings the specification makes: unprefixed
+# no-namespace `<item>` in a prefixed OPF (6 books that used to end valid now
+# keep 4 errors each), `img_missing_alt`, SPEC-002 fallbacks. `page-map` (2
+# books) moved from `opf.spine.pagemap_not_allowed` to
+# `opf.package.schema_violation`; we dispatch on neither for it.
+#
 # For local co-development of epubveri, add an uncommitted override:
 #   [patch.crates-io] epubveri = { path = "../epubveri" }
-epubveri = "0.37.1"
+epubveri = "0.40.1"
 # CSS, located: the family's own parser, taken directly as a peer (Baris,
 # 2026-10-18; epubveri will not re-export it). Two conditions. **One styloria
 # in the lock**: the requirement is epubveri's own (`0.19`), so the text we
@@ -458,7 +468,7 @@ styloria = "0.19"
 # GHSA-gmfj-vffv-32pw and GHSA-wjr6-mhvj-cjvm (fixed in 9.1.0); family
 # dependency report 2026-10-28. All three are about reading, which we do.
 # 9.3.0 (2026-11-04) carries reader security merges no advisory lists yet.
-zip = { version = "9.3.0", default-features = false, features = ["deflate"] }
+zip = { version = "9.5.1", default-features = false, features = ["deflate"] }
 # Inflates stored and deflated entries from their raw bytes in
 # `Workspace::load`, as epubveri does: zip 9 refuses an entry longer than its
 # header declares, and one with a wrong CRC, where epubcheck reads both. It

@@ -8,6 +8,19 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [Unreleased]
+
+### Changed
+
+- Moves to epubveri 0.40.1, whose verdict follows the EPUB specification rather
+  than epubcheck. A book epubcheck accepts can now be reported invalid, and a
+  repaired book can keep errors it did not show before: for example, manifest
+  items outside the package namespace, images without `alt`, and non-core
+  resources without a fallback. On the 562-book shelf, every proposal, outcome
+  and repaired byte is unchanged. 19 books report more errors, and 6 that used
+  to end valid after repair no longer do.
+- Moves to zip 9.5.1.
+
 ## [0.39.0] - 2026-11-04
 
 ### Added
