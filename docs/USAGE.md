@@ -584,7 +584,7 @@ reads both:
 ```json
 {
   "tool": "epubsana",
-  "tool_version": "0.39.0",
+  "tool_version": "0.40.0",
   "convention": "0.7",
   "status": "problems",
   "inputs": [
@@ -650,7 +650,7 @@ carries `error` (the reason), no `summary`, and no items:
 ```json
 {
   "tool": "epubsana",
-  "tool_version": "0.39.0",
+  "tool_version": "0.40.0",
   "convention": "0.7",
   "status": "error",
   "inputs": [

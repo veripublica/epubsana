@@ -46,7 +46,7 @@ dependencies = [
 
 [[package]]
 name = "epubsana"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "epubveri",
  "flate2",
@@ -60,7 +60,7 @@ dependencies = [
 
 [[package]]
 name = "epubsana-wasm"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "epubsana",
  "serde",
