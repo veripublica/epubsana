@@ -8,6 +8,21 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [Unreleased]
+
+### Changed
+
+- Moves to epubveri 0.43.0 and styloria 0.20.
+  - In EPUB 3, a CSS parse error is now usage, not an error, so it no longer
+    makes a book invalid. `fix.css_unterminated` still closes an unterminated
+    block there. EPUB 2 is unchanged.
+  - `fix.font_face_missing_target` no longer deletes an `@font-face` whose
+    source is an unquoted url holding a space, a quote or a parenthesis
+    (`url(a b.ttf)`). Such a url is malformed and names no file, so it is not
+    reported missing.
+  - On the 562-book shelf, every finding, proposal, outcome and repaired byte
+    is unchanged.
+
 ## [0.40.0] - 2026-11-11
 
 ### Changed

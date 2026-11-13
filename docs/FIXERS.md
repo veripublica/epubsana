@@ -2135,16 +2135,20 @@ styloria only says where the `@font-face` rules are and which urls each holds.
   `@media` too) with its span; the deletion is that span plus the whitespace
   before it, as before.
 - The rule's urls are `block_url_references` of its block: `url()`, `url("…")`,
-  `src()`, and a bad-url token all count; a url in a comment does not.
+  `src()`, and a bad-url token all count (a bad url then declines the
+  rule, below); a url in a comment does not.
 - The rule's one url must **equal** a reported `params[0]`: styloria's value
   for it, escapes resolved as epubveri resolves them. Until 0.35 this was a
   substring match on the url's source text, which took a working
   `url(myfont.ttf)` for a missing `font.ttf` and deleted both rules, and never
   matched an escaped url (epubveri found both by reading the code,
-  2026-10-22). For a `<bad-url-token>`, which styloria gives as source text,
-  the value is the text inside `url(…)` trimmed of CSS whitespace; where
-  epubcheck's reading stops earlier (a `)` inside) or the name is escaped
-  (`\75rl(`), the two differ and the rule is declined.
+  2026-10-22).
+- **A `<bad-url-token>` is declined** (epubveri 0.41.0, 2026-11-13). It refers
+  to nothing (no CSS grammar accepts one), so epubveri no longer reports it
+  missing, and a rule whose one source is a bad url was never the finding.
+  Until 0.40 we read epubcheck's target out of it, the text inside `url(…)`
+  trimmed of CSS whitespace; that reading would now let a bad url whose text
+  equals some other reported url delete a rule nothing reported.
 - The stylesheet is written back with `encode_stylesheet` in its own encoding
   and with its own BOM, so every byte outside the deleted rule is unchanged.
 - **Inline `<style>` in a content document** (9 of the 27 proposals on the

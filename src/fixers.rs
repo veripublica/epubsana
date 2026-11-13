@@ -7651,12 +7651,7 @@ fn inline_style_ranges(text: &str) -> Vec<Range<usize>> {
 /// A rule whose block is never closed, or holds a nested rule, is left
 /// alone: a stylesheet shaped that way is not one to rewrite.
 fn plan_font_face_drops(css: &str, urls: &BTreeSet<String>) -> Option<Vec<MetaEdit>> {
-    let (sheet, errors) = styloria::parse_stylesheet(css);
-    let unclosed: Vec<usize> = errors
-        .iter()
-        .filter(|e| e.kind == styloria::SyntaxErrorKind::UnterminatedBlock)
-        .map(|e| e.span.start)
-        .collect();
+    let (sheet, _) = styloria::parse_stylesheet(css);
     let mut edits: Vec<MetaEdit> = Vec::new();
     let mut stack: Vec<&styloria::Spanned<styloria::Rule<'_>>> = sheet.rules.iter().collect();
     while let Some(rule) = stack.pop() {
@@ -7672,7 +7667,7 @@ fn plan_font_face_drops(css: &str, urls: &BTreeSet<String>) -> Option<Vec<MetaEd
             continue;
         };
         let span = rule.span;
-        if unclosed.iter().any(|&u| span.start <= u && u < span.end)
+        if block_never_closed(css, block)
             || block
                 .node
                 .iter()
@@ -7685,7 +7680,7 @@ fn plan_font_face_drops(css: &str, urls: &BTreeSet<String>) -> Option<Vec<MetaEd
         let [only] = refs.as_slice() else {
             continue;
         };
-        if !urls.contains(font_face_url(only, css)) {
+        if !font_face_url(only).is_some_and(|u| urls.contains(u)) {
             continue;
         }
         edits.push(MetaEdit {
@@ -7698,23 +7693,11 @@ fn plan_font_face_drops(css: &str, urls: &BTreeSet<String>) -> Option<Vec<MetaEd
 
 /// The url of `r` in the form epubveri's `params[0]` carries, to be compared
 /// by equality: a substring match took `url(myfont.ttf)` for a missing
-/// `font.ttf`. styloria resolves escapes as epubveri does, except in a
-/// `<bad-url-token>`, which it gives as source text; there epubcheck's reading
-/// is the text inside `url(…)`, trimmed of CSS whitespace. Where that reading
-/// would stop earlier (a `)` inside), the two differ and the rule is declined;
-/// so do they where the name is escaped (`\75rl(`), since the four bytes cut
-/// are then not `url(` and what is left still holds its `(`.
-fn font_face_url<'a>(r: &'a styloria::UrlReference<'_>, css: &'a str) -> &'a str {
-    if r.form != styloria::UrlForm::BadUrl {
-        return &r.url;
-    }
-    let inner = r
-        .span
-        .slice(css)
-        .get(4..)
-        .and_then(|s| s.strip_suffix(')'))
-        .unwrap_or("");
-    inner.trim_matches(|c| matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0C'))
+/// `font.ttf`. styloria resolves escapes as epubveri does. `None` for a
+/// `<bad-url-token>`: it refers to nothing, and since epubveri 0.41.0 it is
+/// never reported missing, so a rule whose source it is was not the finding.
+fn font_face_url<'a>(r: &'a styloria::UrlReference<'_>) -> Option<&'a str> {
+    (r.form != styloria::UrlForm::BadUrl).then_some(&*r.url)
 }
 
 /// The rules directly inside `rule`'s block, pushed for a depth-first walk.
@@ -8029,15 +8012,41 @@ fn plan_unterminated_file(file: &str, text: &str) -> Option<Vec<MetaEdit>> {
 /// Measured on 35,120 cuts of the shelf's stylesheets (2026-10-23): wherever
 /// nothing is left open, the repaired text serializes as the original does.
 fn close_open_blocks(css: &str) -> Option<String> {
-    let open = |text: &str| {
-        styloria::parse_stylesheet(text)
-            .1
-            .iter()
-            .filter(|e| e.kind == styloria::SyntaxErrorKind::UnterminatedBlock)
-            .count()
-    };
-    let closers = "}".repeat(open(css));
-    (!closers.is_empty() && open(&format!("{css}{closers}")) == 0).then_some(closers)
+    let closers = "}".repeat(open_block_count(css));
+    (!closers.is_empty() && open_block_count(&format!("{css}{closers}")) == 0).then_some(closers)
+}
+
+/// How many blocks `css` leaves open at its end, by [`block_never_closed`].
+/// The open ones form one chain, each the last item of the one around it.
+fn open_block_count(css: &str) -> usize {
+    let (sheet, _) = styloria::parse_stylesheet(css);
+    let mut stack: Vec<&styloria::Spanned<styloria::Rule<'_>>> = sheet.rules.iter().collect();
+    let mut open = 0;
+    while let Some(rule) = stack.pop() {
+        if rule
+            .node
+            .block()
+            .is_some_and(|b| block_never_closed(css, b))
+        {
+            open += 1;
+        }
+        push_nested_rules(&rule.node, &mut stack);
+    }
+    open
+}
+
+/// Whether `block`, or a bracket inside it, was still open at the end of
+/// `css`: epubveri's reading for `css.stylesheet.unterminated` (0.41.0), since
+/// styloria 0.20 closes such a block at the end of input without an error
+/// (CSS Syntax §5.5). A block that closed ends in its own `}`, after its last
+/// item. One that did not ends with its last token: a byte other than `}`, or
+/// a `}` its last item holds (`p { a { b: c }`, or a `(` or `[` left open in a
+/// value).
+fn block_never_closed(css: &str, block: &styloria::Block<'_>) -> bool {
+    // A block's span holds at least its `{`, so `end` is never 0.
+    let close = block.span.end.saturating_sub(1);
+    css.as_bytes().get(close) != Some(&b'}')
+        || block.node.last().is_some_and(|i| i.span().end > close)
 }
 
 /// The properties where an image that does not load draws what `none` draws:
@@ -12781,7 +12790,14 @@ mod tests {
         let css = "body { color: black }\n@media amzn-mobi {\n  p { margin: 0 }\n";
         let mut ws = book(css.as_bytes());
         let report = ws.detect().unwrap();
-        assert!(report.messages.iter().any(|m| m.rule == rule));
+        // An EPUB 3 book: since epubveri 0.41.0 the finding is usage there,
+        // and this fixer must keep firing on it (it filters by rule only).
+        assert!(
+            report
+                .messages
+                .iter()
+                .any(|m| m.rule == rule && m.severity == Severity::Usage)
+        );
         let fixes = css_unterminated(&report, &ws);
         assert_eq!(fixes.len(), 1);
         (fixes.into_iter().next().unwrap().apply_fn)(&mut ws);
@@ -12821,23 +12837,30 @@ mod tests {
         }
     }
 
-    /// A `<bad-url-token>` is read as epubcheck reads it: the text inside
-    /// `url(…)`, trimmed. A `)` inside it stops that reading short of the
-    /// token, so the two cannot be equal and the rule is declined.
+    /// A `<bad-url-token>` refers to nothing (epubveri 0.41.0), so a rule
+    /// whose source it is was not the finding, even where the text inside
+    /// `url(…)` equals a url reported missing elsewhere. Until 0.40 that text,
+    /// trimmed, was the url and this rule was deleted.
     #[test]
-    fn font_face_reads_a_bad_url_as_its_trimmed_inside() {
+    fn font_face_declines_a_bad_url_even_where_its_text_was_reported() {
         let urls = BTreeSet::from(["a b.ttf".to_string()]);
-        let css = "@font-face { src: URL( a b.ttf\t); }";
-        let out = apply_edits(css, plan_font_face_drops(css, &urls).unwrap());
-        assert!(!out.contains("@font-face"), "{out}");
-        let partial = "@font-face { src: url(my a b.ttf); }";
-        assert!(plan_font_face_drops(partial, &urls).is_none());
-        let paren = BTreeSet::from(["a b\\".to_string()]);
-        let css = "@font-face { src: url(a b\\).ttf); }";
-        assert!(plan_font_face_drops(css, &paren).is_none());
-        // `\75` is `u`: the function is `url(`, its source text is not.
-        let escaped = "@font-face { src: \\75rl(a b.ttf); }";
-        assert!(plan_font_face_drops(escaped, &urls).is_none());
+        for css in [
+            "@font-face { src: URL( a b.ttf\t); }",
+            "@font-face { src: url(a b.ttf); }",
+            "@font-face { src: \\75rl(a b.ttf); }",
+        ] {
+            assert!(plan_font_face_drops(css, &urls).is_none(), "{css}");
+        }
+        // styloria gives a bad url its source text: a quoted url elsewhere
+        // whose value is that text must not reach this rule.
+        let source = BTreeSet::from(["url(a b.ttf)".to_string()]);
+        let bad = "@font-face { src: url(a b.ttf); }";
+        assert!(plan_font_face_drops(bad, &source).is_none());
+        let quoted = "@font-face { src: url(\"a b.ttf\"); }";
+        assert_eq!(
+            apply_edits(quoted, plan_font_face_drops(quoted, &urls).unwrap()),
+            ""
+        );
     }
 
     #[test]
@@ -12849,16 +12872,18 @@ mod tests {
         assert!(plan_font_face_drops(nested, &urls).is_none());
     }
 
-    /// epubveri 0.21 reads an unquoted `url()` holding a space, a quote or a
-    /// parenthesis as epubcheck does (up to the first `)`), so a missing font
-    /// there now reaches this fixer; before, it was CSS-008 and nothing else.
-    /// Through the real detector, because the claim is about what it reports.
+    /// Since epubveri 0.41.0 an unquoted `url()` holding a space, a quote or
+    /// a parenthesis is a `<bad-url-token>` that refers to nothing: no
+    /// missing font is reported, and nothing is planned. Through the real
+    /// detector, because the claim is about what it reports. (0.21 to 0.40
+    /// read a target out of it as epubcheck does, and this fixer deleted the
+    /// rule.)
     #[test]
-    fn font_face_drops_a_missing_font_named_by_an_unquoted_bad_url() {
+    fn font_face_leaves_a_font_named_by_an_unquoted_bad_url() {
         for src in ["f/a b.ttf", "f/q'q.ttf", "f/p(p.ttf"] {
             let css =
                 format!("@font-face {{ font-family: A; src: url({src}); }}\np {{ margin: 0 }}");
-            let mut ws = container(&[
+            let ws = container(&[
                 (
                     "META-INF/container.xml",
                     r#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#,
@@ -12875,16 +12900,14 @@ mod tests {
                 ("s.css", &css),
             ]);
             let report = ws.detect().unwrap();
-            let fixes = font_face_missing_target(&report, &ws);
-            assert_eq!(
-                fixes.len(),
-                1,
-                "{src}: the missing font is reported and planned"
+            assert!(
+                !report
+                    .messages
+                    .iter()
+                    .any(|m| m.rule == Some("css.font_face.missing_target")),
+                "{src}: a bad url is reported missing again"
             );
-            (fixes.into_iter().next().unwrap().apply_fn)(&mut ws);
-            let out = ws.get_text("s.css").unwrap();
-            assert!(!out.contains("@font-face"), "{src}: {out}");
-            assert!(out.contains("p { margin: 0 }"), "{src}: {out}");
+            assert!(font_face_missing_target(&report, &ws).is_empty(), "{src}");
         }
     }
 

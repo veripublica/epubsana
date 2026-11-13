@@ -447,18 +447,29 @@ members = ["epubsana-wasm"]
 # books) moved from `opf.spine.pagemap_not_allowed` to
 # `opf.package.schema_violation`; we dispatch on neither for it.
 #
+# **0.43.0 (2026-11-13), taken with styloria 0.20 (its own requirement).** It
+# spans 0.41 to 0.43. Two rules we consume moved. In EPUB 3, `CSS-008` is usage
+# (`css.stylesheet.unterminated` included; we filter by rule only, so the fixer
+# still fires). A `<bad-url-token>` is no longer reported missing, so
+# `fix.font_face_missing_target` now declines one. styloria 0.20 dropped
+# `SyntaxErrorKind::UnterminatedBlock`, so an open block is read off the tree
+# as epubveri reads it (`block_never_closed`). Measured on 562 books (0.40.1
+# vs 0.43.0, census keyed by severity too): every finding, plan, outcome and
+# repaired-byte hash is identical. All 13 books with a CSS-008 are EPUB 2, so
+# the shelf cannot show the severity move; the unit test does.
+#
 # For local co-development of epubveri, add an uncommitted override:
 #   [patch.crates-io] epubveri = { path = "../epubveri" }
-epubveri = "0.40.1"
+epubveri = "0.43.0"
 # CSS, located: the family's own parser, taken directly as a peer (Baris,
 # 2026-10-18; epubveri will not re-export it). Two conditions. **One styloria
-# in the lock**: the requirement is epubveri's own (`0.19`), so the text we
+# in the lock**: the requirement is epubveri's own (`0.20`), so the text we
 # parse is the text it parsed, and `scripts/preflight.sh` fails on any
 # duplicate in `cargo tree -d`. **styloria locates, it never decides**: which
 # url is missing or which id is invalid is still epubveri's finding; styloria
 # only says where a rule is, which selectors name an id, and how to decode and
 # re-encode a stylesheet byte for byte. None of its types is in our public API.
-styloria = "0.19"
+styloria = "0.20"
 # Pure-Rust only (no C deps), same philosophy as epubveri: zip's "deflate"
 # feature uses zlib-rs (Rust); bzip2/zstd (C) stay disabled.
 # Aligned to epubveri's zip — the family shares one zip version because
