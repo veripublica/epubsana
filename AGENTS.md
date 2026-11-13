@@ -225,8 +225,9 @@ about books unlike those. A zero means only that this library holds no such case
 | 2026-11-04, 0.37.0 → 0.38.0 | 562 | `(id, rule)` counts before and after, plan, outcomes and repaired bytes: no difference. No hostile file was tried. |
 | 2026-11-04, 0.38.0 → 0.39.0 | 562 | Every fix approved: exactly 3 books change, each through `fix.email_as_http_url`, with one fewer error and no fix reverted. |
 | 2026-11-11, 0.39.0 → 0.40.0 | 562 | Every fix approved: plan, outcomes and repaired bytes unchanged. epubveri 0.40.1 reports more errors in 19 books, so 6 no longer end valid. |
+| 2026-11-13, 0.40.0 → 0.41.0 | 562 | Every fix approved: findings (with their severity), plan, outcomes and repaired bytes unchanged. Every book here with a CSS parse error is EPUB 2, so the change of severity in EPUB 3 does not show. |
 
-Before a release, `scripts/preflight.sh` runs everything CI runs. At 0.40.0,
+Before a release, `scripts/preflight.sh` runs everything CI runs. At 0.41.0,
 `cargo test --workspace` passes 542 tests. `examples/fuzz.rs` corrupts two defective
 seed books and runs each result through `repair()` with every fix approved, looking
 for panics.

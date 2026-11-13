@@ -584,7 +584,7 @@ reads both:
 ```json
 {
   "tool": "epubsana",
-  "tool_version": "0.40.0",
+  "tool_version": "0.41.0",
   "convention": "0.7",
   "status": "problems",
   "inputs": [
@@ -650,7 +650,7 @@ carries `error` (the reason), no `summary`, and no items:
 ```json
 {
   "tool": "epubsana",
-  "tool_version": "0.40.0",
+  "tool_version": "0.41.0",
   "convention": "0.7",
   "status": "error",
   "inputs": [
@@ -732,7 +732,7 @@ safe, and when epubsana declines, see the **[fix catalogue](./FIXERS.md)**.
 | `OPF-029` | `opf.manifest_item.declared_media_type_mismatch` | ConfirmNeeded | An image is declared as one core image type and its bytes, by their signature, are another (a PNG declared `image/jpeg`). A reading system shows the bytes, so the declaration becomes the type epubveri found; the file and its name are not changed. Declines a file holding a type that is not core in both EPUB versions (TIFF, BMP, WebP: it needs converting), a declaration that is not a core raster type, and an image that no manifest item, or more than one, names. |
 | `OPF-090` | `opf.manifest_item.non_preferred_media_type` | ConfirmNeeded | Renames a manifest item's `media-type` from a superseded Core Media Type name to the current one for the same format: `application/vnd.ms-opentype` → `font/otf`, `application/x-font-ttf` → `font/ttf`, `application/font-woff` → `font/woff`, `application/ecmascript` and `text/javascript` → `application/javascript`. Renames the declaration only; it asserts nothing new about the file. **`application/font-sfnt` is declined** — SFNT is the container TrueType and OpenType share, so the name cannot say which the file is. **Usage severity.** |
 | `RSC-007` | `opf.content_document.reference_missing_resource` (a `<script src>`) | ConfirmNeeded | Deletes a `<script>` whose file is not in the book, and removes `scripted` from its manifest item when nothing else in the document needs it; that is decided by validating a copy of the book. A reading system that resolves the reference inside the book never ran the script. On real books these are Kobo `kobo.js` references, and whether a Kobo device supplies that file itself is not known, so it asks. Declines a script with code inside, one whose file is in the book under another path, and any deletion after which a finding rises (another document links to the script's `id`, say). |
-| `RSC-007` | `css.font_face.missing_target` | ConfirmNeeded | Deletes a `@font-face` rule whose font file is not in the book. The font cannot load and never could, so text using that family already falls back to a substitute — removing a rule that never applied changes nothing a reader sees. **Declines a rule holding more than one url**: a second source may be present and working, and choosing between them would be editing a stylesheet rather than removing a dead declaration. The rule is found with styloria (the family's CSS parser) and the stylesheet is written back in its own encoding; a stylesheet with a byte that does not decode is declined. This does not open the rest of the `css.*` family. |
+| `RSC-007` | `css.font_face.missing_target` | ConfirmNeeded | Deletes a `@font-face` rule whose font file is not in the book. The font cannot load and never could, so text using that family already falls back to a substitute — removing a rule that never applied changes nothing a reader sees. **Declines a rule holding more than one url**: a second source may be present and working, and choosing between them would be editing a stylesheet rather than removing a dead declaration. A source written as a malformed unquoted url (`url(a b.ttf)`) names no file, so it is never reported missing and its rule is left alone. The rule is found with styloria (the family's CSS parser) and the stylesheet is written back in its own encoding; a stylesheet with a byte that does not decode is declined. This does not open the rest of the `css.*` family. |
 
 Findings not in this table — arbitrary schema violations, and anything requiring
 content epubsana would have to invent — are reported by epubveri but **left
