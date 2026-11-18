@@ -8,7 +8,18 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
-## [Unreleased]
+## [0.42.0] - 2026-11-18
+
+### Added
+
+- `fix.br_clear_without_float` drops the presentational `clear` attribute
+  from `<br>` (`<br clear="all"/>`, written by older calibre on page breaks)
+  when nothing in the book can float. `clear` only positions a line against
+  floating boxes. Without one, a reader that ignores the attribute and one
+  that applies it show the same page. A book with any float, `@import`,
+  left- or right-aligned element, or remote stylesheet is left alone. On the
+  562-book shelf it clears 35 findings in 6 books, and all 6 then have no
+  error left.
 
 ### Changed
 
@@ -28,8 +39,8 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
     leaves that rule nested, and the repair is still rolled back. Moving the
     `}` before that rule would change what a reader shows, so epubsana does
     not.
-  - On the 562-book shelf, every finding, proposal, outcome and repaired byte
-    is unchanged.
+  - On the 562-book shelf, these moves change no finding, proposal, outcome
+    or repaired byte.
 - `Cargo.lock` moves to zip 9.7.0 (the requirement stays 9.5.1).
 
 ## [0.41.0] - 2026-11-13

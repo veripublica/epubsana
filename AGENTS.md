@@ -33,7 +33,7 @@ result and reports what changed.
   package and epublift. The same book with the same approvals comes back byte for
   byte the same from each.
 
-There are 55 fixers. Three act on findings below error severity
+There are 56 fixers. Three act on findings below error severity
 (`opf.metadata.empty_element`, `opf.manifest_item.non_preferred_media_type`,
 `opf.guide.duplicate_reference`), so they clear findings without moving the error
 count.
@@ -226,9 +226,10 @@ about books unlike those. A zero means only that this library holds no such case
 | 2026-11-04, 0.38.0 → 0.39.0 | 562 | Every fix approved: exactly 3 books change, each through `fix.email_as_http_url`, with one fewer error and no fix reverted. |
 | 2026-11-11, 0.39.0 → 0.40.0 | 562 | Every fix approved: plan, outcomes and repaired bytes unchanged. epubveri 0.40.1 reports more errors in 19 books, so 6 no longer end valid. |
 | 2026-11-13, 0.40.0 → 0.41.0 | 562 | Every fix approved: findings (with their severity), plan, outcomes and repaired bytes unchanged. Every book here with a CSS parse error is EPUB 2, so the change of severity in EPUB 3 does not show. |
+| 2026-11-18, 0.41.0 → 0.42.0 | 562 | Every fix approved: findings (with their severity), plan, outcomes and repaired bytes unchanged across the epubveri 0.46.0, `Block::closed` and epubveri 0.47.0 steps. The new `fix.br_clear_without_float` is applied in 6 books (35 findings), none reverted; those 6 end with no error. Nothing else moves. |
 
-Before a release, `scripts/preflight.sh` runs everything CI runs. At 0.41.0,
-`cargo test --workspace` passes 542 tests. `examples/fuzz.rs` corrupts two defective
+Before a release, `scripts/preflight.sh` runs everything CI runs. At 0.42.0,
+`cargo test --workspace` passes 552 tests. `examples/fuzz.rs` corrupts two defective
 seed books and runs each result through `repair()` with every fix approved, looking
 for panics.
 
