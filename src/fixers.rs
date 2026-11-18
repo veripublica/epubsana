@@ -91,6 +91,7 @@ pub fn plan(report: &Report, ws: &Workspace, _goal: Goal) -> Vec<ProposedFix> {
     fixes.extend(missing_titles(report, ws));
     fixes.extend(bare_text_in_body(report, ws));
     fixes.extend(anchor_name_attrs(report, ws));
+    fixes.extend(br_clear_without_float(report, ws));
     fixes.extend(adept_meta_value(report, ws));
     fixes.extend(svg_attribute_case(report, ws));
     fixes.extend(svg_element_case(report, ws));
@@ -2982,6 +2983,305 @@ fn plan_anchor_name_drops(text: &str) -> Option<Vec<Range<usize>>> {
         ));
     }
     Some(spans)
+}
+
+/// `RSC-005` / `htm.obsolete_attribute`, `params[0] == "clear"`: the
+/// presentational `<br clear="all">` older calibre writes on every page
+/// break. Deletes the attribute **only where nothing in the book can float**
+/// ([`book_may_float`]). `clear` positions a box relative to floats and
+/// nothing else (CSS 2.1 §9.5.2). Without a float, the EPUB 2 reader that
+/// ignores the attribute and the browser-based one that maps it to the
+/// property draw the same page, and deleting it keeps that page. Where a
+/// float exists, the two readings differ, and which one the author meant is
+/// a guess, so the book is declined.
+///
+/// Acts only on the `<br>` elements epubveri reported (by `element_path`), so
+/// it cannot outlive a finding. There is one proposal for the whole book,
+/// since the edit is the same in every chapter. `ConfirmNeeded`: the float
+/// check is ours, and a reader's own stylesheet is outside what we can read.
+fn br_clear_without_float(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    // document -> the reported `<br>` paths, `/@clear` stripped
+    let mut by_doc: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for m in &report.messages {
+        // The path's last step names the attribute (`…/h:br[1]/@clear`), so it
+        // is the test; `params[0]` says the same and is not read again.
+        if m.rule != Some("htm.obsolete_attribute") {
+            continue;
+        }
+        let (Some(doc), Some(np)) = (m.location.as_deref(), m.element_path.as_ref()) else {
+            continue;
+        };
+        let Some(path) = svg_reported_path(np) else {
+            continue;
+        };
+        let Some(element) = path.strip_suffix("/@clear") else {
+            continue;
+        };
+        by_doc
+            .entry(doc.to_string())
+            .or_default()
+            .insert(element.to_string());
+    }
+    if by_doc.is_empty() || book_may_float(ws) {
+        return Vec::new();
+    }
+
+    let mut docs: Vec<(String, BTreeSet<usize>, usize)> = Vec::new();
+    for (doc, reported) in by_doc {
+        let Some(text) = ws.get_text(&doc) else {
+            continue;
+        };
+        let Some(all) = br_clears(&text) else {
+            continue; // won't parse — decline
+        };
+        let picked: BTreeSet<usize> = all
+            .iter()
+            .enumerate()
+            .filter(|(_, (path, _))| reported.contains(path))
+            .map(|(i, _)| i)
+            .collect();
+        if !picked.is_empty() {
+            docs.push((doc, picked, all.len()));
+        }
+    }
+    if docs.is_empty() {
+        return Vec::new();
+    }
+
+    let n: usize = docs.iter().map(|(_, picked, _)| picked.len()).sum();
+    let files = docs.len();
+    let preview: Vec<Change> = docs
+        .iter()
+        .take(6)
+        .map(|(doc, picked, _)| Change {
+            path: doc.clone(),
+            note: format!(
+                "drop clear= from {} <br> element{}",
+                picked.len(),
+                if picked.len() == 1 { "" } else { "s" }
+            ),
+        })
+        .collect();
+    let docs_for_apply = docs;
+
+    vec![ProposedFix {
+        fix_id: "fix.br_clear_without_float",
+        addresses_id: "RSC-005".to_string(),
+        addresses_rule: Some("htm.obsolete_attribute"),
+        addresses_severity: addressed_severity(report, "RSC-005", Some("htm.obsolete_attribute")),
+        tier: Tier::ConfirmNeeded,
+        title: format!(
+            "Drop `clear` from {n} <br> element{} in {files} file{}",
+            if n == 1 { "" } else { "s" },
+            if files == 1 { "" } else { "s" }
+        ),
+        rationale: "`clear` on `<br>` is a presentational attribute XHTML 1.1 does not have. It \
+                    only says where a line goes relative to floating boxes, and nothing in this \
+                    book floats: no stylesheet or style attribute sets `float`, and no element is \
+                    aligned left or right. A reader that ignores the attribute and one that \
+                    applies it already draw the same page, so deleting it changes nothing a \
+                    reader sees. No text, no other attribute and no other element is touched."
+            .to_string(),
+        preview,
+        apply_fn: Box::new(move |ws: &mut Workspace| {
+            for (doc, picked, total) in &docs_for_apply {
+                if let Some(text) = ws.get_text(doc)
+                    && let Some(spans) = br_clear_spans_at(&text, picked, *total)
+                {
+                    let edits = spans
+                        .into_iter()
+                        .map(|range| MetaEdit {
+                            range,
+                            replacement: String::new(),
+                        })
+                        .collect();
+                    ws.set_text(doc, apply_edits(&text, edits));
+                }
+            }
+        }),
+    }]
+}
+
+/// Every XHTML `<br>` carrying `clear`, in document order: its element path
+/// and the span to delete (the attribute with the whitespace before it).
+/// `None` (decline) if the document doesn't parse.
+fn br_clears(text: &str) -> Option<Vec<(String, Range<usize>)>> {
+    let prepared = prepare_content_doc(text);
+    let doc = prepared.parse()?;
+    let mut out = Vec::new();
+    for node in doc
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "br")
+    {
+        let Some(path) = xhtml_element_path(node) else {
+            continue;
+        };
+        let Some(attr) = node
+            .attributes()
+            .find(|a| a.namespace().is_none() && a.name() == "clear")
+        else {
+            continue;
+        };
+        out.push((
+            path,
+            attr_span_with_leading_space(text, prepared.unshift(attr.range())),
+        ));
+    }
+    Some(out)
+}
+
+/// The spans to delete when the fix is applied: the `picked` ones, counted
+/// among the document's `<br clear>` elements in order. The plan picks them
+/// by `element_path` on the original text, but a fix applied before this one
+/// can move them (`fix.bare_text_in_body` wraps text in a `<div>`), so the
+/// paths no longer match. No other fixer adds or removes a `clear`, so the
+/// k-th `<br clear>` is still the same element. If the count has changed,
+/// that is not known, and the document is left alone (`None`).
+fn br_clear_spans_at(
+    text: &str,
+    picked: &BTreeSet<usize>,
+    total: usize,
+) -> Option<Vec<Range<usize>>> {
+    let all = br_clears(text)?;
+    if all.len() != total {
+        return None;
+    }
+    Some(
+        all.into_iter()
+            .enumerate()
+            .filter(|(i, _)| picked.contains(i))
+            .map(|(_, (_, span))| span)
+            .collect(),
+    )
+}
+
+/// Whether anything in the book can make a box float, or a file that would
+/// have to be read to say so cannot be. Every stylesheet in the book counts,
+/// linked or not. The list is in `docs/FIXERS.md`.
+fn book_may_float(ws: &Workspace) -> bool {
+    ws.names().any(|name| {
+        if crate::workspace::is_stylesheet(name) {
+            if !ws.text_round_trips(name) {
+                return true;
+            }
+            return ws.get_text(name).is_none_or(|css| css_may_float(&css));
+        }
+        if !is_markup_entry(name) {
+            return false;
+        }
+        // `name` comes from `names()`, so the entry exists and `get_text` has
+        // it (lossily if it is not UTF-8, which then fails to parse).
+        let text = ws.get_text(name).unwrap_or_default();
+        let prepared = prepare_content_doc(&text);
+        let Some(doc) = prepared.parse() else {
+            return true;
+        };
+        doc.descendants().any(|n| {
+            if n.is_pi() {
+                return n.pi().is_some_and(|pi| {
+                    pi.target == "xml-stylesheet"
+                        && pi
+                            .value
+                            .is_some_and(|v| v.split_whitespace().any(pseudo_attr_is_remote_href))
+                });
+            }
+            if !n.is_element() {
+                return false;
+            }
+            let tag = n.tag_name().name();
+            (tag == "style"
+                && css_may_float(&n.children().filter_map(|c| c.text()).collect::<String>()))
+                || (tag == "link" && n.attr_no_ns("href").is_some_and(is_remote_href))
+                || n.attributes()
+                    .filter(|a| a.namespace().is_none())
+                    .any(|a| match a.name() {
+                        "align" => {
+                            let v = a.value().trim();
+                            v.eq_ignore_ascii_case("left") || v.eq_ignore_ascii_case("right")
+                        }
+                        "style" => {
+                            let (items, _) = styloria::parse_block_contents(a.value());
+                            items_may_float(a.value(), &items)
+                        }
+                        _ => false,
+                    })
+        })
+    })
+}
+
+/// Whether a stylesheet holds a `float` that is not `none`, at any depth, or
+/// an `@import` (which may bring in a sheet we do not read).
+fn css_may_float(css: &str) -> bool {
+    let (sheet, _) = styloria::parse_stylesheet(css);
+    let mut stack: Vec<&styloria::Spanned<styloria::Rule<'_>>> = sheet.rules.iter().collect();
+    while let Some(rule) = stack.pop() {
+        if let styloria::Rule::At(a) = &rule.node
+            && a.name.eq_ignore_ascii_case("import")
+        {
+            return true;
+        }
+        if rule
+            .node
+            .block()
+            .is_some_and(|b| items_may_float(css, &b.node))
+        {
+            return true;
+        }
+        push_nested_rules(&rule.node, &mut stack);
+    }
+    false
+}
+
+/// Whether `items` hold, directly, a `float` declaration whose value as
+/// written is anything but `none`. Nested rules are walked by the caller.
+fn items_may_float(css: &str, items: &[styloria::BlockItem<'_>]) -> bool {
+    items.iter().any(|item| match item {
+        styloria::BlockItem::Declaration(d) => {
+            d.node.name.eq_ignore_ascii_case("float") && !is_value_exactly(css, &d.node, "none")
+        }
+        styloria::BlockItem::Rule(_) => false,
+    })
+}
+
+/// Whether a declaration's value, as written, is `word` and nothing else (ASCII
+/// case-insensitive). A comment or an escape in it reads as something else.
+fn is_value_exactly(css: &str, d: &styloria::Declaration<'_>, word: &str) -> bool {
+    let (Some(first), Some(last)) = (d.value.first(), d.value.last()) else {
+        return false;
+    };
+    css.get(first.span.start..last.span.end)
+        .is_some_and(|v| v.eq_ignore_ascii_case(word))
+}
+
+/// A URL that names a resource outside the book: one with a scheme
+/// (`https:`, `file:`, …) or a network-path reference (`//host/…`).
+fn is_remote_href(href: &str) -> bool {
+    let h = href.trim();
+    if h.starts_with("//") {
+        return true;
+    }
+    let Some(colon) = h.find(':') else {
+        return false;
+    };
+    let scheme = &h[..colon];
+    scheme
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic())
+        && scheme
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+}
+
+/// An `href="…"` pseudo-attribute of an `xml-stylesheet` instruction whose
+/// value is remote. The instruction's data is not parsed as XML, so this
+/// reads the one token form; any other spelling of `href` matches nothing,
+/// and the sheet it names, if it is in the book, is checked as a stylesheet.
+fn pseudo_attr_is_remote_href(token: &str) -> bool {
+    token
+        .strip_prefix("href=")
+        .map(|v| v.trim_matches(|c| c == '"' || c == '\''))
+        .is_some_and(is_remote_href)
 }
 
 /// `RSC-005` / `opf.content_document.schema_violation`, kind
@@ -13244,6 +13544,313 @@ mod tests {
 
     /// An EPUB 3 book with one stylesheet. `body` is the chapter's whole body
     /// element, `spine_attr` goes on `<spine>`.
+    /// An EPUB 2 book with one chapter linking `s.css`, as old calibre writes
+    /// it. `head` goes after the `<link>`; `extra` adds files to the container.
+    fn br_book(css: &[u8], head: &str, body: &str, extra: &[(&str, &[u8])]) -> Workspace {
+        use std::io::Write;
+        let chapter = format!(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN" "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml"><head><title>t</title><link rel="stylesheet" type="text/css" href="s.css"/>{head}</head>{body}</html>"#
+        );
+        let opf = r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="id">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="id">x</dc:identifier><dc:title>t</dc:title><dc:language>en</dc:language></metadata>
+  <manifest><item href="c.xhtml" id="c" media-type="application/xhtml+xml"/><item href="s.css" id="s" media-type="text/css"/></manifest>
+  <spine><itemref idref="c"/></spine>
+</package>"#;
+        let mut buf = Vec::new();
+        {
+            let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            let opts = zip::write::SimpleFileOptions::default();
+            let stored = opts.compression_method(zip::CompressionMethod::Stored);
+            zip.start_file("mimetype", stored).unwrap();
+            zip.write_all(b"application/epub+zip").unwrap();
+            let mut files: Vec<(&str, &[u8])> = vec![
+                (
+                    "META-INF/container.xml",
+                    br#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#,
+                ),
+                ("content.opf", opf.as_bytes()),
+                ("c.xhtml", chapter.as_bytes()),
+                ("s.css", css),
+            ];
+            files.extend_from_slice(extra);
+            for (name, body) in files {
+                zip.start_file(name, opts).unwrap();
+                zip.write_all(body).unwrap();
+            }
+            zip.finish().unwrap();
+        }
+        Workspace::load(&buf).unwrap()
+    }
+
+    const BR_BODY: &str = r#"<body class="calibre"><div><p>one</p><br clear="all" class="calibre5" id="calibre_pb_0"/><p>two</p></div></body>"#;
+    const CLEAR: Option<&str> = Some("htm.obsolete_attribute");
+
+    /// The proposal for `ws`, after checking the fixture carries the finding.
+    fn br_clear_fix(ws: &Workspace) -> Option<ProposedFix> {
+        let report = ws.detect().unwrap();
+        assert!(
+            report
+                .messages
+                .iter()
+                .any(|m| m.rule == CLEAR && m.params.first().map(String::as_str) == Some("clear")),
+            "the fixture must carry the finding, or this test proves nothing"
+        );
+        br_clear_without_float(&report, ws).into_iter().next()
+    }
+
+    /// The Doitsu book's shape, through the real detector: the attribute and
+    /// the space before it go, every other byte stays, the finding is gone.
+    #[test]
+    fn br_clear_is_dropped_where_nothing_floats() {
+        let mut ws = br_book(
+            b".calibre5 { display: block } .x { float: none }",
+            "",
+            BR_BODY,
+            &[],
+        );
+        let before = ws.get_text("c.xhtml").unwrap();
+        let fix = br_clear_fix(&ws).expect("proposed");
+        assert_eq!(fix.tier, Tier::ConfirmNeeded);
+        fix.apply(&mut ws);
+        assert_eq!(
+            ws.get_text("c.xhtml").unwrap(),
+            before.replace(r#"<br clear="all" class"#, r#"<br class"#)
+        );
+        let after = ws.detect().unwrap();
+        assert!(!after.messages.iter().any(|m| m.rule == CLEAR));
+    }
+
+    /// Each line is a way for something in the book to float, or a file the
+    /// check would have to read and cannot.
+    #[test]
+    fn br_clear_is_kept_where_the_book_may_float() {
+        let plain = b".calibre5 { display: block }" as &[u8];
+        let body_with = |el: &str| BR_BODY.replace("<p>two</p>", el);
+        let img = r#"<img src="i.png" alt=""/>"#;
+        for (css, head, body, why) in [
+            (
+                b"p { float: left }" as &[u8],
+                "",
+                BR_BODY.to_string(),
+                "float",
+            ),
+            (b"p { FLOAT: Left }", "", BR_BODY.to_string(), "upper case"),
+            (
+                b"p { fl\\6f at: left }",
+                "",
+                BR_BODY.to_string(),
+                "escaped name",
+            ),
+            (
+                b"p { float: none !important; float: right }",
+                "",
+                BR_BODY.to_string(),
+                "a second float",
+            ),
+            (
+                b"@media screen { p { float: left } }",
+                "",
+                BR_BODY.to_string(),
+                "in @media",
+            ),
+            (
+                b"@import url(other.css);",
+                "",
+                BR_BODY.to_string(),
+                "@import",
+            ),
+            (
+                b"p::before { content: \"\xff\" }",
+                "",
+                BR_BODY.to_string(),
+                "lossy sheet",
+            ),
+            (
+                plain,
+                "<style>p { float: left }</style>",
+                BR_BODY.to_string(),
+                "<style>",
+            ),
+            (
+                plain,
+                "",
+                body_with(r#"<p style="float: right">two</p>"#),
+                "style=",
+            ),
+            (
+                plain,
+                "",
+                body_with(&img.replace("<img", r#"<img align="left""#)),
+                "align=left",
+            ),
+            (
+                plain,
+                "",
+                body_with(r#"<table align=" RIGHT "><tr><td>x</td></tr></table>"#),
+                "align=right",
+            ),
+            (
+                plain,
+                r#"<link rel="stylesheet" href="https://example.org/s.css"/>"#,
+                BR_BODY.to_string(),
+                "remote <link>",
+            ),
+            (
+                plain,
+                r#"<link rel="stylesheet" href="//example.org/s.css"/>"#,
+                BR_BODY.to_string(),
+                "network-path <link>",
+            ),
+        ] {
+            let ws = br_book(css, head, &body, &[("i.png", b"")]);
+            assert!(br_clear_fix(&ws).is_none(), "{why}");
+        }
+        // A sheet the chapter does not link still counts.
+        let ws = br_book(
+            plain,
+            "",
+            BR_BODY,
+            &[("unlinked.css", b"p { float: left }")],
+        );
+        assert!(br_clear_fix(&ws).is_none(), "unlinked sheet");
+        // A remote sheet named by a processing instruction, and a document
+        // that does not parse, in files of their own.
+        let pi: &[u8] = b"<?xml version=\"1.0\"?>\n<?xml-stylesheet href=\"https://example.org/s.css\" type=\"text/css\"?>\n<html xmlns=\"http://www.w3.org/1999/xhtml\"><head><title>t</title></head><body/></html>";
+        let ws = br_book(plain, "", BR_BODY, &[("d.xhtml", pi)]);
+        assert!(br_clear_fix(&ws).is_none(), "remote xml-stylesheet");
+        let ws = br_book(plain, "", BR_BODY, &[("bad.xhtml", b"<html><body>")]);
+        assert!(
+            br_clear_fix(&ws).is_none(),
+            "a document that does not parse"
+        );
+    }
+
+    /// What does not float is not a reason to decline.
+    #[test]
+    fn br_clear_ignores_what_cannot_float() {
+        for (css, head, body) in [
+            (b"p { float: none }" as &[u8], "", BR_BODY.to_string()),
+            (b"p { FLOAT : NONE }", "", BR_BODY.to_string()),
+            (
+                b"p { text-align: left } .float { color: red }",
+                "",
+                BR_BODY.to_string(),
+            ),
+            (
+                b"",
+                "",
+                BR_BODY.replace("<p>two</p>", r#"<p align="center">two</p>"#),
+            ),
+            (
+                b"",
+                r#"<link rel="stylesheet" href="other.css"/>"#,
+                BR_BODY.to_string(),
+            ),
+        ] {
+            let ws = br_book(css, head, &body, &[]);
+            assert!(
+                br_clear_fix(&ws).is_some(),
+                "{}",
+                String::from_utf8_lossy(css)
+            );
+        }
+    }
+
+    /// Only the reported `<br>`, and only a `<br>`: a stale finding or one on
+    /// another element deletes nothing.
+    #[test]
+    fn br_clear_drops_only_the_reported_br() {
+        let mut ws = br_book(
+            b"",
+            "",
+            r#"<body><br clear="all"/><br clear="left"/><p>x</p></body>"#,
+            &[],
+        );
+        let mut report = ws.detect().unwrap();
+        // Keep only the finding on the second <br>, as if epubveri stopped
+        // reporting the first.
+        report.messages.retain(|m| {
+            m.rule != CLEAR
+                || m.element_path
+                    .as_ref()
+                    .is_some_and(|p| p.path.ends_with("/h:br[2]/@clear"))
+        });
+        let before = ws.get_text("c.xhtml").unwrap();
+        let fix = br_clear_without_float(&report, &ws)
+            .into_iter()
+            .next()
+            .unwrap();
+        fix.apply(&mut ws);
+        assert_eq!(
+            ws.get_text("c.xhtml").unwrap(),
+            before.replace(r#"<br clear="left"/>"#, "<br/>")
+        );
+        let p = r#"<html xmlns="http://www.w3.org/1999/xhtml"><body><p clear="all">x</p></body></html>"#;
+        assert!(br_clears(p).unwrap().is_empty());
+    }
+
+    /// A fix applied first moves the `<br>` (here: wrapped in a `<div>`, as
+    /// `fix.bare_text_in_body` does), so its path no longer matches. The
+    /// ordinal still does. One more `<br clear>` than planned, and the
+    /// document is left alone.
+    #[test]
+    fn br_clear_survives_an_earlier_fix_moving_the_br() {
+        let body = r#"<body><p>a</p><br clear="all"/><p>b</p><br clear="all"/></body>"#;
+        let mut ws = br_book(b"", "", body, &[]);
+        let fix = br_clear_fix(&ws).unwrap();
+        let moved = ws.get_text("c.xhtml").unwrap().replace(
+            body,
+            &format!("<body><div>{}</div></body>", &body[6..body.len() - 7]),
+        );
+        ws.set_text("c.xhtml", moved.clone());
+        fix.apply(&mut ws);
+        assert_eq!(
+            ws.get_text("c.xhtml").unwrap(),
+            moved.replace(r#" clear="all""#, "")
+        );
+
+        let mut ws = br_book(b"", "", body, &[]);
+        let fix = br_clear_fix(&ws).unwrap();
+        let grown = ws
+            .get_text("c.xhtml")
+            .unwrap()
+            .replace("<p>a</p>", r#"<p>a</p><br clear="all"/>"#);
+        ws.set_text("c.xhtml", grown.clone());
+        fix.apply(&mut ws);
+        assert_eq!(ws.get_text("c.xhtml").unwrap(), grown);
+    }
+
+    #[test]
+    fn remote_href_is_a_scheme_or_a_network_path() {
+        for h in [
+            "https://a/s.css",
+            "HTTP://a",
+            "file:///x",
+            "//a/s.css",
+            " http://a ",
+        ] {
+            assert!(is_remote_href(h), "{h}");
+        }
+        for h in [
+            "s.css",
+            "../Styles/s.css",
+            "a%3Ab.css",
+            "../Styles/a:b.css",
+            "a b:c",
+            "1http://x",
+            "/abs.css",
+            "",
+        ] {
+            assert!(!is_remote_href(h), "{h}");
+        }
+        assert!(pseudo_attr_is_remote_href("href=\"https://a/s.css\""));
+        assert!(!pseudo_attr_is_remote_href("href=\"s.css\""));
+        assert!(!pseudo_attr_is_remote_href("type=\"text/css\""));
+    }
+
     fn direction_book(css: &str, body: &str, spine_attr: &str) -> Workspace {
         let chapter = format!(
             r#"<?xml version="1.0" encoding="utf-8"?>

@@ -1383,9 +1383,9 @@ the rare deletion that loses no information at all, which is what makes it
 
 **When it declines.**
 
-- **Any other attribute in the family.** `<br clear>` (10 findings on the shelf)
-  is presentational and has no single markup equivalent — replacing it would mean
-  choosing a CSS rule on the author's behalf.
+- **Any other attribute in the family.** `<br clear>` has its own fixer,
+  `fix.br_clear_without_float` (next section), which deletes it only where no
+  float exists. Everything else in the family stays reported.
 - **`name` with no `id`.** The obvious repair — rename `name` → `id`, which
   preserves every `#fragment` that targets it — is *not* determinate. An `id`
   must be a valid NCName and must be unique in the document; a legacy `name` is
@@ -1409,6 +1409,98 @@ than a divergence to be careful of. **One book is thin evidence**: it establishe
 that the shape exists and that the repair is right for it, not that the shape is
 representative. The declines above are what make that acceptable — an unfamiliar
 shape is left alone rather than guessed at.
+
+---
+
+## RSC-005 — `clear` on `<br>`, in a book with no float
+
+**Finding.** `htm.obsolete_attribute`, `params[0] == "clear"`, `element_path`
+ending in `/h:br[k]/@clear`: *attribute "clear" not allowed here*. Word
+documents converted by older calibre versions put one on every page break:
+
+    <br clear="all" class="calibre5" id="calibre_pb_0"/>
+
+**Fix** (`fix.br_clear_without_float`, ConfirmNeeded). Delete the `clear`
+attribute, together with the whitespace before it, from every reported `<br>`.
+**Only where nothing in the book can float.** The element, its other
+attributes and every other byte stay as they are. There is one proposal for
+the whole book, as in `fix.adept_meta_value`: it is one decision, and the
+book that asked for it has 24 of these in 24 files.
+
+    <br clear="all" class="calibre5" id="calibre_pb_0"/>
+    →
+    <br class="calibre5" id="calibre_pb_0"/>
+
+**Why it is safe, and why there is exactly one repair.** `clear` says where a
+box goes relative to *floats*, and to nothing else. CSS 2.1 §9.5.2 defines it
+only through "the margin edges of floating boxes". Readers do not agree on
+`<br clear>`:
+
+- XHTML 1.1, and so EPUB 2, has no such attribute, so a conforming EPUB 2
+  reader ignores it.
+- A browser-based reader maps it to the `clear` property (HTML, rendering
+  section).
+
+Where the document holds no float, the two readings draw the same page,
+because a `clear` with no float to clear moves nothing. Deleting the attribute
+then keeps what every reader shows ("keep what the reader sees", Baris,
+2026-10-23). Converting it to `style="clear: both"` would show the same page,
+but it adds CSS to fix nothing and takes the EPUB 2 reader's reading as wrong.
+Deletion is the edit that keeps both readings. Where a float exists, the two
+readings differ, and which one the author saw is a guess. That stays
+declined, so this closes only the float-free half of the 🌀 closure in
+`docs/COVERAGE.md` (Baris, 2026-11-18).
+
+**What "nothing can float" means** (`book_may_float`). This is a whole-book
+check, like `book_may_set_direction`. A stylesheet anywhere in the book
+counts, whether or not this document links it, so the check cannot miss a
+sheet the reader loads. The book is declined if any of these holds:
+
+- a stylesheet, inline `<style>` or `style` attribute holds a `float`
+  declaration whose value is anything other than exactly `none`. The name is
+  read through styloria, so an escaped `fl\6f at` counts.
+- a stylesheet holds an `@import`, which could bring in a sheet we do not
+  read;
+- a stylesheet does not decode losslessly, or a content document does not
+  parse;
+- an element has `align="left"` or `align="right"`. HTML floats an `<img>`,
+  `<table>`, `<object>`, `<iframe>`, `<embed>` or `<input>` aligned that way,
+  and we check every element, not only those;
+- a `<link>` or an `xml-stylesheet` processing instruction names a remote
+  stylesheet (a URL with a scheme, or one starting with `//`).
+
+It also declines a `<br>` that was not reported (its `element_path` is not in
+the set, so the fixer cannot outlive the finding) and an element other than an
+XHTML `<br>`.
+
+**Applied after another fix.** The plan picks each `<br>` by its
+`element_path` on the original text. A fix applied before this one in the same
+repair can move it: `fix.bare_text_in_body` wraps stray text in a `<div>`, and
+then `/h:body[1]/h:br[1]` no longer names it. So the plan also records each
+picked `<br>` as its ordinal among the document's `<br clear>` elements, and the
+apply uses that ordinal. No other fixer adds or removes a `clear`, so the k-th
+one is the same element. If the document's count of `<br clear>` has changed,
+the document is left alone. The first build matched paths at apply time, and on
+the shelf 5 of 6 books came back "applied" with nothing changed.
+
+**Measured (2026-11-18, before building).**
+
+- *Past Masters 279* (Doitsu, MobileRead): 24 `<br clear="all">` in 24
+  files. The book has no float: no `float` in either stylesheet, no `align`,
+  no `style` attribute.
+- The shelf: 1 book, 10 findings (`docs/COVERAGE.md`).
+
+**Measured after building (2026-11-18, epubveri 0.47.0, 562 books, every fix
+approved, A/B against `3fe8eb0`).**
+
+- **7 books on the shelf hold 40 `clear` findings.** 6 of them (35 findings,
+  all on `<br>`) get the proposal. All 6 are applied, none is reverted, and
+  each book ends with no error at all: these were the last errors there.
+  Nothing else moves in any book: no other finding, plan or outcome.
+- The seventh, *Suyu Arayan Adam*, has its 5 on `<p clear="all">`. That is
+  not a `<br>`, so the book is declined.
+- *Past Masters 279*: 24 of its 74 errors cleared. The 50 left are `link` and
+  `vlink` on `<body>`, which are for the next release.
 
 ---
 
