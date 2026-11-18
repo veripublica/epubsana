@@ -2167,7 +2167,9 @@ styloria only says where the `@font-face` rules are and which urls each holds.
   dead rule. 0 cases on the shelf. (`local()` is not a url and does not count,
   as before; see the open question below.)
 - **A rule whose block is never closed** (runs to the end of the input), or one
-  holding a nested rule. Nothing on the shelf is shaped that way.
+  holding a nested rule. Nothing on the shelf is shaped that way. "Never
+  closed" is styloria's `Block::closed` (0.21), as for CSS-008: a block can
+  end in a `}` byte and still be open (`@font-face { src: url(a.ttf); "}`).
 - **A stylesheet that does not decode losslessly** — an encoding styloria does
   not decode (Shift_JIS, GBK, …), or a byte that does not decode in the one it
   chose. Writing such a file back would replace those bytes with U+FFFD. Shelf:
@@ -2324,6 +2326,40 @@ appended at the end does one of two things:
 
 So the repair is proposed only if styloria, parsing the repaired text, finds
 **no block left open**. An open `[` or `(` is declined this way too.
+
+**Which blocks are open: styloria's `Block::closed`** (since styloria 0.21 and
+epubveri 0.46.0, 2026-11-18). Only the parser knows whether a block's own `}`
+closed it. Before 0.21 we copied epubveri's byte test: "the block ends in a
+`}` that comes after its last item". That test is wrong when an open block ends
+in a `}` held by a token the block dropped. styloria found five such shapes,
+and epubveri 0.46.0 reports all of them because it now reads `closed`. The
+same field decides both the count of `}`s to append and the check after
+appending, so the finding and the repair agree:
+
+| sheet | after one `}` | outcome |
+|---|---|---|
+| `p { ; \}` (an escaped `}` ident) | `p { ; \}}`: the `}` closes the block | **proposed** (EPUB 2: reverted, see below) |
+| `p { "}` (a string to the end of input) | the `}` is taken into the string | declined |
+| `p { a: b; "}` | the same | declined |
+| `p { a: b; [}` (an open `[`) | the `}` is taken into the `[` | declined |
+| `p { url(}` (an unquoted url to the end) | the `}` is taken into the url | declined |
+
+The shelf holds none of the five (2026-11-18: 878 sheets, 24,368 blocks,
+2 unclosed; the byte test and `closed` agree on every block).
+
+**In EPUB 2 the closed block's contents become visible.** epubveri reports no
+syntax error inside an EPUB 2 block that never closed (0.46.0,
+`walk_rule_block`): it counts them as the unclosed brace's doing. After the
+repair, the block is checked, and junk that was always there is reported. In
+`p { ; \}` that is the `\}`, as `css.declaration.malformed_shape`. The repair
+loop sees that as a rise and reverts the fix. Nothing is damaged, and the
+finding stays. A reader drops the junk both before and after the repair, so
+the finding is revealed, not made. That is a detector issue, not ours to
+work around: we do not accept it as revealed (no `BLINDING_RULES` entry). We
+asked epubveri to report an EPUB 2 open block's contents, as it already does
+in EPUB 3 (Baris, 2026-11-18; note to epubveri the same day). The shelf's two
+repaired books hold no junk in the open block. In EPUB 3, epubveri checks the open block like
+any other, so nothing new appears.
 
 The first design had two more guards: "every open bracket is a `{`" and "the
 repaired text serializes as the original does". A mutation check showed that

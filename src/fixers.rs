@@ -7667,7 +7667,7 @@ fn plan_font_face_drops(css: &str, urls: &BTreeSet<String>) -> Option<Vec<MetaEd
             continue;
         };
         let span = rule.span;
-        if block_never_closed(css, block)
+        if !block.closed
             || block
                 .node
                 .iter()
@@ -8016,37 +8016,22 @@ fn close_open_blocks(css: &str) -> Option<String> {
     (!closers.is_empty() && open_block_count(&format!("{css}{closers}")) == 0).then_some(closers)
 }
 
-/// How many blocks `css` leaves open at its end, by [`block_never_closed`].
+/// How many blocks `css` leaves open at its end: those styloria's parser
+/// closed at the end of input rather than at their own `}` (`Block::closed`),
+/// which is what epubveri reads for `css.stylesheet.unterminated` (0.46.0).
+/// Only the parser can tell: `p { "}` ends in a `}` byte and is still open.
 /// The open ones form one chain, each the last item of the one around it.
 fn open_block_count(css: &str) -> usize {
     let (sheet, _) = styloria::parse_stylesheet(css);
     let mut stack: Vec<&styloria::Spanned<styloria::Rule<'_>>> = sheet.rules.iter().collect();
     let mut open = 0;
     while let Some(rule) = stack.pop() {
-        if rule
-            .node
-            .block()
-            .is_some_and(|b| block_never_closed(css, b))
-        {
+        if rule.node.block().is_some_and(|b| !b.closed) {
             open += 1;
         }
         push_nested_rules(&rule.node, &mut stack);
     }
     open
-}
-
-/// Whether `block`, or a bracket inside it, was still open at the end of
-/// `css`: epubveri's reading for `css.stylesheet.unterminated` (0.41.0), since
-/// styloria 0.20 closes such a block at the end of input without an error
-/// (CSS Syntax §5.5). A block that closed ends in its own `}`, after its last
-/// item. One that did not ends with its last token: a byte other than `}`, or
-/// a `}` its last item holds (`p { a { b: c }`, or a `(` or `[` left open in a
-/// value).
-fn block_never_closed(css: &str, block: &styloria::Block<'_>) -> bool {
-    // A block's span holds at least its `{`, so `end` is never 0.
-    let close = block.span.end.saturating_sub(1);
-    css.as_bytes().get(close) != Some(&b'}')
-        || block.node.last().is_some_and(|i| i.span().end > close)
 }
 
 /// The properties where an image that does not load draws what `none` draws:
@@ -12772,6 +12757,51 @@ mod tests {
         }
     }
 
+    /// An open block can end in a `}` byte that a token it dropped holds.
+    /// Only styloria's `Block::closed` sees these as open (the byte test we
+    /// had before 0.21 called all five closed). Where the appended `}` closes
+    /// the block it is proposed; where a token takes it in, it is declined.
+    #[test]
+    fn unterminated_reads_whether_the_block_closed_from_the_parser() {
+        for css in [
+            "p { \"}",
+            "p { a: b; \"}",
+            "p { a: b; [}",
+            "p { url(}",
+            "p { ; \\}",
+        ] {
+            assert_eq!(open_block_count(css), 1, "{css}");
+        }
+        assert_eq!(close_open_blocks("p { ; \\}").as_deref(), Some("}"));
+        for css in ["p { \"}", "p { a: b; \"}", "p { a: b; [}", "p { url(}"] {
+            assert_eq!(close_open_blocks(css), None, "{css}");
+        }
+    }
+
+    /// Through the real detector (epubveri 0.46.0 reads `closed` too): the
+    /// escaped-brace sheet is reported and closed, a string to the end of
+    /// input is reported and declined. An EPUB 3 book, where epubveri checks
+    /// an open block's contents too; in EPUB 2 it does not, so closing the
+    /// block reveals the `\}` and `repair()` reverts (docs/FIXERS.md, CSS-008).
+    #[test]
+    fn unterminated_agrees_with_the_detector_on_a_trailing_brace_byte() {
+        let rule = Some("css.stylesheet.unterminated");
+        let mut ws = css_book(b"p { ; \\}", &[]);
+        let report = ws.detect().unwrap();
+        assert!(report.messages.iter().any(|m| m.rule == rule));
+        let fixes = css_unterminated(&report, &ws);
+        assert_eq!(fixes.len(), 1);
+        (fixes.into_iter().next().unwrap().apply_fn)(&mut ws);
+        assert_eq!(ws.get_text("s.css").unwrap(), "p { ; \\}}");
+        let after = ws.detect().unwrap();
+        assert!(!after.messages.iter().any(|m| m.rule == rule));
+
+        let ws = css_book(b"p { \"}", &[]);
+        let report = ws.detect().unwrap();
+        assert!(report.messages.iter().any(|m| m.rule == rule));
+        assert!(css_unterminated(&report, &ws).is_empty());
+    }
+
     #[test]
     fn unterminated_closes_an_inline_style() {
         let doc = "<html xmlns=\"http://www.w3.org/1999/xhtml\"><head><style>p { margin: 0</style></head><body/></html>";
@@ -12809,6 +12839,18 @@ mod tests {
         let report = ws.detect().unwrap();
         assert!(report.messages.iter().any(|m| m.rule == rule));
         assert!(css_unterminated(&report, &ws).is_empty());
+    }
+
+    /// An `@font-face` left open by a string that runs to the end of input
+    /// ends in a `}` byte; the byte test before styloria 0.21 called it
+    /// closed and dropped it. It is open, so it is declined.
+    #[test]
+    fn font_face_declines_an_open_block_ending_in_a_brace_byte() {
+        let urls = BTreeSet::from(["font.ttf".to_string()]);
+        let open = "@font-face { src: url(font.ttf); \"}";
+        assert!(plan_font_face_drops(open, &urls).is_none(), "{open}");
+        let closed = "@font-face { src: url(font.ttf); }";
+        assert!(plan_font_face_drops(closed, &urls).is_some(), "{closed}");
     }
 
     /// A substring match took the working `myfont.ttf` for the missing

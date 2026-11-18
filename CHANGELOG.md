@@ -16,7 +16,12 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
   - A valid EPUB 2 `ops:switch` is no longer reported as an error.
   - A stylesheet block left open by a string, an escaped `}`, a `[` or a
     `url(` that runs to the end of the sheet is now reported as unterminated.
-    `fix.css_unterminated` does not propose a repair for these yet.
+    `fix.css_unterminated` now reads whether a block closed from styloria's
+    parser, as epubveri does. Of these shapes it proposes closing only the
+    escaped `}`, where an appended `}` closes the block. In EPUB 2 that repair
+    is reverted, because closing the block shows the `\}` as a malformed
+    declaration. `fix.font_face_missing_target` no longer deletes such an
+    open `@font-face`.
   - On the 562-book shelf, every finding, proposal, outcome and repaired byte
     is unchanged.
 - `Cargo.lock` moves to zip 9.7.0 (the requirement stays 9.5.1).
