@@ -12,16 +12,22 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
 ### Changed
 
-- Moves to epubveri 0.46.0 and styloria 0.21.
+- Moves to epubveri 0.47.0 and styloria 0.21.
   - A valid EPUB 2 `ops:switch` is no longer reported as an error.
   - A stylesheet block left open by a string, an escaped `}`, a `[` or a
     `url(` that runs to the end of the sheet is now reported as unterminated.
     `fix.css_unterminated` now reads whether a block closed from styloria's
     parser, as epubveri does. Of these shapes it proposes closing only the
-    escaped `}`, where an appended `}` closes the block. In EPUB 2 that repair
-    is reverted, because closing the block shows the `\}` as a malformed
-    declaration. `fix.font_face_missing_target` no longer deletes such an
-    open `@font-face`.
+    escaped `}`, where an appended `}` closes the block.
+    `fix.font_face_missing_target` no longer deletes such an open
+    `@font-face`.
+  - In EPUB 2, a malformed declaration inside a block that is never closed
+    is now reported, as it is in EPUB 3 and once the block is closed. So
+    `fix.css_unterminated` is no longer rolled back on such a stylesheet.
+    Where the open block swallowed a whole rule, closing it at the end still
+    leaves that rule nested, and the repair is still rolled back. Moving the
+    `}` before that rule would change what a reader shows, so epubsana does
+    not.
   - On the 562-book shelf, every finding, proposal, outcome and repaired byte
     is unchanged.
 - `Cargo.lock` moves to zip 9.7.0 (the requirement stays 9.5.1).

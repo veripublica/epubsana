@@ -12158,6 +12158,12 @@ mod tests {
     /// An EPUB 3 book whose manifest holds one stylesheet, `s.css`, with
     /// these bytes, and `extra` entries in the container only.
     fn css_book(css: &[u8], extra: &[(&str, &[u8])]) -> Workspace {
+        css_book_version("3.0", css, extra)
+    }
+
+    /// [`css_book`] with the package's `version`, for rules epubveri reads
+    /// differently in EPUB 2.
+    fn css_book_version(version: &str, css: &[u8], extra: &[(&str, &[u8])]) -> Workspace {
         use std::io::Write;
         let mut buf = Vec::new();
         {
@@ -12166,20 +12172,20 @@ mod tests {
             let stored = opts.compression_method(zip::CompressionMethod::Stored);
             zip.start_file("mimetype", stored).unwrap();
             zip.write_all(b"application/epub+zip").unwrap();
+            let opf = format!(
+                r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="{version}" unique-identifier="id">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="id">x</dc:identifier></metadata>
+  <manifest><item href="s.css" id="css" media-type="text/css"/></manifest>
+  <spine/>
+</package>"#
+            );
             let mut files: Vec<(&str, &[u8])> = vec![
                 (
                     "META-INF/container.xml",
                     br#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#,
                 ),
-                (
-                    "content.opf",
-                    br#"<?xml version="1.0"?>
-<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id">
-  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="id">x</dc:identifier></metadata>
-  <manifest><item href="s.css" id="css" media-type="text/css"/></manifest>
-  <spine/>
-</package>"#,
-                ),
+                ("content.opf", opf.as_bytes()),
                 ("s.css", css),
             ];
             files.extend_from_slice(extra);
@@ -12780,9 +12786,8 @@ mod tests {
 
     /// Through the real detector (epubveri 0.46.0 reads `closed` too): the
     /// escaped-brace sheet is reported and closed, a string to the end of
-    /// input is reported and declined. An EPUB 3 book, where epubveri checks
-    /// an open block's contents too; in EPUB 2 it does not, so closing the
-    /// block reveals the `\}` and `repair()` reverts (docs/FIXERS.md, CSS-008).
+    /// input is reported and declined. An EPUB 3 book; the EPUB 2 case is
+    /// `unterminated_is_kept_in_epub2_where_the_open_block_holds_junk`.
     #[test]
     fn unterminated_agrees_with_the_detector_on_a_trailing_brace_byte() {
         let rule = Some("css.stylesheet.unterminated");
@@ -12800,6 +12805,44 @@ mod tests {
         let report = ws.detect().unwrap();
         assert!(report.messages.iter().any(|m| m.rule == rule));
         assert!(css_unterminated(&report, &ws).is_empty());
+    }
+
+    /// EPUB 2, through `repair()`. Since epubveri 0.47.0 the junk before an
+    /// open block's first rule is reported open and closed alike, so closing
+    /// the block raises nothing and the fix is kept (0.46.0 reverted it). A
+    /// rule the open block swallowed is still quiet until the block closes,
+    /// and closing at the end nests it: that one is reverted, deliberately
+    /// (docs/FIXERS.md, CSS-008).
+    #[test]
+    fn unterminated_is_kept_in_epub2_where_the_open_block_holds_junk() {
+        let run = |css: &str| {
+            let mut ws = css_book_version("2.0", css.as_bytes(), &[]);
+            let r = crate::repair(
+                &mut ws,
+                crate::Goal::Valid,
+                crate::Policy::AskEach,
+                &mut crate::tests::ApproveAll,
+            )
+            .unwrap();
+            let f = r
+                .fixes
+                .iter()
+                .find(|f| f.fix_id == "fix.css_unterminated")
+                .expect("proposed");
+            (f.outcome, ws.get_text("s.css").unwrap())
+        };
+        for css in ["p { color: red; 12px; margin: 0", "p { ; \\}"] {
+            assert_eq!(
+                run(css),
+                (crate::Outcome::Applied, format!("{css}}}")),
+                "{css}"
+            );
+        }
+        let swallowed = "h1 { color: red }\np { margin: 0;\nh2 { color: blue }";
+        assert_eq!(
+            run(swallowed),
+            (crate::Outcome::Reverted, swallowed.to_string())
+        );
     }
 
     #[test]

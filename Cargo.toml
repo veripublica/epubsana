@@ -472,9 +472,19 @@ members = ["epubsana-wasm"]
 # four shapes change key; a switch goes from 2 RSC-005 to 0). The shelf holds
 # none of them.
 #
+# **0.47.0 (2026-11-18), the fix we asked for.** In EPUB 2, epubveri checks
+# an open style-rule block up to the first rule inside it (it was quiet on the
+# whole block), so junk there, such as `p { ; \}`, reads the same open and
+# closed, and `fix.css_unterminated` is applied instead of reverted. A
+# swallowed rule stays quiet (one missing `}`, one finding), so closing at the
+# end still draws `nested_rule` and is reverted: a deliberate limit
+# (`docs/FIXERS.md`, CSS-008). Tested before release on `c668519`; the crate
+# is that commit (76 files identical). Measured on 562 books (0.46.0 vs
+# 0.47.0): every finding, plan, outcome and repaired-byte hash is identical.
+#
 # For local co-development of epubveri, add an uncommitted override:
 #   [patch.crates-io] epubveri = { path = "../epubveri" }
-epubveri = "0.46.0"
+epubveri = "0.47.0"
 # CSS, located: the family's own parser, taken directly as a peer (Baris,
 # 2026-10-18; epubveri will not re-export it). Two conditions. **One styloria
 # in the lock**: the requirement is epubveri's own (`0.21`), so the text we

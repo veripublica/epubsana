@@ -2347,19 +2347,32 @@ appending, so the finding and the repair agree:
 The shelf holds none of the five (2026-11-18: 878 sheets, 24,368 blocks,
 2 unclosed; the byte test and `closed` agree on every block).
 
-**In EPUB 2 the closed block's contents become visible.** epubveri reports no
-syntax error inside an EPUB 2 block that never closed (0.46.0,
-`walk_rule_block`): it counts them as the unclosed brace's doing. After the
-repair, the block is checked, and junk that was always there is reported. In
-`p { ; \}` that is the `\}`, as `css.declaration.malformed_shape`. The repair
-loop sees that as a rise and reverts the fix. Nothing is damaged, and the
-finding stays. A reader drops the junk both before and after the repair, so
-the finding is revealed, not made. That is a detector issue, not ours to
-work around: we do not accept it as revealed (no `BLINDING_RULES` entry). We
-asked epubveri to report an EPUB 2 open block's contents, as it already does
-in EPUB 3 (Baris, 2026-11-18; note to epubveri the same day). The shelf's two
-repaired books hold no junk in the open block. In EPUB 3, epubveri checks the open block like
-any other, so nothing new appears.
+**In EPUB 2, what an open block holds** (epubveri 0.47.0, 2026-11-18). Up to
+0.46.0, epubveri reported no syntax error inside an EPUB 2 block that never
+closed. Closing it then showed junk that had always been there, such as the
+`\}` in `p { ; \}`. The repair loop counted that as a rise and reverted the
+fix. We asked epubveri to fix the detector rather than accept the rise as
+revealed (Baris, 2026-11-18). Since 0.47.0, epubveri checks an open EPUB 2
+block up to the first rule inside it, so that junk reads the same open and
+closed, and the fix is applied. Measured on minimal EPUB 2 books through
+`repair()`: `p { color: red; 12px; margin: 0` and `p { ; \}` were reverted on
+0.46.0 and are applied on 0.47.0. In EPUB 3, epubveri always checked the open
+block, and nothing changes.
+
+**A deliberate limit: a rule the open block swallowed (EPUB 2).** In
+`p { margin: 0;` followed by `h2 { color: blue }`, the open `p` block takes the
+`h2` rule in. epubveri reports that once, as the one missing `}`
+(`unterminated`), and stays quiet about what follows. Closing at the end keeps
+the reader's tree, and in CSS 2 that tree has a rule nested in a style rule,
+so `css.declaration.nested_rule` appears. The loop reverts the fix and the
+finding stays. That is right: the defect is still in the book. We do **not**
+put the `}` before the first swallowed rule. A CSS 2 reader drops those rules
+today, and that `}` would make them apply. That changes what the reader sees
+(Baris, 2026-10-23), and it would be a guess. epubveri will not change this
+quieting without telling us first (2026-11-18).
+
+The shelf's two repaired books hold neither shape (562 books, 2026-11-18,
+byte-identical across 0.46.0 and 0.47.0).
 
 The first design had two more guards: "every open bracket is a `{`" and "the
 repaired text serializes as the original does". A mutation check showed that
