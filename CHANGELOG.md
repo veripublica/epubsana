@@ -8,6 +8,19 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [Unreleased]
+
+### Changed
+
+- Moves to epubveri 0.46.0 and styloria 0.21.
+  - A valid EPUB 2 `ops:switch` is no longer reported as an error.
+  - A stylesheet block left open by a string, an escaped `}`, a `[` or a
+    `url(` that runs to the end of the sheet is now reported as unterminated.
+    `fix.css_unterminated` does not propose a repair for these yet.
+  - On the 562-book shelf, every finding, proposal, outcome and repaired byte
+    is unchanged.
+- `Cargo.lock` moves to zip 9.7.0 (the requirement stays 9.5.1).
+
 ## [0.41.0] - 2026-11-13
 
 ### Changed
