@@ -53,6 +53,8 @@ grows one carefully-argued entry at a time.
 | `RSC-012` | `opf.guide.reference_fragment_not_defined` | ConfirmNeeded | A `<guide>` reference's `#fragment` resolves to no `id` in a target that does exist | [Drop the fragment, keep the document](#rsc-007--rsc-017--rsc-012--guide-references) |
 | `RSC-012` | `opf.content_document.dangling_fragment` | ConfirmNeeded | A link's `#fragment` is real but now lives in another document — an editor split the file | [Write the path in front of the fragment](#rsc-012--a-fragment-that-is-real-but-has-moved-to-another-document) |
 | `RSC-005` | `htm.obsolete_attribute` (`params[0] == "name"`) | AutoSafe | A legacy `<a name>` anchor duplicating the element's own `id` | [Drop the `name` attribute](#rsc-005--a-legacy-name-attribute-on-a) |
+| `RSC-005` | `htm.obsolete_attribute` (`clear` on `<br>`) | ConfirmNeeded | A presentational `<br clear>` in a book where nothing floats | [Drop the `clear` attribute](#rsc-005--clear-on-br-in-a-book-with-no-float) |
+| `RSC-005` | `htm.obsolete_attribute` (`link`, `vlink`, `alink` on `<body>`) | ConfirmNeeded | A presentational link colour on `<body>` that colours nothing | [Drop the attribute](#rsc-005--link-vlink-or-alink-on-body-that-colours-nothing) |
 | `RSC-005` | `opf.content_document.schema_violation` (`params[0] == "value"` on an ADEPT `<meta>`) | AutoSafe | Adobe DRM left `<meta name="Adept.resource" value="…">`, and `<meta>` has no `value` | [Rename `value` to `content`](#rsc-005--an-adobe-adept-meta-carrying-value) |
 | `RSC-005` | `opf.content_document.schema_violation` (empty `lang`/`xml:lang`) | ConfirmNeeded | An empty language tag, which EPUB 2's grammar does not allow | [Delete the attribute](#rsc-005--an-empty-lang--xmllang) |
 | `RSC-005` | `opf.content_document.schema_violation` (`params[0] == "id"`) | ConfirmNeeded | An `id` that is not a valid XML NCName (on the shelf: it starts with a digit) | [Rename it, moving every reference with it](#rsc-005--an-id-that-is-not-a-valid-ncname-the-first-cross-file-fixer) |
@@ -1385,7 +1387,9 @@ the rare deletion that loses no information at all, which is what makes it
 
 - **Any other attribute in the family.** `<br clear>` has its own fixer,
   `fix.br_clear_without_float` (next section), which deletes it only where no
-  float exists. Everything else in the family stays reported.
+  float exists. `link`, `vlink` and `alink` on `<body>` have
+  `fix.body_link_colors`, which deletes them only where they colour nothing.
+  Everything else in the family stays reported.
 - **`name` with no `id`.** The obvious repair — rename `name` → `id`, which
   preserves every `#fragment` that targets it — is *not* determinate. An `id`
   must be a valid NCName and must be unique in the document; a legacy `name` is
@@ -1501,6 +1505,208 @@ approved, A/B against `3fe8eb0`).**
   not a `<br>`, so the book is declined.
 - *Past Masters 279*: 24 of its 74 errors cleared. The 50 left are `link` and
   `vlink` on `<body>`, which are for the next release.
+
+---
+
+## RSC-005 — `link`, `vlink` or `alink` on `<body>` that colours nothing
+
+> **Status (2026-11-21):** cases 1–3 are built (Baris, 2026-11-21). Case 4
+> waits on styloria: we asked it by note for a state-aware match the same day.
+
+**Finding.** `htm.obsolete_attribute`, `params[0]` ∈ {`link`, `vlink`,
+`alink`}, `element_path` ending in `/h:body[1]/@link` (`@vlink`, `@alink`):
+*attribute "link" not allowed here*. Older calibre and Word conversions write
+them on every chapter:
+
+    <body lang="EN-US" link="blue" vlink="purple" class="calibre">
+
+**What the attribute does.** HTML §15.3.2 (*The page*,
+[#the-page](https://html.spec.whatwg.org/multipage/rendering.html#the-page)):
+when a `body` element has a `link` attribute, its value is parsed with the
+rules for parsing a legacy color value, "and if that does not return failure,
+the user agent is expected to treat the attribute as a presentational hint
+setting the 'color' property of any element in the Document matching the
+:link pseudo-class". `vlink` does the same for `:visited`. `alink` does it
+for elements that match `:active` and also either `:link` or `:visited`.
+XHTML 1.1, and so EPUB 2, has none of these attributes, so a conforming EPUB 2
+reader ignores them. A browser-based reader applies them.
+
+So the hint does one thing: it colours the document's links. **Wherever it
+can colour nothing, deleting the attribute changes nothing a reader sees.**
+Both readings agree: the EPUB 2 reader that ignores it and the browser that
+applies it to no element. That is the whole fix.
+
+**Fix** (`fix.body_link_colors`, ConfirmNeeded). Delete the reported
+attribute, together with the whitespace before it, from the document's
+`<body>`, in each of the cases below. The element, its other attributes and
+every other byte stay as they are. There is one proposal for the whole book,
+as in `fix.br_clear_without_float`.
+
+    <body lang="EN-US" link="blue" vlink="purple" class="calibre">
+    →
+    <body lang="EN-US" class="calibre">
+
+**Why delete and not convert.** Turning the attribute into CSS
+(`a:link { color: blue }`) would also clear the finding. But where the hint
+colours nothing, the new rule would colour nothing either: it adds CSS that
+fixes nothing, and it treats the EPUB 2 reading as wrong. Converting
+presentational attributes is epublift's upgrade, not a repair (Baris).
+
+**Applied after another fix.** A document has one `<body>`, so the apply
+finds it by name, not by `element_path`. A fix that wraps content inside the
+body (`fix.bare_text_in_body`) cannot move it. If the attribute is no longer
+there at apply time, the document is left alone.
+
+### The cases
+
+**Case 1: the value is not a colour.** The legacy colour rules return failure
+for the empty string (step 1) and, after stripping whitespace, for
+`transparent` in any case (step 3). Then the hint is never applied, so
+deleting it is exact. A value that is only whitespace is declined: the steps
+do not say what it gives. 0 on the shelf (2026-11-21).
+
+**Case 2: the document has no link.** HTML §4.16.3
+([#selector-visited](https://html.spec.whatwg.org/multipage/semantics-other.html#selector-visited)):
+"All a elements that have an href attribute, and all area elements that have
+an href attribute, must match one of :link and :visited." With none of them,
+no element matches `:link` or `:visited`, so the hint colours nothing. The
+check is wider than that sentence, because "other specifications might apply
+more specific rules":
+
+- an element anywhere outside `<head>` that carries `href` or `xlink:href`,
+  in any namespace (an SVG `<a>`, a MathML `href`), declines the document;
+- a document holding a `<script>` declines, because a script can add a link.
+
+The hint reaches only the elements of its own document (*"in the Document"*),
+so this is decided per document. A link in another chapter is not affected.
+
+**Case 3: every link's `color` is already set by author CSS.** A
+presentational hint enters the cascade in "a special-purpose author
+presentational hint origin", which lies "between the regular user origin and
+the author origin" and "can be overridden by author-origin styles"
+(CSS Cascade 5 §6.5, [#preshint](https://www.w3.org/TR/css-cascade-5/#preshint);
+HTML §15.2 calls it the "author-level zero-specificity presentational hints
+part of the CSS cascade"). So if an author declaration certainly sets `color`
+on a link, the hint never decides that link's colour. If that holds for every
+link in the document, the hint colours nothing.
+
+This asks styloria's `Cascade` (0.21): for each link element,
+`style_for(link, style attribute).property("color").status == Yes`.
+
+- `Yes` means some declaration certainly applies. A higher one that only
+  possibly applies (`@media`, `:hover`) cannot bring the hint back: it is
+  also author origin.
+- `revert` counts as author origin for this purpose (§6.5), so it rolls back
+  past the hint too. styloria answers it `Unknown`, which declines. That is
+  stricter than needed, and we keep it.
+- **Only a false `Yes` is a risk, and only a sheet we count but the reader
+  may not apply can cause one.** A sheet we cannot read can only add author
+  declarations, and those never bring the hint back. That holds for a remote
+  sheet, an `@import`ed one and one named by `xml-stylesheet`. So those are
+  left out, not declined. (The spec first declined them. Thinking through
+  each guard's mutation showed that they protect nothing: no test could
+  make one of them change a right answer into a wrong one.)
+- A sheet counts only if it **always** applies, and only if the
+  **document** loads it. This is not the whole book: here a sheet the
+  document does not load would give a false `Yes`, where in `book_may_float`
+  an extra sheet could only cause a false decline. A counted sheet is a
+  `<style>`, or a `<link>` whose `rel` holds `stylesheet` and names a `.css`
+  file in the book. It is not counted when:
+  - its `rel` holds `alternate`, so it is not applied by default;
+  - it has a `title`, so it is switched off when the reader picks another
+    set;
+  - the file is not a stylesheet: a browser refuses a sheet that is not
+    `text/css`.
+- A `media` other than `all` is passed as `conditional`. Its rules then
+  answer `Unknown`, so they never make a `Yes`.
+- It declines on a counted sheet that does not decode losslessly. A misread
+  could make a `color` the sheet does not hold.
+
+0 on the shelf (2026-11-21). The shelf's one document with links needs
+case 4.
+
+**Case 4: the author CSS colours links by state** (needs styloria).
+calibre turns `link`/`vlink` into rules and keeps the attributes. In
+*Past Masters 279*'s table of contents:
+
+    .pcalibre:link     { color: blue;   text-decoration: underline }
+    .pcalibre1:visited { color: purple; text-decoration: underline }
+
+Every link carries both classes (`class="calibre1 pcalibre pcalibre1"`). An
+unvisited link matches `.pcalibre:link`, so `link="blue"` never decides its
+colour. A visited one matches `.pcalibre1:visited`, so `vlink="purple"`
+never decides either. Both attributes colour nothing. styloria 0.21
+answers `:link` and `:visited` `Unknown`, because it cannot know a link's
+state, so case 3 declines this document.
+
+The question we need answered is narrower than "is this link visited?". For
+`link`, the hint applies only to a link that matches `:link`. So we ask the
+cascade **given that the link is unvisited**: `:link` matches, `:visited`
+does not, and `:hover`/`:active`/`:focus` stay `Unknown`. The same holds for
+`vlink`, given that the link is visited. For `alink` the state is "active,
+visited or not", so `alink` needs `Yes` under both visited states. This needs
+a way to tell styloria's matcher a link's state. A sketch would be an
+`Element` method returning `Option<bool>` for `:link`/`:visited`, with a
+default of `None`, which is today's behaviour. That is styloria's API to
+design. We would ask by note, with Baris's yes.
+
+### When it declines
+
+- any `htm.obsolete_attribute` other than these three on `<body>`;
+- `text`, `bgcolor` and `background` on `<body>`. These colour the body
+  itself, and descendants inherit from it, which is another question. They are
+  not measured.
+- a document that does not parse, or whose `<body>` no longer carries the
+  attribute (a stale finding never deletes anything);
+- the cases above that do not hold: a whitespace-only value, a link whose
+  `color` is `Unknown` or `No`, or a counted sheet that does not decode;
+- two `<body>` elements in one document (a defective book), or a finding
+  whose `element_path` is not that document's `<body>`.
+
+**Open question for Baris (cases 3 and 4 only).** Some readers have a "turn
+off publisher styles" setting. If one of them drops the book's CSS but still
+applies the hints, then in cases 3 and 4 the attribute *is* what colours the
+links, and deleting it changes that mode. Case 2 does not have this problem,
+because there is nothing to colour. We have not checked any reader for this.
+
+### Measured (2026-11-21, epubveri 0.47.0, before building)
+
+Probe: `epubsana-dev-examples/link_vlink_probe.rs`. It ran on 562 shelf books
+plus *Past Masters 279* (Doitsu, MobileRead t=374799 #65). Every reported
+document was checked by hand from the unpacked book (`href` anywhere in the
+body, `<script>`, the linked sheets).
+
+| book | findings | documents | case 2 (no link) | needs case 4 |
+|---|---|---|---|---|
+| *Past Masters 279* (EPUB 2) | 25 `link` + 25 `vlink` | 25 | 24 (48 findings) | 1: the TOC, 23 links (2 findings) |
+| *Mürebbiye* (shelf, EPUB 2) | 2 + 2 | 2 | 2 (4 findings) | 0 |
+
+- Values: `link="blue"` 27, `vlink="purple"` 25, `vlink="blue"` 2. No
+  `alink`, no failing value. No document holds a `<script>`, an
+  `xml-stylesheet`, a remote or alternate sheet, a `<link media>` or an
+  `@import`.
+- So cases 1–3 clear 52 of the 54 findings. The last 2 are in *Past Masters
+  279*'s TOC, which waits on case 4. With cases 1–3 only, that book still
+  ends with those 2 errors.
+- Whether *Mürebbiye* ends error-free has not been measured.
+
+**Measured after building (2026-11-21, epubveri 0.47.0, 562 books plus
+*Past Masters 279*, every fix approved, A/B against `b0e10fa`).**
+
+- Two books change, and nothing else moves in any book: no other finding,
+  plan or outcome. Nothing is reverted.
+- *Past Masters 279*: 48 of its 50 `link`/`vlink` findings cleared, in 24
+  files. Its errors go from 99 to 2 (`repair -y`, which also runs
+  `fix.br_clear_without_float` and `fix.manifest_href_spaces`). The 2 left
+  are the TOC (`split_001`, 23 links), as measured before building. They
+  wait on case 4. The diff of one chapter is exactly the
+  ` link="blue" vlink="purple"` deleted from `<body>`.
+- *Mürebbiye*: all 4 cleared. The book is still invalid: 22 other errors
+  stay (21 `opf.content_document.schema_violation`, 1
+  `opf.package.schema_violation`). `fix.bare_text_in_body` runs first and
+  wraps the body's text in a `<div>`. The body is found by name, so this
+  fix applies after it.
+- 21 mutations of the guards and branches: every one makes a test fail.
 
 ---
 

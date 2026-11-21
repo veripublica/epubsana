@@ -92,6 +92,7 @@ pub fn plan(report: &Report, ws: &Workspace, _goal: Goal) -> Vec<ProposedFix> {
     fixes.extend(bare_text_in_body(report, ws));
     fixes.extend(anchor_name_attrs(report, ws));
     fixes.extend(br_clear_without_float(report, ws));
+    fixes.extend(body_link_colors(report, ws));
     fixes.extend(adept_meta_value(report, ws));
     fixes.extend(svg_attribute_case(report, ws));
     fixes.extend(svg_element_case(report, ws));
@@ -3153,6 +3154,312 @@ fn br_clear_spans_at(
             .map(|(_, (_, span))| span)
             .collect(),
     )
+}
+
+/// The `<body>` attributes `fix.body_link_colors` deletes.
+const BODY_LINK_ATTRS: [&str; 3] = ["link", "vlink", "alink"];
+
+/// One attribute to delete: its name, and its span with the whitespace
+/// before it.
+type AttrDrop = (&'static str, Range<usize>);
+
+/// `RSC-005` / `htm.obsolete_attribute`, `params[0]` ∈ {`link`, `vlink`,
+/// `alink`} on `<body>`. HTML §15.3.2 maps each to a presentational hint
+/// that sets `color` on the document's links (`:link`, `:visited`, `:active`).
+/// The fixer deletes the attribute **only where that hint colours nothing**
+/// ([`body_link_drops`]): its value is not a colour, the document has no link,
+/// or author CSS certainly sets `color` on every link (a hint is overridden by
+/// any author-origin declaration, CSS Cascade 5 §6.5). Then the EPUB 2 reader
+/// that ignores the attribute and the browser that applies it draw the same
+/// page, and deleting it keeps that page.
+///
+/// Acts only on the attributes epubveri reported (by `element_path`). One
+/// proposal for the whole book, as for `fix.br_clear_without_float`.
+/// `ConfirmNeeded`: the cascade answer is ours, and a reader's own stylesheet
+/// is outside what we can read.
+fn body_link_colors(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    // document -> (the reported `<body>` path, the attributes reported on it)
+    let mut by_doc: BTreeMap<String, BTreeMap<String, BTreeSet<&'static str>>> = BTreeMap::new();
+    for m in &report.messages {
+        if m.rule != Some("htm.obsolete_attribute") {
+            continue;
+        }
+        let (Some(doc), Some(np)) = (m.location.as_deref(), m.element_path.as_ref()) else {
+            continue;
+        };
+        let Some(path) = svg_reported_path(np) else {
+            continue;
+        };
+        let Some((element, attr)) = BODY_LINK_ATTRS.iter().find_map(|a| {
+            path.strip_suffix(&format!("/@{a}"))
+                .map(|e| (e.to_string(), *a))
+        }) else {
+            continue;
+        };
+        by_doc
+            .entry(doc.to_string())
+            .or_default()
+            .entry(element)
+            .or_default()
+            .insert(attr);
+    }
+
+    let mut docs: Vec<(String, BTreeSet<&'static str>)> = Vec::new();
+    let mut n = 0;
+    for (doc, reported) in by_doc {
+        let Some(text) = ws.get_text(&doc) else {
+            continue;
+        };
+        let Some((body_path, dropped)) = body_link_drops(ws, &doc, &text, &BODY_LINK_ATTRS) else {
+            continue;
+        };
+        // Only the attributes reported on this very `<body>`.
+        let Some(attrs) = reported.get(&body_path) else {
+            continue;
+        };
+        let picked: BTreeSet<&'static str> = dropped
+            .into_iter()
+            .map(|(a, _)| a)
+            .filter(|a| attrs.contains(a))
+            .collect();
+        if !picked.is_empty() {
+            n += picked.len();
+            docs.push((doc, picked));
+        }
+    }
+    if docs.is_empty() {
+        return Vec::new();
+    }
+
+    let files = docs.len();
+    let preview: Vec<Change> = docs
+        .iter()
+        .take(6)
+        .map(|(doc, picked)| Change {
+            path: doc.clone(),
+            note: format!(
+                "drop {} from <body>",
+                picked
+                    .iter()
+                    .map(|a| format!("{a}="))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        })
+        .collect();
+    let docs_for_apply = docs;
+
+    vec![ProposedFix {
+        fix_id: "fix.body_link_colors",
+        addresses_id: "RSC-005".to_string(),
+        addresses_rule: Some("htm.obsolete_attribute"),
+        addresses_severity: addressed_severity(report, "RSC-005", Some("htm.obsolete_attribute")),
+        tier: Tier::ConfirmNeeded,
+        title: format!(
+            "Drop {n} link colour attribute{} from <body> in {files} file{}",
+            if n == 1 { "" } else { "s" },
+            if files == 1 { "" } else { "s" }
+        ),
+        rationale: "`link`, `vlink` and `alink` on `<body>` are presentational attributes XHTML \
+                    1.1 does not have. Each only sets the colour of the document's links, and \
+                    here it colours nothing: the document has no link, the value is not a \
+                    colour, or the book's own CSS already sets the colour of every link, which \
+                    overrides the attribute. A reader that ignores the attribute and one that \
+                    applies it already draw the same page, so deleting it changes nothing a \
+                    reader sees. No text, no other attribute and no other element is touched."
+            .to_string(),
+        preview,
+        apply_fn: Box::new(move |ws: &mut Workspace| {
+            for (doc, picked) in &docs_for_apply {
+                let Some(text) = ws.get_text(doc) else {
+                    continue;
+                };
+                // The `<body>` is found by name, so a fix that moved content
+                // inside it does not matter; the conditions are asked again.
+                let attrs: Vec<&str> = picked.iter().copied().collect();
+                if let Some((_, drops)) = body_link_drops(ws, doc, &text, &attrs) {
+                    let edits = drops
+                        .into_iter()
+                        .map(|(_, range)| MetaEdit {
+                            range,
+                            replacement: String::new(),
+                        })
+                        .collect();
+                    ws.set_text(doc, apply_edits(&text, edits));
+                }
+            }
+        }),
+    }]
+}
+
+/// Which of `attrs` on the document's `<body>` colour nothing, with the span
+/// to delete for each (the attribute and the whitespace before it), and the
+/// body's element path. `None` when the document does not parse, has no
+/// single XHTML `<body>`, or none of `attrs` can go. The cases are in
+/// `docs/FIXERS.md`.
+fn body_link_drops(
+    ws: &Workspace,
+    doc_name: &str,
+    text: &str,
+    attrs: &[&'static str],
+) -> Option<(String, Vec<AttrDrop>)> {
+    const XHTML: &str = "http://www.w3.org/1999/xhtml";
+    let prepared = prepare_content_doc(text);
+    let doc = prepared.parse()?;
+    let mut bodies = doc
+        .descendants()
+        .filter(|n| n.is_element() && n.has_tag_name((XHTML, "body")));
+    let body = bodies.next()?;
+    if bodies.next().is_some() {
+        return None;
+    }
+    let body_path = xhtml_element_path(body)?;
+
+    // Case 2 and case 3 do not depend on the attribute, so ask once.
+    let links = possible_links(&doc);
+    let colours_nothing = links
+        .as_ref()
+        .map(|links| links.is_empty() || every_link_coloured(ws, doc_name, &doc, links));
+
+    let mut drops = Vec::new();
+    for &name in attrs {
+        let Some(attr) = body
+            .attributes()
+            .find(|a| a.namespace().is_none() && a.name() == name)
+        else {
+            continue;
+        };
+        if is_not_a_legacy_colour(attr.value()) || colours_nothing == Some(true) {
+            drops.push((
+                name,
+                attr_span_with_leading_space(text, prepared.unshift(attr.range())),
+            ));
+        }
+    }
+    (!drops.is_empty()).then_some((body_path, drops))
+}
+
+/// Case 1: the rules for parsing a legacy colour value (HTML §2.3.6) return
+/// failure, so the hint is never applied. Failure is the empty string (the
+/// first step) and `transparent` after stripping ASCII whitespace (the second
+/// and third). A value that is only whitespace is not counted: the steps do
+/// not say what it gives.
+fn is_not_a_legacy_colour(value: &str) -> bool {
+    value.is_empty()
+        || value
+            .trim_matches(|c: char| c.is_ascii_whitespace())
+            .eq_ignore_ascii_case("transparent")
+}
+
+/// Every element of the document that could match `:link` or `:visited`:
+/// any element outside `<head>` carrying `href` or `xlink:href`, in any
+/// namespace. Wider than HTML's `a`/`area`, since other specifications may
+/// make more elements links. `None` (decline) when the document holds a
+/// `<script>`, which could add a link.
+fn possible_links<'a, 'i>(
+    doc: &'a roxmltree::Document<'i>,
+) -> Option<Vec<roxmltree::Node<'a, 'i>>> {
+    const XHTML: &str = "http://www.w3.org/1999/xhtml";
+    const XLINK: &str = "http://www.w3.org/1999/xlink";
+    let mut links = Vec::new();
+    for n in doc.descendants().filter(|n| n.is_element()) {
+        if n.tag_name().name() == "script" {
+            return None;
+        }
+        let is_link = n.attr_no_ns("href").is_some() || n.attribute((XLINK, "href")).is_some();
+        if is_link && !n.ancestors().any(|a| a.has_tag_name((XHTML, "head"))) {
+            links.push(n);
+        }
+    }
+    Some(links)
+}
+
+/// Case 3: whether author CSS certainly sets `color` on every link
+/// (styloria's cascade, `Yes`).
+///
+/// **Only a false `Yes` is a risk, and only a sheet we count but the reader
+/// may not apply can make one.** The hint sits below the author origin, so a
+/// sheet we do not read (remote, `@import`ed, named by `xml-stylesheet`) can
+/// only add author declarations, which never bring the hint back. So those
+/// are left out, not declined. What is counted is each sheet that always
+/// applies: a `<style>` or a `<link rel="stylesheet">` in the book, with no
+/// `title` (a titled sheet is switched off when the reader picks another
+/// set) and not `alternate`. A `media` other than `all` is passed as
+/// `conditional`, which turns its rules' answers into `Unknown`. `false`
+/// (decline) on a counted sheet that does not decode losslessly, which could
+/// be misread into a `color` it does not hold.
+fn every_link_coloured(
+    ws: &Workspace,
+    doc_name: &str,
+    doc: &roxmltree::Document,
+    links: &[roxmltree::Node],
+) -> bool {
+    const XHTML: &str = "http://www.w3.org/1999/xhtml";
+    let conditional = |n: roxmltree::Node| {
+        n.attr_no_ns("media").is_some_and(|m| {
+            let m = m.trim_matches(|c: char| c.is_ascii_whitespace());
+            !m.is_empty() && !m.eq_ignore_ascii_case("all")
+        })
+    };
+    let mut texts: Vec<(String, bool)> = Vec::new();
+    for n in doc.descendants() {
+        if n.attr_no_ns("title").is_some() {
+            continue;
+        }
+        if n.has_tag_name((XHTML, "style")) {
+            texts.push((
+                n.children().filter_map(|c| c.text()).collect(),
+                conditional(n),
+            ));
+        } else if n.has_tag_name((XHTML, "link")) {
+            let rel = n.attr_no_ns("rel").unwrap_or_default().to_ascii_lowercase();
+            let rel: Vec<&str> = rel.split_ascii_whitespace().collect();
+            if !rel.contains(&"stylesheet") || rel.contains(&"alternate") {
+                continue;
+            }
+            let Some(name) = n
+                .attr_no_ns("href")
+                .and_then(|h| resolve_against(doc_name, h))
+            else {
+                continue;
+            };
+            // A file that is not a stylesheet is not applied as one: a
+            // browser refuses a sheet whose type is not `text/css`.
+            if !crate::workspace::is_stylesheet(&name) {
+                continue;
+            }
+            if !ws.text_round_trips(&name) {
+                return false;
+            }
+            let Some(css) = ws.get_text(&name) else {
+                continue; // not in the book: we cannot read it, and need not
+            };
+            texts.push((css, conditional(n)));
+        }
+    }
+    let parsed: Vec<_> = texts
+        .iter()
+        .map(|(t, _)| styloria::parse_stylesheet(t).0)
+        .collect();
+    let sheets: Vec<styloria::Sheet> = parsed
+        .iter()
+        .zip(&texts)
+        .map(|(stylesheet, (_, conditional))| styloria::Sheet {
+            stylesheet,
+            conditional: *conditional,
+        })
+        .collect();
+    let cascade = styloria::Cascade::new(&sheets);
+    links.iter().all(|link| {
+        let inline = link
+            .attr_no_ns("style")
+            .map(|s| styloria::parse_block_contents(s).0);
+        cascade
+            .style_for(&StyledNode(*link), inline.as_deref())
+            .property("color")
+            .status
+            == styloria::Match::Yes
+    })
 }
 
 /// Whether anything in the book can make a box float, or a file that would
@@ -13538,6 +13845,296 @@ mod tests {
         ] {
             assert_eq!(email_in_http_url(url), None, "{url}");
         }
+    }
+
+    // ---- fix.body_link_colors --------------------------------------
+
+    /// Doitsu's chapter shape: `link`/`vlink` on `<body>`, and no link.
+    const LINK_BODY: &str = r#"<body lang="EN-US" link="blue" vlink="purple" class="calibre"><p class="k">one</p></body>"#;
+    /// The same, with one link in the document.
+    const LINK_BODY_A: &str = r#"<body lang="EN-US" link="blue" vlink="purple" class="calibre"><p><a href="c.xhtml#x" class="k" id="y">one</a></p><p id="x">two</p></body>"#;
+
+    /// The proposal for `ws`, after checking the fixture carries the finding.
+    fn link_fix(ws: &Workspace) -> Option<ProposedFix> {
+        let report = ws.detect().unwrap();
+        assert!(
+            report
+                .messages
+                .iter()
+                .any(|m| m.rule == CLEAR && m.params.first().map(String::as_str) == Some("link")),
+            "the fixture must carry the finding, or this test proves nothing"
+        );
+        body_link_colors(&report, ws).into_iter().next()
+    }
+
+    /// Applies the proposal and returns the chapter's text after it.
+    fn apply_link_fix(mut ws: Workspace) -> String {
+        let fix = link_fix(&ws).expect("proposed");
+        assert_eq!(fix.tier, Tier::ConfirmNeeded);
+        fix.apply(&mut ws);
+        ws.get_text("c.xhtml").unwrap()
+    }
+
+    /// Case 2, through the real detector: no link, so the hint colours
+    /// nothing. Both attributes and the space before each go, every other
+    /// byte stays, and both findings are gone.
+    #[test]
+    fn link_colors_are_dropped_where_the_document_has_no_link() {
+        let mut ws = br_book(b"p { margin: 0 }", "", LINK_BODY, &[]);
+        let before = ws.get_text("c.xhtml").unwrap();
+        let fix = link_fix(&ws).expect("proposed");
+        assert_eq!(fix.tier, Tier::ConfirmNeeded);
+        fix.apply(&mut ws);
+        assert_eq!(
+            ws.get_text("c.xhtml").unwrap(),
+            before.replace(r#" link="blue" vlink="purple""#, "")
+        );
+        let after = ws.detect().unwrap();
+        assert!(!after.messages.iter().any(|m| m.rule == CLEAR));
+    }
+
+    /// Case 3: author CSS certainly sets `color` on every link, so the hint
+    /// never decides a link's colour.
+    #[test]
+    fn link_colors_are_dropped_where_css_colours_every_link() {
+        for (css, body) in [
+            (b"a { color: blue }" as &[u8], LINK_BODY_A.to_string()),
+            (b".k { color: blue }", LINK_BODY_A.to_string()),
+            (b"* { color: inherit }", LINK_BODY_A.to_string()),
+            (b"@media all { a { color: red } }", LINK_BODY_A.to_string()),
+            (b"a { all: unset }", LINK_BODY_A.to_string()),
+            (
+                b"p { margin: 0 }",
+                LINK_BODY_A.replace(r#"class="k""#, r#"class="k" style="color: red""#),
+            ),
+        ] {
+            let ws = br_book(css, "", &body, &[]);
+            let text = apply_link_fix(ws);
+            assert!(
+                !text.contains("link=") && !text.contains("vlink="),
+                "{}",
+                String::from_utf8_lossy(css)
+            );
+        }
+        // A sheet the document loads through `<style>`, or through a
+        // `<link media="all">`, counts too.
+        for head in [
+            "<style type=\"text/css\">a { color: red }</style>",
+            r#"<link rel="stylesheet" type="text/css" media=" ALL " href="u.css"/>"#,
+        ] {
+            let ws = br_book(b"", head, LINK_BODY_A, &[("u.css", b"a { color: red }")]);
+            assert!(!apply_link_fix(ws).contains("vlink="), "{head}");
+        }
+        // What we cannot read can only add author declarations, which never
+        // bring the hint back: it does not stop a `Yes`.
+        for head in [
+            r#"<link rel="stylesheet" type="text/css" href="https://example.com/u.css"/>"#,
+            r#"<link rel="stylesheet" type="text/css" href="missing.css"/>"#,
+        ] {
+            let ws = br_book(b"a { color: red }", head, LINK_BODY_A, &[]);
+            assert!(!apply_link_fix(ws).contains("vlink="), "{head}");
+        }
+        let ws = br_book(
+            b"@import url(u.css);\na { color: red }",
+            "",
+            LINK_BODY_A,
+            &[("u.css", b"p { margin: 0 }")],
+        );
+        assert!(!apply_link_fix(ws).contains("vlink="), "@import");
+        let mut ws = br_book(b"a { color: red }", "", LINK_BODY_A, &[]);
+        let text = ws.get_text("c.xhtml").unwrap().replacen(
+            "<!DOCTYPE",
+            "<?xml-stylesheet href=\"u.css\" type=\"text/css\"?>\n<!DOCTYPE",
+            1,
+        );
+        ws.set_text("c.xhtml", text);
+        assert!(!apply_link_fix(ws).contains("vlink="), "xml-stylesheet");
+    }
+
+    /// Case 3 does not hold: some link's `color` is not certainly set by the
+    /// sheets this document loads.
+    #[test]
+    fn link_colors_are_kept_where_a_link_may_take_the_hint() {
+        for css in [
+            b"p { margin: 0 }" as &[u8],
+            b"body { color: black }", // inherited only: the hint wins on `a`
+            b"a:link { color: blue }", // the state is not known (case 4)
+            b"a:hover { color: blue }",
+            b"@media print { a { color: blue } }",
+            b"a { colr: blue }",
+            b"a { color: banana }",
+            b"a { color: revert }",
+            b"a { color: blue } \xff",
+        ] {
+            let ws = br_book(css, "", LINK_BODY_A, &[("u.css", b"a { color: red }")]);
+            assert!(link_fix(&ws).is_none(), "{}", String::from_utf8_lossy(css));
+        }
+        // A sheet the reader may not apply is not counted; here it is the
+        // only one that colours the link.
+        for (head, why) in [
+            (
+                r#"<link rel="alternate stylesheet" type="text/css" href="u.css"/>"#,
+                "alternate",
+            ),
+            (
+                r#"<link rel="stylesheet" type="text/css" href="u.txt"/>"#,
+                "not a stylesheet file",
+            ),
+            (
+                r#"<link rel="stylesheet" type="text/css" href="u.css" title="x"/>"#,
+                "titled, so switched off with another set",
+            ),
+            (
+                "<style type=\"text/css\" title=\"x\">a { color: red }</style>",
+                "titled <style>",
+            ),
+            (
+                r#"<link rel="stylesheet" type="text/css" media="print" href="u.css"/>"#,
+                "media",
+            ),
+            (
+                r#"<link rel="next" type="text/css" href="u.css"/>"#,
+                "not a stylesheet link",
+            ),
+            ("", "a sheet in the book the document does not load"),
+        ] {
+            let ws = br_book(
+                b"",
+                head,
+                LINK_BODY_A,
+                &[
+                    ("u.css", b"a { color: red }"),
+                    ("u.txt", b"a { color: red }"),
+                ],
+            );
+            assert!(link_fix(&ws).is_none(), "{why}");
+        }
+    }
+
+    /// Case 2 does not read the CSS: with no link, a sheet case 3 would
+    /// decline on does not matter.
+    #[test]
+    fn link_colors_without_a_link_ignore_an_unreadable_sheet() {
+        let ws = br_book(b"a { color: blue } \xff", "", LINK_BODY, &[]);
+        assert!(!apply_link_fix(ws).contains("vlink="));
+    }
+
+    /// A defective document with two `<body>` elements, and a `link`
+    /// reported on another element than `<body>`, are declined.
+    #[test]
+    fn link_colors_are_kept_off_the_one_reported_body() {
+        let two = format!("{LINK_BODY}{}", LINK_BODY.replace("one", "two"));
+        let ws = br_book(b"p { margin: 0 }", "", &two, &[]);
+        assert!(link_fix(&ws).is_none(), "two bodies");
+
+        let body = LINK_BODY.replace(r#"<p class="k">"#, r#"<p class="k" link="red">"#);
+        let ws = br_book(b"p { margin: 0 }", "", &body, &[]);
+        let mut report = ws.detect().unwrap();
+        report.messages.retain(|m| {
+            m.element_path
+                .as_ref()
+                .and_then(svg_reported_path)
+                .is_some_and(|p| p.contains("/h:p["))
+        });
+        assert!(!report.messages.is_empty(), "the <p link> must be reported");
+        assert!(body_link_colors(&report, &ws).is_empty());
+    }
+
+    /// Case 2 counts as a link anything outside `<head>` that carries `href`
+    /// or `xlink:href`, and a `<script>` declines the document.
+    #[test]
+    fn link_colors_are_kept_where_the_document_may_have_a_link() {
+        let svg = |a: &str| {
+            LINK_BODY.replace(
+                r#"<p class="k">one</p>"#,
+                &format!(
+                    r#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1" height="1">{a}</svg>"#
+                ),
+            )
+        };
+        for (body, why) in [
+            (LINK_BODY_A.to_string(), "an <a href>"),
+            (
+                svg(r##"<a xlink:href="#x"><rect width="1" height="1"/></a>"##),
+                "an SVG <a xlink:href>",
+            ),
+            (
+                LINK_BODY.replace(
+                    "</p>",
+                    "</p><script type=\"text/javascript\">var x = 1;</script>",
+                ),
+                "a <script>",
+            ),
+        ] {
+            let ws = br_book(b"p { margin: 0 }", "", &body, &[]);
+            assert!(link_fix(&ws).is_none(), "{why}");
+        }
+        // The `<link>` in `<head>` carries `href` and is not a link (every
+        // fixture has one), and neither is a `<base href>`.
+        let ws = br_book(b"", r#"<base href="c.xhtml"/>"#, LINK_BODY, &[]);
+        assert!(link_fix(&ws).is_some());
+    }
+
+    /// Case 1: a value the legacy colour rules reject is never applied, so
+    /// it goes even where a link would take a colour. Whitespace only is not
+    /// counted.
+    #[test]
+    fn a_link_colour_that_is_not_a_colour_is_dropped() {
+        for value in ["", " Transparent\t"] {
+            let body = LINK_BODY_A.replace(r#"link="blue""#, &format!(r#"link="{value}""#));
+            let ws = br_book(b"p { margin: 0 }", "", &body, &[]);
+            let text = apply_link_fix(ws);
+            assert!(!text.contains(" link="), "{value:?}");
+            assert!(text.contains(r#" vlink="purple""#), "{value:?}");
+        }
+        let body = LINK_BODY_A.replace(r#"link="blue""#, r#"link="  ""#);
+        let ws = br_book(b"p { margin: 0 }", "", &body, &[]);
+        assert!(link_fix(&ws).is_none());
+    }
+
+    /// Only the attributes epubveri reported go.
+    #[test]
+    fn link_colors_drop_only_the_reported_attribute() {
+        let mut ws = br_book(b"p { margin: 0 }", "", LINK_BODY, &[]);
+        let mut report = ws.detect().unwrap();
+        report
+            .messages
+            .retain(|m| m.params.first().map(String::as_str) != Some("vlink"));
+        let fix = body_link_colors(&report, &ws).into_iter().next().unwrap();
+        fix.apply(&mut ws);
+        let text = ws.get_text("c.xhtml").unwrap();
+        assert!(!text.contains(" link=") && text.contains(r#" vlink="purple""#));
+        report.messages.retain(|m| m.rule != CLEAR);
+        assert!(body_link_colors(&report, &ws).is_empty());
+    }
+
+    /// The apply finds `<body>` by name: content moved inside it by an
+    /// earlier fix does not stop it, and an attribute already gone is left
+    /// alone.
+    #[test]
+    fn link_colors_survive_an_earlier_fix_inside_the_body() {
+        let mut ws = br_book(b"p { margin: 0 }", "", LINK_BODY, &[]);
+        let fix = link_fix(&ws).unwrap();
+        let moved = ws.get_text("c.xhtml").unwrap().replace(
+            r#"<p class="k">one</p>"#,
+            r#"<div><p class="k">one</p></div>"#,
+        );
+        ws.set_text("c.xhtml", moved.clone());
+        fix.apply(&mut ws);
+        assert_eq!(
+            ws.get_text("c.xhtml").unwrap(),
+            moved.replace(r#" link="blue" vlink="purple""#, "")
+        );
+
+        let mut ws = br_book(b"p { margin: 0 }", "", LINK_BODY, &[]);
+        let fix = link_fix(&ws).unwrap();
+        let gone = ws
+            .get_text("c.xhtml")
+            .unwrap()
+            .replace(r#" link="blue" vlink="purple""#, "");
+        ws.set_text("c.xhtml", gone.clone());
+        fix.apply(&mut ws);
+        assert_eq!(ws.get_text("c.xhtml").unwrap(), gone);
     }
 
     // ---- fix.css_direction_ltr -------------------------------------

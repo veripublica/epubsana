@@ -8,6 +8,22 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [Unreleased]
+
+### Added
+
+- `fix.body_link_colors` drops the presentational `link`, `vlink` and `alink`
+  attributes from `<body>` (`<body link="blue" vlink="purple">`, written by
+  older calibre and Word conversions) where they colour nothing. Each only
+  sets the colour of the document's links. So it does nothing in a document
+  with no link, with a value that is not a colour, or where the book's own CSS
+  already colours every link. A link coloured only by state (`a:link`,
+  `a:visited`) is left alone for now.
+
+### Fixed
+
+- `docs/USAGE.md` lists `fix.css_unterminated`.
+
 ## [0.42.0] - 2026-11-18
 
 ### Added
