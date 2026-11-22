@@ -45,6 +45,7 @@ grows one carefully-argued entry at a time.
 | `OPF-034` / `RSC-005` | `opf.spine.duplicate_itemref` | ConfirmNeeded | The spine lists the same manifest item more than once | [Keep the first occurrence, drop the later ones](#opf-034--rsc-005--duplicate-spine-itemref) |
 | `HTM-004` | `htm.doctype.epub3_obsolete_public_id` | AutoSafe | An EPUB 3 document's DOCTYPE carries an obsolete PUBLIC identifier | [Reduce it to `<!DOCTYPE html>`](#htm-004--obsolete-or-unrecognized-doctype) |
 | `HTM-004` | `htm.doctype.epub2_unrecognized_public_id` | ConfirmNeeded | An EPUB 2 document's DOCTYPE isn't a recognized XHTML 1.1 / OEB identifier | [Canonicalize a malformed XHTML 1.1 id; decline a genuinely different DTD](#htm-004--obsolete-or-unrecognized-doctype) |
+| `HTM-046` | *(none)* | AutoSafe | A fixed-layout document's only viewport tag is named `Viewport` (another letter case) | [Lowercase the name](#htm-046--a-viewport-meta-named-in-another-case) |
 | `RSC-005` | `ncx.ids.duplicate_id` | ConfirmNeeded | Two or more NCX elements share an `id` | [Keep the first, rename later duplicates uniquely](#rsc-005--ncx-internal-consistency) |
 | `RSC-005` | `ncx.play_order.duplicate`, `…target_mismatch`, `…gap`, `…no_origin` | ConfirmNeeded | The NCX's `playOrder` values are inconsistent | [Reassign densely by document order, same target → same number](#rsc-005--ncx-internal-consistency) |
 | `RSC-005` | `opf.content_document.lang_xmllang_mismatch` | AutoSafe | `lang` and `xml:lang` disagree on one element | [Fill the empty one from the populated one; decline if both are set](#rsc-005--lang-and-xmllang-disagree) |
@@ -3739,6 +3740,59 @@ severity. The whole-shelf plan digest gains exactly that line. The only other
 change is that this book's next proposal moves from `--apply` index 3 to 4. The
 trial validation never declined anything here; the guard is pinned by tests on a
 `<rect viewbox>`, which epubveri reports again as `viewBox`.
+
+---
+
+## HTM-046 — a viewport `<meta>` named in another case
+
+> **Status (2026-11-22):** built (Baris: "Başla", HTM-046 after the mimetype
+> fixers). AutoSafe, as `fix.svg_attribute_case`: a case-only rename to what
+> an HTML reader already reads.
+
+**Finding.** `HTM-046` (no `rule`), located at a fixed-layout XHTML content
+document: *fixed-layout content document has no viewport meta element*.
+EPUB 3.3 §8.2.2.6 (`#sec-fxl-icb-html`) requires the initial containing block
+of such a document to come from a viewport `<meta>`, and appendix F
+(`#app-viewport-meta-syntax`) says: "The value of the name attribute after
+whitespace normalization MUST be `viewport`." epubveri looks for a `<meta>`
+whose `name`, trimmed of XML whitespace, is exactly `viewport`.
+
+**The shape repaired.** The document has a `<meta>` whose `name` is
+`viewport` in another letter case (`Viewport`, `VIEWPORT`), padded or not.
+HTML §4.2.5 says of `<meta name>`: "Names are case-insensitive, and must be
+compared in an ASCII case-insensitive manner." So an HTML reader already
+takes it for the viewport tag and lays out the page by it; only EPUB's
+exact-string rule is broken.
+
+**Fix** (`fix.viewport_name_case`, AutoSafe). ASCII-lowercase that
+attribute's value in place. Its padding, its quotes, the `content` and
+everything else stay byte for byte. One proposal for the book, one edit per
+document.
+
+**When it declines.**
+- No such `<meta>` (the two epub-test-books sets with no viewport at all):
+  writing one would invent the page's dimensions.
+- Two or more in one document, an exact `viewport` beside a miscased one
+  included: which one a reader takes is not ours to pick.
+- A `name` whose source spelling is not its value (a character or entity
+  reference): the edit works on the bytes, and these are not the letters.
+- A `name` in a namespace (`x:name`): not the HTML attribute.
+- A document where, in a trial on a copy of the book, any `(id, rule)` count
+  rises. A `content` the viewport grammar rejects would turn one finding
+  into another, which `repair()` would undo anyway. (`HTM-046` itself cannot
+  stay: the renamed value, trimmed, is exactly `viewport`.)
+
+**Measured (2026-11-22, A/B against `5316392` on 562 shelf books + *Past
+Masters 279* + 696 epub-test-books sets at `8049bd2`, every fix approved).**
+One book changes: `viewport-name-uppercase`, whose one edit is `Viewport` →
+`viewport`; it ends with no finding. The other three `HTM-046` books have no
+viewport tag at all and are declined: `fxl-viewport-missing`,
+`override-pre-paginated-no-viewport`, and one shelf book (a pre-paginated
+sample). 9 mutations of the guards (the rule, the location, the trim, the
+count, the namespace, the source bytes, the trial, the registration): every
+one makes a test fail. Two guards no mutation could reach were removed: an
+early return on an exact `viewport` (the count already declines it) and a
+trial check that `HTM-046` stays (the rename cannot leave it).
 
 ---
 

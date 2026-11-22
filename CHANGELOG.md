@@ -29,6 +29,10 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
   surrounding whitespace or other letter case (`PKG-007`,
   `ocf.mimetype.wrong_content`). Another value, such as `application/epub`,
   is left alone.
+- `fix.viewport_name_case` lowercases the `name` of a fixed-layout
+  document's viewport tag written in another letter case
+  (`<meta name="Viewport">`, `HTM-046`). HTML already reads it as the
+  viewport tag; EPUB 3.3 requires exactly `viewport`.
 
 ### Changed
 

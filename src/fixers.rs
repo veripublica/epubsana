@@ -93,6 +93,7 @@ pub fn plan(report: &Report, ws: &Workspace, _goal: Goal) -> Vec<ProposedFix> {
     fixes.extend(anchor_name_attrs(report, ws));
     fixes.extend(br_clear_without_float(report, ws));
     fixes.extend(body_link_colors(report, ws));
+    fixes.extend(viewport_name_case(report, ws));
     fixes.extend(adept_meta_value(report, ws));
     fixes.extend(svg_attribute_case(report, ws));
     fixes.extend(svg_element_case(report, ws));
@@ -3155,6 +3156,160 @@ fn br_clear_spans_at(
             .enumerate()
             .filter(|(i, _)| picked.contains(i))
             .map(|(_, (_, span))| span)
+            .collect(),
+    )
+}
+
+/// The span of the `name` value to lowercase in `text`: the one `<meta>`
+/// whose `name`, trimmed of XML whitespace, is `viewport` in another ASCII
+/// letter case. `None` (declined) if there is no such `<meta>` or more than
+/// one (an exact `<meta name="viewport">` counts), if the document does not
+/// parse, or if the value's source bytes are not its value (a character
+/// reference, or whitespace the parser normalized). epubveri matches
+/// `<meta>` by local name, and so does this.
+fn viewport_name_span(text: &str) -> Option<Range<usize>> {
+    let prepared = prepare_content_doc(text);
+    let doc = prepared.parse()?;
+    let mut found = Vec::new();
+    for node in doc
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "meta")
+    {
+        let Some(attr) = node
+            .attributes()
+            .find(|a| a.namespace().is_none() && a.name() == "name")
+        else {
+            continue;
+        };
+        // An exact `viewport` matches too, so beside a miscased one it makes
+        // two, and the document is declined.
+        if attr
+            .value()
+            .trim_matches(is_xml_space)
+            .eq_ignore_ascii_case("viewport")
+        {
+            found.push(attr);
+        }
+    }
+    let [attr] = found.as_slice() else {
+        return None;
+    };
+    let span = attr_value_span(text, prepared.unshift(attr.range()))?;
+    (text.get(span.clone())? == attr.value()).then_some(span)
+}
+
+/// `text` with the `viewport_name_span` value ASCII-lowercased, or `None`.
+fn lowercase_viewport_name(text: &str) -> Option<String> {
+    let span = viewport_name_span(text)?;
+    let mut out = text.to_string();
+    out.replace_range(span.clone(), &text[span].to_ascii_lowercase());
+    Some(out)
+}
+
+/// `HTM-046` (no `rule`): a fixed-layout XHTML document has no `<meta>`
+/// named exactly `viewport`, but has one named `Viewport` (another case).
+/// HTML compares meta names ASCII case-insensitively (§4.2.5), so a reader
+/// already lays the page out by it; EPUB 3.3 appendix F wants the exact
+/// string. The value is lowercased in place. A trial on a copy of the book
+/// declines a document where any `(id, rule)` count rises (a `content` the viewport grammar rejects). See `docs/FIXERS.md`.
+fn viewport_name_case(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    let docs: BTreeSet<&str> = report
+        .messages
+        .iter()
+        .filter(|m| m.id == "HTM-046" && m.rule.is_none())
+        .filter_map(|m| m.location.as_deref())
+        .collect();
+    let mut planned: BTreeMap<String, String> = BTreeMap::new();
+    for doc in docs {
+        if let Some(after) = ws
+            .get_text(doc)
+            .as_deref()
+            .and_then(lowercase_viewport_name)
+        {
+            planned.insert(doc.to_string(), after);
+        }
+    }
+    if planned.is_empty() {
+        return Vec::new();
+    }
+    let Some(worse) = viewport_trial(report, ws, &planned) else {
+        return Vec::new();
+    };
+    planned.retain(|doc, _| !worse.contains(doc));
+    if planned.is_empty() {
+        return Vec::new();
+    }
+    let docs: Vec<String> = planned.into_keys().collect();
+    let n = docs.len();
+    vec![ProposedFix {
+        fix_id: "fix.viewport_name_case",
+        addresses_id: "HTM-046".to_string(),
+        addresses_rule: None,
+        addresses_severity: addressed_severity(report, "HTM-046", None),
+        tier: Tier::AutoSafe,
+        title: format!(
+            "Lowercase the viewport tag's name in {n} fixed-layout document{}",
+            if n == 1 { "" } else { "s" }
+        ),
+        rationale: "EPUB 3.3 requires a fixed-layout document's viewport `<meta>` to be named \
+                    exactly `viewport`. This one is named in another letter case. HTML compares \
+                    meta names ASCII case-insensitively, so a reader already takes it for the \
+                    viewport tag and lays the page out by it. Only the letters of the name \
+                    change; its `content` and everything else stay as they are."
+            .to_string(),
+        preview: docs
+            .iter()
+            .take(6)
+            .map(|d| Change {
+                path: d.clone(),
+                note: "lowercase <meta name> to \"viewport\"".to_string(),
+            })
+            .collect(),
+        apply_fn: Box::new(move |ws: &mut Workspace| {
+            for doc in &docs {
+                if let Some(after) = ws
+                    .get_text(doc)
+                    .as_deref()
+                    .and_then(lowercase_viewport_name)
+                {
+                    ws.set_text(doc, after);
+                }
+            }
+        }),
+    }]
+}
+
+/// Apply every planned rename to a copy of the book and return the
+/// documents in which any `(id, rule)` count located there rose. `HTM-046`
+/// itself cannot stay: the renamed value, trimmed, is exactly `viewport`. `None` if the copy cannot be
+/// built or read, and the caller then declines.
+fn viewport_trial(
+    report: &Report,
+    ws: &Workspace,
+    planned: &BTreeMap<String, String>,
+) -> Option<BTreeSet<String>> {
+    let mut trial = Workspace::load(&ws.serialize().ok()?).ok()?;
+    for (doc, after) in planned {
+        trial.set_text(doc, after.clone());
+    }
+    let after = trial.detect().ok()?;
+    let counts = |r: &Report| {
+        let mut c: BTreeMap<(String, &str, Option<&str>), usize> = BTreeMap::new();
+        for m in &r.messages {
+            if let Some(doc) = m.location.as_deref()
+                && planned.contains_key(doc)
+            {
+                *c.entry((doc.to_string(), m.id, m.rule)).or_default() += 1;
+            }
+        }
+        c
+    };
+    let before = counts(report);
+    Some(
+        counts(&after)
+            .into_iter()
+            .filter(|(key, n)| *n > before.get(key).copied().unwrap_or(0))
+            .map(|((doc, _, _), _)| doc)
             .collect(),
     )
 }
@@ -12609,6 +12764,138 @@ mod tests {
         assert_eq!(mimetype_content(&r, &ws).len(), 1);
         let exact = mimetype_first_with(zip::CompressionMethod::Stored);
         assert!(mimetype_content(&r, &exact).is_empty());
+    }
+
+    // ---- fix.viewport_name_case --------------------------------------
+
+    /// A fixed-layout EPUB 3 book whose one spine document has `head` in its
+    /// `<head>` after the title.
+    fn fxl_book(head: &str) -> Workspace {
+        use std::io::Write;
+        let chapter = format!(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en"><head><title>t</title>{head}</head><body><p>one</p></body></html>"#
+        );
+        let nav = r#"<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="en" lang="en"><head><title>n</title></head><body><nav epub:type="toc"><ol><li><a href="c.xhtml">c</a></li></ol></nav></body></html>"#;
+        let opf = r#"<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="id">urn:uuid:0b4cbe6e-5b4a-4c4e-9e5e-6d8f1f3c2a10</dc:identifier><dc:title>t</dc:title><dc:language>en</dc:language><meta property="dcterms:modified">2026-11-22T00:00:00Z</meta><meta property="rendition:layout">pre-paginated</meta></metadata>
+  <manifest><item href="c.xhtml" id="c" media-type="application/xhtml+xml"/><item href="nav.xhtml" id="nav" media-type="application/xhtml+xml" properties="nav"/></manifest>
+  <spine><itemref idref="c"/></spine>
+</package>"#;
+        let mut buf = Vec::new();
+        {
+            let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            let stored = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            for (name, body) in [
+                ("mimetype", "application/epub+zip"),
+                (
+                    "META-INF/container.xml",
+                    r#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#,
+                ),
+                ("content.opf", opf),
+                ("nav.xhtml", nav),
+                ("c.xhtml", chapter.as_str()),
+            ] {
+                zip.start_file(name, stored).unwrap();
+                zip.write_all(body.as_bytes()).unwrap();
+            }
+            zip.finish().unwrap();
+        }
+        Workspace::load(&buf).unwrap()
+    }
+
+    const FXL_VIEWPORT: &str = r#"<meta name="viewport" content="width=1200, height=600"/>"#;
+
+    /// The template is clean with the exact tag, and draws `HTM-046` without.
+    #[test]
+    fn fxl_book_is_a_clean_fixture() {
+        assert_eq!(finding_keys(&fxl_book(FXL_VIEWPORT)), []);
+        assert_eq!(finding_keys(&fxl_book("")), [("HTM-046", None)]);
+    }
+
+    /// Each other case, padded or not, through the real detector: only the
+    /// letters change, and the book ends clean.
+    #[test]
+    fn a_viewport_named_in_another_case_is_lowercased() {
+        for name in ["Viewport", "VIEWPORT", " ViewPort ", "viewporT"] {
+            let head = FXL_VIEWPORT.replace(r#"name="viewport""#, &format!(r#"name="{name}""#));
+            let mut ws = fxl_book(&head);
+            let before = ws.get_text("c.xhtml").unwrap();
+            let report = ws.detect().unwrap();
+            assert_eq!(finding_keys(&ws), [("HTM-046", None)], "{name}");
+            let fixes = viewport_name_case(&report, &ws);
+            assert_eq!(fixes.len(), 1, "{name}");
+            assert_eq!(fixes[0].tier, Tier::AutoSafe);
+            let planned: Vec<_> = plan(&report, &ws, crate::Goal::Valid)
+                .into_iter()
+                .map(|f| f.fix_id)
+                .collect();
+            assert_eq!(planned, ["fix.viewport_name_case"], "{name}");
+            fixes.into_iter().next().unwrap().apply(&mut ws);
+            let lower = format!(r#"name="{}""#, name.to_ascii_lowercase());
+            assert_eq!(
+                ws.get_text("c.xhtml").unwrap(),
+                before.replace(&format!(r#"name="{name}""#), &lower),
+                "{name}"
+            );
+            assert_eq!(finding_keys(&ws), [], "{name}");
+        }
+    }
+
+    /// No such tag, two of them, an exact one beside it, another name, a
+    /// character reference, a tab the parser normalizes, or a `content` the
+    /// viewport grammar rejects (the trial): nothing proposed.
+    #[test]
+    fn a_viewport_name_case_is_declined_where_it_is_not_the_one_tag() {
+        let named =
+            |name: &str, content: &str| format!(r#"<meta name="{name}" content="{content}"/>"#);
+        let ok = "width=1200, height=600";
+        for (why, head) in [
+            ("none", String::new()),
+            (
+                "two",
+                format!("{}{}", named("Viewport", ok), named("VIEWPORT", ok)),
+            ),
+            ("other name", named("Viewports", ok)),
+            ("char ref", named("&#86;iewport", ok)),
+            ("tab", named("\tViewport", ok)),
+            (
+                "namespaced",
+                format!(r#"<meta xmlns:x="urn:x" x:name="Viewport" content="{ok}"/>"#),
+            ),
+            ("bad content", named("Viewport", "width=1200")),
+        ] {
+            let ws = fxl_book(&head);
+            let report = ws.detect().unwrap();
+            assert!(
+                report.messages.iter().any(|m| m.id == "HTM-046"),
+                "{why}: the fixture must carry the finding"
+            );
+            assert!(viewport_name_case(&report, &ws).is_empty(), "{why}");
+        }
+        // An exact tag beside a miscased one: no HTM-046, and the span
+        // finder declines on its own.
+        let both = format!("{FXL_VIEWPORT}{}", named("Viewport", ok));
+        assert!(viewport_name_span(&fxl_book(&both).get_text("c.xhtml").unwrap()).is_none());
+    }
+
+    /// Only the rule-less `HTM-046` is read, and only where it is located.
+    #[test]
+    fn viewport_name_case_reads_only_its_finding() {
+        let head = FXL_VIEWPORT.replace(r#"name="viewport""#, r#"name="Viewport""#);
+        let ws = fxl_book(&head);
+        let mut r = ws.detect().unwrap();
+        assert_eq!(viewport_name_case(&r, &ws).len(), 1);
+        r.messages[0].rule = Some("htm.other");
+        assert!(viewport_name_case(&r, &ws).is_empty());
+        r.messages[0].rule = None;
+        r.messages[0].location = Some("nav.xhtml".to_string());
+        assert!(viewport_name_case(&r, &ws).is_empty());
     }
 
     // ---- fix.empty_directory -----------------------------------------
