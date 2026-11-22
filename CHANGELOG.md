@@ -34,11 +34,13 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
   (`<meta name="Viewport">`, `HTM-046`). HTML already reads it as the
   viewport tag; EPUB 3.3 requires exactly `viewport`.
 - `fix.charset_label` rewrites a legacy encoding label in a stylesheet or
-  XML file (`CSS-004`, `RSC-028`) as `UTF-8` when every byte is ASCII.
+  XML file (`CSS-004`, `RSC-028`) as `UTF-8` when every byte is ASCII, and
+  a `<meta>` naming the same encoding with it.
 - `fix.charset_transcode` transcodes such a file to UTF-8 when its
   non-ASCII bytes are single-byte text that is not UTF-8, and asks first:
   the proposal quotes the decoded words, so a reader can tell whether the
-  declaration was right.
+  declaration was right. Bytes in 0x80–0x9F are accepted only under a
+  Windows code page's own name (`windows-1252`), not under `ISO-8859-1`.
 
 ### Changed
 

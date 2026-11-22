@@ -10480,11 +10480,12 @@ const OPF_DECLARED_NON_UTF8: &str = "opf.encoding.declared_non_utf8";
 /// file, and which of the two it is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CharsetPlan {
-    /// Every byte is ASCII: only the label changes.
-    Label,
+    /// Every byte is ASCII: only the label changes, and the label of each of
+    /// `metas` `<meta>` tags that named the same encoding.
+    Label { metas: usize },
     /// Single-byte text, not UTF-8: transcoded. `sample` quotes the first
     /// decoded non-ASCII characters in context, for the preview.
-    Transcode { sample: String },
+    Transcode { sample: String, metas: usize },
 }
 
 /// The byte span of the declared label: inside `@charset "…";` for a
@@ -10523,43 +10524,86 @@ fn charset_label_span(bytes: &[u8], css: bool) -> Option<Range<usize>> {
     Some(offset + i + 1..offset + close)
 }
 
-/// Whether a markup document names an encoding other than UTF-8 in a
-/// `<meta charset>` or a `Content-Type` `<meta http-equiv>`, which an edit to
-/// the declaration would leave saying something false. `None` if it does not
-/// parse; the caller declines.
-fn meta_names_other_charset(text: &str) -> Option<bool> {
+/// The spans, in `text`, of the encoding labels in `<meta charset>` and
+/// `Content-Type` `<meta http-equiv>` tags that name `declared`: the edit
+/// rewrites them as `utf-8` with the declaration, so that no tag is left
+/// saying something false. A tag that names UTF-8 is left as it is. `None`
+/// (declined) if the document does not parse, if a tag names another
+/// encoding or a label the Encoding Standard does not know, or if a value to
+/// edit is not spelled in the source as it reads (a character reference).
+fn meta_charset_spans(text: &str, declared: styloria::Encoding) -> Option<Vec<Range<usize>>> {
     let prepared = prepare_content_doc(text);
     let doc = prepared.parse()?;
-    let not_utf8 =
-        |label: &str| styloria::Encoding::for_label(label) != Some(styloria::Encoding::UTF_8);
+    let mut spans = Vec::new();
+    // The label at `within` of an attribute's value, as a span in `text`.
+    let mut take = |attr: roxmltree::Attribute, within: Range<usize>| -> Option<()> {
+        let label = attr.value().get(within.clone())?;
+        let encoding = styloria::Encoding::for_label(label)?;
+        if encoding == styloria::Encoding::UTF_8 {
+            return Some(());
+        }
+        if encoding != declared {
+            return None;
+        }
+        let value = attr_value_span(text, prepared.unshift(attr.range()))?;
+        if text.get(value.clone())? != attr.value() {
+            return None;
+        }
+        spans.push(value.start + within.start..value.start + within.end);
+        Some(())
+    };
     for n in doc
         .descendants()
         .filter(|n| n.is_element() && n.tag_name().name() == "meta")
     {
-        if let Some(c) = n.attribute("charset")
-            && not_utf8(c)
-        {
-            return Some(true);
-        }
-        if n.attribute("http-equiv").is_some_and(|h| {
-            h.trim_matches(is_xml_space)
-                .eq_ignore_ascii_case("content-type")
-        }) && let Some(content) = n.attribute("content")
-        {
-            let lower = content.to_ascii_lowercase();
-            if let Some(at) = lower.find("charset=") {
-                let label = content[at + 8..]
-                    .split(';')
-                    .next()
-                    .unwrap_or("")
-                    .trim_matches(|c: char| c.is_ascii_whitespace() || c == '"' || c == '\'');
-                if not_utf8(label) {
-                    return Some(true);
-                }
+        for attr in n.attributes().filter(|a| a.namespace().is_none()) {
+            if attr.name() == "charset" {
+                take(attr, 0..attr.value().len())?;
             }
         }
+        let content_type = n.attribute("http-equiv").is_some_and(|h| {
+            h.trim_matches(is_xml_space)
+                .eq_ignore_ascii_case("content-type")
+        });
+        if !content_type {
+            continue;
+        }
+        let Some(attr) = n
+            .attributes()
+            .find(|a| a.namespace().is_none() && a.name() == "content")
+        else {
+            continue;
+        };
+        let value = attr.value();
+        let Some(at) = value.to_ascii_lowercase().find("charset=") else {
+            continue;
+        };
+        let start = at + "charset=".len();
+        let end = value[start..].find(';').map_or(value.len(), |i| start + i);
+        let skip = |c: char| c.is_ascii_whitespace() || c == '"' || c == '\'';
+        let label = &value[start..end];
+        let lead = label.len() - label.trim_start_matches(skip).len();
+        let trail = label.len() - label.trim_end_matches(skip).len();
+        take(attr, start + lead..end - trail)?;
     }
-    Some(false)
+    // In document order already, as `descendants` and `attributes` are.
+    Some(spans)
+}
+
+/// Whether `label` names a Windows code page by its own name
+/// (`windows-1252`, `cp1252`, `x-cp1252`), not by an alias the Encoding
+/// Standard maps to one (`ISO-8859-1` and `latin1` are windows-1252 there,
+/// ISO-8859-1 in an XML parser).
+fn is_windows_label(label: &str) -> bool {
+    let lower = label
+        .trim_matches(|c: char| c.is_ascii_whitespace())
+        .to_ascii_lowercase();
+    ["windows-", "x-cp", "cp"].iter().any(|p| {
+        lower
+            .strip_prefix(p)
+            .and_then(|n| n.strip_prefix("125"))
+            .is_some_and(|d| matches!(d.as_bytes(), [b'0'..=b'8']))
+    })
 }
 
 /// The plan for one reported file, and the bytes it would write; `None`
@@ -10596,16 +10640,29 @@ fn plan_charset(
         out.extend_from_slice(&text[span.end..]);
         out
     };
-    let checked = |out: Vec<u8>| {
-        if is_markup_entry(file) && meta_names_other_charset(std::str::from_utf8(&out).ok()?)? {
-            return None;
+    // The `<meta>` tags naming the same encoding are rewritten with it.
+    let with_metas = |out: Vec<u8>| -> Option<(Vec<u8>, usize)> {
+        if !is_markup_entry(file) {
+            return Some((out, 0));
         }
-        Some(out)
+        let text = String::from_utf8(out).ok()?;
+        let spans = meta_charset_spans(&text, encoding)?;
+        let n = spans.len();
+        let mut edited = text;
+        for r in spans.into_iter().rev() {
+            edited.replace_range(r, "utf-8");
+        }
+        Some((edited.into_bytes(), n))
     };
     if bytes.is_ascii() {
-        return Some((CharsetPlan::Label, checked(splice(bytes))?));
+        let (out, metas) = with_metas(splice(bytes))?;
+        return Some((CharsetPlan::Label { metas }, out));
     }
-    if std::str::from_utf8(bytes).is_ok() || bytes.iter().any(|b| (0x80..=0x9F).contains(b)) {
+    // 0x80–0x9F: windows-1252 in the Encoding Standard, C1 controls in an
+    // XML parser's ISO-8859-1. Only a Windows code page's own name settles it.
+    if std::str::from_utf8(bytes).is_ok()
+        || (!is_windows_label(label) && bytes.iter().any(|b| (0x80..=0x9F).contains(b)))
+    {
         return None;
     }
     // No BOM, so the protocol label decides: the file decoded with its own.
@@ -10613,12 +10670,19 @@ fn plan_charset(
     // decodes them only with its `legacy-cjk` feature, which nothing in our
     // tree enables (`legacy_cjk_stays_undecoded` pins it).
     let decoded = styloria::decode_stylesheet(bytes, Some(label), None).ok()?;
-    if !decoded.lossless {
+    // A C1 control here is a byte the code page leaves undefined (0x81,
+    // 0x8D, … in windows-1252), which the Encoding Standard passes through.
+    if !decoded.lossless
+        || decoded
+            .text
+            .chars()
+            .any(|c| ('\u{80}'..='\u{9f}').contains(&c))
+    {
         return None;
     }
-    let text = decoded.text.as_bytes();
     let sample = charset_sample(&decoded.text);
-    Some((CharsetPlan::Transcode { sample }, checked(splice(text))?))
+    let (out, metas) = with_metas(splice(decoded.text.as_bytes()))?;
+    Some((CharsetPlan::Transcode { sample, metas }, out))
 }
 
 /// The first non-ASCII characters of `text` with a few characters of
@@ -10697,6 +10761,15 @@ fn charset_fixes(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
         .collect()
 }
 
+/// The preview's mention of the `<meta>` tags rewritten with the label.
+fn metas_note(n: usize) -> String {
+    match n {
+        0 => String::new(),
+        1 => ", and the `<meta>` that names the same encoding".to_string(),
+        n => format!(", and the {n} `<meta>` tags that name the same encoding"),
+    }
+}
+
 fn charset_proposal(
     report: &Report,
     transcode: bool,
@@ -10712,12 +10785,14 @@ fn charset_proposal(
         .map(|(file, plan)| Change {
             path: file.clone(),
             note: match plan {
-                CharsetPlan::Label => {
-                    "declare UTF-8 (every byte is ASCII, so no byte else changes)".to_string()
-                }
-                CharsetPlan::Transcode { sample } => {
-                    format!("decode with the declared encoding and write as UTF-8; reads {sample}")
-                }
+                CharsetPlan::Label { metas } => format!(
+                    "declare UTF-8 (every byte is ASCII, so no other byte changes){}",
+                    metas_note(*metas)
+                ),
+                CharsetPlan::Transcode { sample, metas } => format!(
+                    "decode with the declared encoding and write as UTF-8{}; reads {sample}",
+                    metas_note(*metas)
+                ),
             },
         })
         .collect();
@@ -10730,7 +10805,8 @@ fn charset_proposal(
             "EPUB requires UTF-8 (or, for a stylesheet, UTF-16). This file declares a single-byte \
              legacy encoding, and its bytes are not valid UTF-8, so the declaration is what they \
              are in. Each byte is decoded as the declared encoding says and the text is written \
-             as UTF-8, with the declaration changed to match; the text itself does not change. \
+             as UTF-8, with the declaration (and any `<meta>` naming the same encoding) changed \
+             to match; the text itself does not change. \
              Check the quoted words: if they read wrong, the declaration was wrong and this \
              should be declined.",
         )
@@ -10741,7 +10817,8 @@ fn charset_proposal(
             format!("Declare UTF-8 in {n} file{s} whose bytes are all ASCII"),
             "EPUB requires UTF-8 (or, for a stylesheet, UTF-16). This file declares a legacy \
              encoding, but every byte in it is ASCII, which that encoding and UTF-8 read the same \
-             way. Only the label changes, to `UTF-8`; no other byte does.",
+             way. Only the label changes, to `UTF-8`, with any `<meta>` that names the same \
+             encoding; no other byte does.",
         )
     };
     let apply_names = names.clone();
@@ -13293,13 +13370,15 @@ mod tests {
         assert_eq!(finding_keys(&ws), baseline);
     }
 
-    /// Reported, and not proposed: `replacement`, a byte in 0x80–0x9F, UTF-8
-    /// bytes under a Latin-1 label, a multi-byte encoding.
+    /// Reported, and not proposed: `replacement`, a byte in 0x80–0x9F under
+    /// a Latin-1 label, a byte windows-1252 leaves undefined, UTF-8 bytes
+    /// under a Latin-1 label, a multi-byte encoding.
     #[test]
     fn a_stylesheet_charset_is_declined_where_the_bytes_may_say_otherwise() {
         for css in [
             &b"@charset \"iso-2022-kr\";\np { margin: 0 }"[..],
-            b"@charset \"windows-1252\";\np::before { content: \"\x93q\x94\" }",
+            b"@charset \"ISO-8859-1\";\np::before { content: \"\x93q\x94\" }",
+            b"@charset \"windows-1252\";\np::before { content: \"\x81\" }",
             "@charset \"ISO-8859-1\";\np::before { content: \"café\" }".as_bytes(),
             b"@charset \"Shift_JIS\";\np::before { content: \"\x82\xa0\" }",
         ] {
@@ -13438,20 +13517,108 @@ mod tests {
         assert_eq!(finding_keys(&ws), baseline);
     }
 
-    /// A `Content-Type` or `charset` `<meta>` naming the legacy encoding is
-    /// left saying something false by the edit: declined.
+    /// A `Content-Type` or `charset` `<meta>` naming the declared encoding is
+    /// rewritten with it; one naming UTF-8 is left; one naming another
+    /// encoding, an unknown label, or written through a character
+    /// reference declines the document.
     #[test]
-    fn an_xhtml_declaration_with_a_charset_meta_is_declined() {
-        for meta in [
-            r#"<meta http-equiv="Content-Type" content="text/html; charset=iso-8859-1"/>"#,
-            r#"<meta charset="windows-1252"/>"#,
-        ] {
-            let chapter = String::from_utf8(xml_chapter("ISO-8859-1", b"one"))
+    fn a_charset_meta_is_rewritten_with_the_declaration() {
+        let with_meta = |label: &str, word: &[u8], meta: &str| {
+            let chapter = xml_chapter(label, word);
+            let title = b"<title>t</title>";
+            let at = chapter
+                .windows(title.len())
+                .position(|w| w == title)
                 .unwrap()
-                .replace("<title>t</title>", &format!("<title>t</title>{meta}"));
-            let ws = with_entry(&plain_book(), "c.xhtml", chapter.as_bytes());
+                + title.len();
+            [&chapter[..at], meta.as_bytes(), &chapter[at..]].concat()
+        };
+        let http = |cs: &str| {
+            format!(r#"<meta http-equiv="Content-Type" content="text/html; charset={cs}"/>"#)
+        };
+        for (meta, expected) in [
+            (http("iso-8859-1"), http("utf-8")),
+            (http(" ISO-8859-1 "), http(" utf-8 ")),
+            (
+                r#"<meta charset="windows-1252"/>"#.to_string(),
+                r#"<meta charset="utf-8"/>"#.to_string(),
+            ),
+            (http("utf-8"), http("utf-8")),
+            (http("iso-8859-1; x=y"), http("utf-8; x=y")),
+            (
+                format!(r#"{}<meta charset="iso-8859-1"/>"#, http("iso-8859-1")),
+                format!(r#"{}<meta charset="utf-8"/>"#, http("utf-8")),
+            ),
+        ] {
+            for word in [&b"one"[..], b"caf\xe9"] {
+                let ws = with_entry(
+                    &plain_book(),
+                    "c.xhtml",
+                    &with_meta("ISO-8859-1", word, &meta),
+                );
+                let before = finding_keys(&ws);
+                assert_eq!(charset_plan(&ws).len(), 1, "{meta}");
+                let ws = apply_charset(ws);
+                let utf8_word = String::from_utf8_lossy(word).replace('\u{fffd}', "é");
+                assert_eq!(
+                    ws.raw("c.xhtml").unwrap(),
+                    with_meta("UTF-8", utf8_word.as_bytes(), &expected),
+                    "{meta}"
+                );
+                let mut left = before.clone();
+                left.retain(|k| k.1 != Some(XML_DECLARED_NON_UTF8));
+                assert_eq!(finding_keys(&ws), left, "{meta}");
+            }
+        }
+        for meta in [
+            http("koi8-r"),
+            http("x-unknown"),
+            http(""),
+            r#"<meta charset="&#105;so-8859-1"/>"#.to_string(),
+        ] {
+            let ws = with_entry(
+                &plain_book(),
+                "c.xhtml",
+                &with_meta("ISO-8859-1", b"one", &meta),
+            );
             assert!(finding_keys(&ws).contains(&("RSC-028", Some(XML_DECLARED_NON_UTF8))));
             assert_eq!(charset_plan(&ws), [], "{meta}");
+        }
+    }
+
+    /// A Windows code page by its own name settles 0x80–0x9F: curly quotes
+    /// under `windows-1252` are transcoded, under `ISO-8859-1` they are not.
+    #[test]
+    fn a_windows_label_transcodes_its_c1_bytes() {
+        let ws = with_entry(
+            &plain_book(),
+            "c.xhtml",
+            &xml_chapter("windows-1252", b"\x93q\x94"),
+        );
+        assert_eq!(charset_plan(&ws)[0].0, "fix.charset_transcode");
+        let ws = apply_charset(ws);
+        assert_eq!(
+            ws.raw("c.xhtml").unwrap(),
+            xml_chapter("UTF-8", "“q”".as_bytes())
+        );
+        assert_eq!(finding_keys(&ws), finding_keys(&plain_book()));
+        let ws = with_entry(
+            &plain_book(),
+            "c.xhtml",
+            &xml_chapter("ISO-8859-1", b"\x93q\x94"),
+        );
+        assert_eq!(charset_plan(&ws), []);
+        for (label, windows) in [
+            ("windows-1252", true),
+            (" CP1250 ", true),
+            ("x-cp1258", true),
+            ("windows-1259", false),
+            ("windows-125", false),
+            ("iso-8859-1", false),
+            ("latin1", false),
+            ("cp819", false),
+        ] {
+            assert_eq!(is_windows_label(label), windows, "{label}");
         }
     }
 

@@ -742,10 +742,14 @@ Standard's *get an encoding* does (`styloria::Encoding::for_label`).
    KOI8-*, …), on three conditions:
    - the bytes are **not valid UTF-8**, so the file is not UTF-8 under a
      wrong label (the common defect that closed this in 2026-10-14);
-   - **no byte is in 0x80–0x9F**: there the Encoding Standard's
-     windows-1252 (what `ISO-8859-1` names in a browser) and an XML
-     parser's ISO-8859-1 disagree, and in every other single-byte table the
-     range is C1 controls, not text;
+   - **no byte is in 0x80–0x9F**, unless the label is a Windows code page's
+     own name (`windows-1252`, `cp1252`, `x-cp1252`, 1250 to 1258): there
+     the Encoding Standard's windows-1252 (what `ISO-8859-1` names in a
+     browser) and an XML parser's ISO-8859-1 disagree, and in every other
+     single-byte table the range is C1 controls, not text. Under a Windows
+     name the code page settles it, except for the bytes it leaves
+     undefined (0x81, 0x8D, 0x8F, 0x90, 0x9D in windows-1252), which decode
+     to C1 controls and decline the file (added 2026-11-22, Baris);
    - the decode is lossless and one character per byte.
 
    Then the text is what the label says it is. **Fix**
@@ -762,8 +766,11 @@ Standard's *get an encoding* does (`styloria::Encoding::for_label`).
   single-byte tables, and their decoders have more than one spelling of some
   characters.
 - A markup document with a `<meta charset>` or a `Content-Type` `<meta>`
-  naming another encoding than UTF-8: the edit would leave it saying
-  something false, and that tag is its own finding.
+  naming an encoding other than UTF-8 and the declared one, or a label the
+  Encoding Standard does not know, or written through a character
+  reference. A tag that names the **declared** encoding is rewritten as
+  `utf-8` in the same edit, so that no tag is left saying something false
+  (added 2026-11-22, Baris); one that names UTF-8 is left as it is.
 - A document that does not parse, a label that is not the reported one, or
   no declaration where the finding says there is one.
 
@@ -782,13 +789,15 @@ the guards: every one makes a test fail; four guards no mutation could reach
 were removed (a BOM check the declaration parsers already make, the UTF-8
 exclusion, a trial on a copy, and a kind check at apply time).
 
-**Two candidates, not built (Baris decides).** Both are among the declines
-above, and both are common in older real books:
-- A `windows-125x` label (not an ISO-8859-1 alias) with bytes in 0x80–0x9F:
-  there the label is unambiguous, and the XML parsers' windows-1252 agrees
-  with the Encoding Standard's on the defined bytes.
-- A `Content-Type` or `charset` `<meta>` naming the same encoding as the
-  declaration: rewrite its label to `UTF-8` in the same edit.
+**The two extensions (2026-11-22, Baris; A/B against `b017295`).** A
+Windows code page's own name now settles 0x80–0x9F, and a `<meta>` naming
+the declared encoding is rewritten with it. Two more sets change, both
+ending with no finding: `xml-windows-1252` (curly quotes) and EPUB 2
+`iso-8859-1` (its `Content-Type` `<meta>`). Nothing else moves. 21 more
+mutations (the meta tags, the Windows names, the undefined bytes, the edit
+order): every one makes a test fail; two guards no mutation could reach
+were removed (an empty-label check `for_label` already makes, and a sort
+of spans already in order).
 
 ---
 
