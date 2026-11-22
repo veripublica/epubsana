@@ -20,6 +20,12 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
   already colours every link. A link coloured only by state (`a:link`,
   `a:visited`) is left alone for now.
 
+### Changed
+
+- epubveri 0.48.0 and styloria 0.22. On the books we measure, nothing epubsana
+  proposes or writes changes. A `direction` declaration the parsed style sheet
+  drops no longer draws CSS-001, so `fix.css_direction_ltr` no longer sees it.
+
 ### Fixed
 
 - `docs/USAGE.md` lists `fix.css_unterminated`.

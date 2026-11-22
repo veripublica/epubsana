@@ -482,18 +482,30 @@ members = ["epubsana-wasm"]
 # is that commit (76 files identical). Measured on 562 books (0.46.0 vs
 # 0.47.0): every finding, plan, outcome and repaired-byte hash is identical.
 #
+# **0.48.0 (2026-11-21), taken with styloria 0.22 (its own requirement); zip
+# stays 9.7.0, as in its tag's lock (R19).** CSS-001 only on a declaration the
+# parsed sheet keeps (#144), HTML's two `<meta>` rules in EPUB 3 (#147), and
+# `OriginalLength="0"` (#146). No rule we dispatch on moves; a `direction`
+# value the sheet drops (`ltr /* c */ ltr`) no longer reaches
+# `fix.css_direction_ltr`, and its test says so. Measured on 562 books plus
+# *Past Masters 279* and 688 epub-test-books v0.9.1 sets (0.47.0 vs 0.48.0,
+# census keyed by severity): plan, outcome and repaired-byte hash identical in
+# all 1,251. The census moves only where the release note says, plus one shelf
+# book's 29 Adobe `<meta name="Adept.resource" value>`, now also
+# `htm.meta.missing_content`, which `fix.adept_meta_value` already clears.
+#
 # For local co-development of epubveri, add an uncommitted override:
 #   [patch.crates-io] epubveri = { path = "../epubveri" }
-epubveri = "0.47.0"
+epubveri = "0.48.0"
 # CSS, located: the family's own parser, taken directly as a peer (Baris,
 # 2026-10-18; epubveri will not re-export it). Two conditions. **One styloria
-# in the lock**: the requirement is epubveri's own (`0.21`), so the text we
+# in the lock**: the requirement is epubveri's own (`0.22`), so the text we
 # parse is the text it parsed, and `scripts/preflight.sh` fails on any
 # duplicate in `cargo tree -d`. **styloria locates, it never decides**: which
 # url is missing or which id is invalid is still epubveri's finding; styloria
 # only says where a rule is, which selectors name an id, and how to decode and
 # re-encode a stylesheet byte for byte. None of its types is in our public API.
-styloria = "0.21"
+styloria = "0.22"
 # Pure-Rust only (no C deps), same philosophy as epubveri: zip's "deflate"
 # feature uses zlib-rs (Rust); bzip2/zstd (C) stay disabled.
 # Aligned to epubveri's zip — the family shares one zip version because

@@ -14567,11 +14567,21 @@ mod tests {
     /// A value other than exactly `ltr` is not this fixer's: nothing moves.
     #[test]
     fn a_value_other_than_ltr_is_declined() {
-        for value in ["inherit", "l\\74r", "ltr /* c */ ltr"] {
+        for value in ["inherit", "l\\74r"] {
             let css = format!(".a {{ direction: {value}; }}");
             let mut ws = direction_book(&css, "<body><p>x</p></body>", "");
             assert!(!direction_fix(&mut ws), "{css}");
         }
+        // Since epubveri 0.48.0 a value the parsed sheet drops draws no
+        // CSS-001 (epubveri#144), so the fixer never sees it.
+        let ws = direction_book(
+            ".a { direction: ltr /* c */ ltr; }",
+            "<body><p>x</p></body>",
+            "",
+        );
+        let report = ws.detect().unwrap();
+        assert!(!report.messages.iter().any(|m| m.id == "CSS-001"));
+        assert!(css_direction_ltr(&report, &ws).is_empty());
     }
 
     /// A `<style>` in the book is checked and repaired like a stylesheet.
