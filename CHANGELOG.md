@@ -16,6 +16,18 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
   repair is safe and what to check before approving it, the text the confirm
   prompt and `-v` show. A plugin that asks the reader can show it.
 
+### Changed
+
+- **The minimum supported Rust version is now 1.95** (was 1.88), in the
+  library and the wasm bindings. The veripublica crates now share one
+  minimum, so a single toolchain builds all of them; zip 9.8.1 needs 1.89 on
+  its own.
+- **epubveri 0.50.0** (was 0.49.0), with styloria 0.23.1 and zip 9.8.1 (was
+  9.7.0), which fixes the file-header length checks when reading a ZIP.
+  epubveri 0.50.0 accepts HTML's customizable `select` in EPUB 3. No rule a
+  fixer reads changes: on the books we measure on, every finding, proposal,
+  outcome and repaired file is identical to 0.43.0's.
+
 ## [0.43.0] - 2026-11-22
 
 ### Added

@@ -2,7 +2,7 @@
 name = "epubsana-wasm"
 version = "0.43.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.95"
 description = "WebAssembly bindings for epubsana — repair EPUB defects in the browser, no upload."
 license = "AGPL-3.0-only OR LicenseRef-veripublica-Commercial"
 # npm's canonical repository.url form (git+….git). This crate isn't published to

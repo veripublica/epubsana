@@ -212,7 +212,7 @@ calling it again replaces the previous run. After that, read `revealed()`,
   both headers, data descriptor and order, with only the offset patched. Rewritten
   entries keep their header fields; CRC and sizes follow the new data. Bytes outside
   every entry are not written. `zip` is used for reading only.
-- **MSRV** is Rust 1.88. Pure Rust, with no C dependencies.
+- **MSRV** is Rust 1.95. Pure Rust, with no C dependencies.
 
 ## Measurements
 
