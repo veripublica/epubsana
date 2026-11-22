@@ -228,9 +228,10 @@ about books unlike those. A zero means only that this library holds no such case
 | 2026-11-13, 0.40.0 → 0.41.0 | 562 | Every fix approved: findings (with their severity), plan, outcomes and repaired bytes unchanged. Every book here with a CSS parse error is EPUB 2, so the change of severity in EPUB 3 does not show. |
 | 2026-11-18, 0.41.0 → 0.42.0 | 562 | Every fix approved: findings (with their severity), plan, outcomes and repaired bytes unchanged across the epubveri 0.46.0, `Block::closed` and epubveri 0.47.0 steps. The new `fix.br_clear_without_float` is applied in 6 books (35 findings), none reverted; those 6 end with no error. Nothing else moves. |
 | 2026-11-22, 0.42.0 → 0.43.0 | 562 | Every fix approved, measured one step at a time. `fix.body_link_colors` changes 1 book (4 findings cleared); the other nine new fixers, and `fix.mimetype_packaging` now storing a compressed `mimetype`, change none. The epubveri 0.48.0 step changes plan, outcomes and repaired bytes in no book; the 0.49.0 step moves 12 `<body text>` findings in 2 books to `htm.obsolete_attribute` at the same count, and their plans and bytes stay the same. Outside this library, 31 sets of epub-test-books (696 at `8049bd2`) change and each ends with no error, and Doitsu's sample book goes from 99 errors to 0. |
+| 2026-11-22, 0.43.0 → 0.44.0 | 562 | Every fix approved, with epubveri 0.50.0, styloria 0.23.1 and zip 9.8.1: findings (with their severity), plan, outcomes and repaired bytes unchanged in every book. The same holds for the 690 of 696 epub-test-books sets that load and for Doitsu's sample book. |
 
-Before a release, `scripts/preflight.sh` runs everything CI runs. At 0.43.0,
-`cargo test --workspace` passes 596 tests. `examples/fuzz.rs` corrupts two defective
+Before a release, `scripts/preflight.sh` runs everything CI runs. At 0.44.0,
+`cargo test --workspace` passes 597 tests. `examples/fuzz.rs` corrupts two defective
 seed books and runs each result through `repair()` with every fix approved, looking
 for panics.
 
