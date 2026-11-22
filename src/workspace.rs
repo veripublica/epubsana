@@ -303,6 +303,13 @@ impl Workspace {
 
     /// A container entry as text, or `None` if absent.
     ///
+    /// An entry's current bytes, undecoded, or `None` if absent. For the
+    /// fixers that read an encoding declaration, where [`Workspace::get_text`]
+    /// would already have decoded (or lossily replaced) the bytes in question.
+    pub(crate) fn raw(&self, name: &str) -> Option<&[u8]> {
+        self.entries.get(name).map(Vec::as_slice)
+    }
+
     /// A stylesheet (a `.css` name, ASCII case-insensitive) is decoded as CSS
     /// Syntax 3 says and as epubveri decodes it (`styloria::decode_stylesheet`
     /// with no protocol or referring-document label: a BOM, then a byte-exact

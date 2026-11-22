@@ -38,6 +38,8 @@ grows one carefully-argued entry at a time.
 | `OPF-014` | `opf.content_document.property_used_undeclared` | AutoSafe | A content document uses a feature its manifest item doesn't declare | [Add the token to that item's `properties`](#opf-014--undeclared-content-property) |
 | `PKG-006` / `PKG-007` / `PKG-005` | *(none)* / `ocf.mimetype.not_stored_uncompressed` / *(none)* | AutoSafe | The `mimetype` entry is not first in the ZIP, is compressed, or its header carries an extra field | [Re-emit it first and stored, touching no content](#pkg-006--pkg-007--pkg-005--the-mimetype-entrys-packaging) |
 | `PKG-007` | `ocf.mimetype.wrong_content` | ConfirmNeeded | The `mimetype` entry names `application/epub+zip` with a BOM, surrounding whitespace or other letter case | [Write exactly `application/epub+zip`](#pkg-007--the-mimetype-entrys-content) |
+| `CSS-004` / `RSC-028` | *(none)* / `xml.encoding.declared_non_utf8`, `opf.encoding.declared_non_utf8` | AutoSafe | A stylesheet or XML file declares a legacy encoding, but every byte is ASCII | [Rewrite the label as `UTF-8`](#css-004--rsc-028--a-legacy-encoding-label) |
+| `CSS-004` / `RSC-028` | same | ConfirmNeeded | The same, with non-ASCII bytes in a single-byte encoding that are not UTF-8 | [Transcode the file to UTF-8](#css-004--rsc-028--a-legacy-encoding-label) |
 | `PKG-014` | *(none)* | AutoSafe | A ZIP directory entry has nothing inside it | [Leave the entry out of the archive](#pkg-014--an-empty-directory-entry) |
 | `RSC-005` | `opf.content_document.schema_violation` (stray text / inline element / incomplete content, in `<body>` or `<blockquote>`) | ConfirmNeeded | EPUB 2 text or inline elements sit where the grammar requires block content | [Wrap each run in one `<div>`, leaving whitespace alone](#rsc-005--non-block-content-in-body-or-blockquote-epub-2) |
 | `RSC-001` | `opf.manifest_item.missing_resource` | ConfirmNeeded | A manifest `<item>` declares a resource the container doesn't hold | [Drop the item, and every reference that named it](#rsc-001--dangling-manifest-item) |
@@ -703,6 +705,90 @@ two `mimetype-wrong-value` sets (`application/epub`) are declined and keep
 their one error. 9 mutations of the guards (the rule, the BOM, the
 whitespace set, case, the exact-entry check, the registration): every one
 makes a test fail.
+
+---
+
+## CSS-004 / RSC-028 — a legacy encoding label
+
+> **Status (2026-11-22):** built. Baris approved the three-way split on
+> 2026-11-22, and reopened the transcoding case closed in `docs/COVERAGE.md`
+> (2026-10-14), on the condition below. He builds the calibre plugin next;
+> the transcoding proposal is written so that a plugin can put it to the
+> reader as a question (its preview shows the decoded characters).
+
+**Findings.**
+- `CSS-004` (no `rule`), located at a stylesheet: *@charset value 'X' names
+  E, which is not utf-8 or utf-16*. EPUB 3.3 (`#sec-css-req`) and OPS 2.0.1 §1.4.1.5
+  allow a stylesheet only in UTF-8 or UTF-16. epubveri reads the byte-exact
+  declaration of CSS Syntax 3 §3.2 (styloria's `charset_rule`).
+- `RSC-028` / `xml.encoding.declared_non_utf8` (a content document or other
+  XML file) and `opf.encoding.declared_non_utf8` (the package document),
+  `params[0]` = the declared name: *the document declares encoding 'X',
+  which is not allowed (EPUB requires UTF-8)*.
+
+**Three shapes, three answers.** The label is looked up as the Encoding
+Standard's *get an encoding* does (`styloria::Encoding::for_label`).
+
+1. **Every byte is ASCII** (below 0x80), and the encoding maps ASCII to
+   itself (any but UTF-16BE, UTF-16LE, `replacement` and ISO-2022-JP). Then
+   every reader decodes the same text under the label or under UTF-8, so the
+   label alone is wrong. **Fix** (`fix.charset_label`, AutoSafe): rewrite
+   the label, inside `@charset "…"` or `encoding="…"`, as `UTF-8`. No other
+   byte changes.
+2. **`replacement`** (labels such as `iso-2022-kr`): CSS Syntax 3 decodes the
+   whole stylesheet to one U+FFFD, so a browser applies none of it.
+   Relabelling would turn on rules no reader shows. **Declined.**
+3. **Non-ASCII bytes in a single-byte encoding** (windows-1252, ISO-8859-*,
+   KOI8-*, …), on three conditions:
+   - the bytes are **not valid UTF-8**, so the file is not UTF-8 under a
+     wrong label (the common defect that closed this in 2026-10-14);
+   - **no byte is in 0x80–0x9F**: there the Encoding Standard's
+     windows-1252 (what `ISO-8859-1` names in a browser) and an XML
+     parser's ISO-8859-1 disagree, and in every other single-byte table the
+     range is C1 controls, not text;
+   - the decode is lossless and one character per byte.
+
+   Then the text is what the label says it is. **Fix**
+   (`fix.charset_transcode`, ConfirmNeeded): decode the file with its
+   label, change the label to `UTF-8`, and write the text as UTF-8. Every
+   non-ASCII byte changes, so it asks; the preview quotes the first decoded
+   non-ASCII characters in context (`"café"`), which is what a reader can
+   check.
+
+**When either declines, also.**
+- A byte order mark: the BOM decides the encoding, not the label (by
+  construction: both declarations must start the file).
+- A multi-byte legacy encoding (Shift_JIS, GBK, Big5, EUC-*): not in the
+  single-byte tables, and their decoders have more than one spelling of some
+  characters.
+- A markup document with a `<meta charset>` or a `Content-Type` `<meta>`
+  naming another encoding than UTF-8: the edit would leave it saying
+  something false, and that tag is its own finding.
+- A document that does not parse, a label that is not the reported one, or
+  no declaration where the finding says there is one.
+
+**Measured (2026-11-22, A/B against `f30d60f` on 562 shelf books + *Past
+Masters 279* + 696 epub-test-books sets at `8049bd2`, every fix approved).**
+0 on the shelf. Six sets change and nothing else, each ending with no
+finding: `fix.charset_label` in `charset-windows-1252-ascii` and
+`charset-label-padded`; `fix.charset_transcode` in the two `css-iso-8859-1`
+sets, `package-iso-8859-1` (the OPF) and `xml-iso-8859-1`. Declined, as
+specified: `charset-replacement`, `charset-shift-jis`, `xml-windows-1252`
+(`0x93`/`0x94`, curly quotes, in 0x80–0x9F), EPUB 2 `iso-8859-1` (its
+`Content-Type` `<meta>` names ISO-8859-1), and the three sets whose
+ISO-8859-1 bytes sit behind a UTF-8 BOM or declaration
+(`xml.encoding.invalid_utf8`, a rule this fix does not read). 16 mutations of
+the guards: every one makes a test fail; four guards no mutation could reach
+were removed (a BOM check the declaration parsers already make, the UTF-8
+exclusion, a trial on a copy, and a kind check at apply time).
+
+**Two candidates, not built (Baris decides).** Both are among the declines
+above, and both are common in older real books:
+- A `windows-125x` label (not an ISO-8859-1 alias) with bytes in 0x80–0x9F:
+  there the label is unambiguous, and the XML parsers' windows-1252 agrees
+  with the Encoding Standard's on the defined bytes.
+- A `Content-Type` or `charset` `<meta>` naming the same encoding as the
+  declaration: rewrite its label to `UTF-8` in the same edit.
 
 ---
 

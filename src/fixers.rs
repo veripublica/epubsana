@@ -73,6 +73,9 @@ fn is_schema_violation(m: &epubveri::report::Message, rule: &str, kind: Violatio
 /// upstream survived from the day its sort was written.
 pub fn plan(report: &Report, ws: &Workspace, _goal: Goal) -> Vec<ProposedFix> {
     let mut fixes = Vec::new();
+    // First, so that every later fix reads a transcoded file as the text it
+    // is, not as UTF-8 with its non-ASCII bytes replaced.
+    fixes.extend(charset_fixes(report, ws));
     fixes.extend(html_entities(report, ws));
     fixes.extend(entity_missing_semicolon(report, ws));
     fixes.extend(ncx_ncnames(report, ws));
@@ -199,6 +202,7 @@ pub fn handled_rules() -> &'static [&'static str] {
         "opf.content_document.reference_missing_resource",
         // Several shapes inside it, each matched on its kind and params.
         "opf.content_document.schema_violation",
+        "opf.encoding.declared_non_utf8",
         "opf.guide.duplicate_reference",
         "opf.guide.reference_fragment_not_defined",
         "opf.guide.reference_missing_resource",
@@ -219,6 +223,7 @@ pub fn handled_rules() -> &'static [&'static str] {
         "opf.spine.itemref_idref_not_in_manifest",
         "svg.attributes.attribute_not_allowed",
         "svg.elements.element_not_allowed",
+        "xml.encoding.declared_non_utf8",
     ]
 }
 
@@ -10464,6 +10469,303 @@ fn mimetype_content(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
     }]
 }
 
+/// `RSC-028`'s rule for an XML file, other than the package document, that
+/// declares an encoding other than UTF-8.
+const XML_DECLARED_NON_UTF8: &str = "xml.encoding.declared_non_utf8";
+
+/// `RSC-028`'s rule for the package document doing the same.
+const OPF_DECLARED_NON_UTF8: &str = "opf.encoding.declared_non_utf8";
+
+/// What `fix.charset_label` / `fix.charset_transcode` would write for one
+/// file, and which of the two it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CharsetPlan {
+    /// Every byte is ASCII: only the label changes.
+    Label,
+    /// Single-byte text, not UTF-8: transcoded. `sample` quotes the first
+    /// decoded non-ASCII characters in context, for the preview.
+    Transcode { sample: String },
+}
+
+/// The byte span of the declared label: inside `@charset "…";` for a
+/// stylesheet (CSS Syntax 3's byte-exact form, `styloria::charset_rule`), or
+/// the `encoding` pseudo-attribute's value in an XML declaration at the very
+/// start. `None` if there is no such declaration.
+fn charset_label_span(bytes: &[u8], css: bool) -> Option<Range<usize>> {
+    if css {
+        let label = styloria::charset_rule(bytes)?;
+        let start = b"@charset \"".len();
+        return Some(start..start + label.len());
+    }
+    let head = &bytes[..bytes.len().min(1024)];
+    let rest = head.strip_prefix(b"<?xml")?;
+    let end = rest.windows(2).position(|w| w == b"?>")?;
+    let decl = &rest[..end];
+    let ws = |b: &u8| matches!(b, b' ' | b'\t' | b'\r' | b'\n');
+    let at = decl
+        .windows(9)
+        .position(|w| ws(&w[0]) && &w[1..] == b"encoding")?
+        + 9;
+    let mut i = at;
+    while decl.get(i).is_some_and(ws) {
+        i += 1;
+    }
+    if decl.get(i) != Some(&b'=') {
+        return None;
+    }
+    i += 1;
+    while decl.get(i).is_some_and(ws) {
+        i += 1;
+    }
+    let quote = *decl.get(i).filter(|q| matches!(q, b'"' | b'\''))?;
+    let close = decl[i + 1..].iter().position(|&b| b == quote)? + i + 1;
+    let offset = b"<?xml".len();
+    Some(offset + i + 1..offset + close)
+}
+
+/// Whether a markup document names an encoding other than UTF-8 in a
+/// `<meta charset>` or a `Content-Type` `<meta http-equiv>`, which an edit to
+/// the declaration would leave saying something false. `None` if it does not
+/// parse; the caller declines.
+fn meta_names_other_charset(text: &str) -> Option<bool> {
+    let prepared = prepare_content_doc(text);
+    let doc = prepared.parse()?;
+    let not_utf8 =
+        |label: &str| styloria::Encoding::for_label(label) != Some(styloria::Encoding::UTF_8);
+    for n in doc
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "meta")
+    {
+        if let Some(c) = n.attribute("charset")
+            && not_utf8(c)
+        {
+            return Some(true);
+        }
+        if n.attribute("http-equiv").is_some_and(|h| {
+            h.trim_matches(is_xml_space)
+                .eq_ignore_ascii_case("content-type")
+        }) && let Some(content) = n.attribute("content")
+        {
+            let lower = content.to_ascii_lowercase();
+            if let Some(at) = lower.find("charset=") {
+                let label = content[at + 8..]
+                    .split(';')
+                    .next()
+                    .unwrap_or("")
+                    .trim_matches(|c: char| c.is_ascii_whitespace() || c == '"' || c == '\'');
+                if not_utf8(label) {
+                    return Some(true);
+                }
+            }
+        }
+    }
+    Some(false)
+}
+
+/// The plan for one reported file, and the bytes it would write; `None`
+/// declines. `expected` is the label the finding named (`params[0]`), if it
+/// carries one. The cases are in `docs/FIXERS.md`.
+fn plan_charset(
+    bytes: &[u8],
+    file: &str,
+    expected: Option<&str>,
+) -> Option<(CharsetPlan, Vec<u8>)> {
+    // A byte order mark is declined by construction: both declarations
+    // must start the file, and a BOM before one stops it from counting.
+    let css = crate::workspace::is_stylesheet(file);
+    let span = charset_label_span(bytes, css)?;
+    // Everything up to the label is ASCII, so it sits at the same offsets in
+    // the decoded text.
+    if !bytes[..span.end].is_ascii() {
+        return None;
+    }
+    let label = std::str::from_utf8(&bytes[span.clone()]).ok()?;
+    if expected.is_some_and(|e| e != label) {
+        return None;
+    }
+    let encoding = styloria::Encoding::for_label(label)?;
+    if matches!(
+        encoding.name(),
+        "UTF-16BE" | "UTF-16LE" | "replacement" | "ISO-2022-JP"
+    ) {
+        return None;
+    }
+    let splice = |text: &[u8]| {
+        let mut out = text[..span.start].to_vec();
+        out.extend_from_slice(b"UTF-8");
+        out.extend_from_slice(&text[span.end..]);
+        out
+    };
+    let checked = |out: Vec<u8>| {
+        if is_markup_entry(file) && meta_names_other_charset(std::str::from_utf8(&out).ok()?)? {
+            return None;
+        }
+        Some(out)
+    };
+    if bytes.is_ascii() {
+        return Some((CharsetPlan::Label, checked(splice(bytes))?));
+    }
+    if std::str::from_utf8(bytes).is_ok() || bytes.iter().any(|b| (0x80..=0x9F).contains(b)) {
+        return None;
+    }
+    // No BOM, so the protocol label decides: the file decoded with its own.
+    // The multi-byte legacy encodings fail here, as `Unsupported`: styloria
+    // decodes them only with its `legacy-cjk` feature, which nothing in our
+    // tree enables (`legacy_cjk_stays_undecoded` pins it).
+    let decoded = styloria::decode_stylesheet(bytes, Some(label), None).ok()?;
+    if !decoded.lossless {
+        return None;
+    }
+    let text = decoded.text.as_bytes();
+    let sample = charset_sample(&decoded.text);
+    Some((CharsetPlan::Transcode { sample }, checked(splice(text))?))
+}
+
+/// The first non-ASCII characters of `text` with a few characters of
+/// context, quoted, so a reader can tell whether the decode is right.
+fn charset_sample(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let Some(first) = chars.iter().position(|c| !c.is_ascii()) else {
+        return String::new();
+    };
+    let start = chars[..first]
+        .iter()
+        .rposition(|c| c.is_whitespace() || matches!(c, '>' | '"' | '\''))
+        .map_or(first.saturating_sub(12), |i| i + 1)
+        .max(first.saturating_sub(24));
+    let end = chars[first..]
+        .iter()
+        .position(|c| c.is_whitespace() || matches!(c, '<' | '"' | '\''))
+        .map_or(chars.len(), |i| first + i)
+        .min(first + 24);
+    format!("{:?}", chars[start..end].iter().collect::<String>())
+}
+
+/// The reported files: file -> (id, rule, the label the finding named).
+type CharsetFindings = BTreeMap<String, (&'static str, Option<&'static str>, Option<String>)>;
+
+/// (transcode?, id, rule) -> the files, one proposal each.
+type CharsetGroups =
+    BTreeMap<(bool, &'static str, Option<&'static str>), Vec<(String, CharsetPlan)>>;
+
+fn charset_findings(report: &Report) -> CharsetFindings {
+    let mut out = CharsetFindings::new();
+    for m in &report.messages {
+        let key = match (m.id, m.rule) {
+            ("CSS-004", None) => (m.id, m.rule, None),
+            ("RSC-028", Some(XML_DECLARED_NON_UTF8 | OPF_DECLARED_NON_UTF8)) => {
+                (m.id, m.rule, m.params.first().cloned())
+            }
+            _ => continue,
+        };
+        if let Some(file) = m.location.as_deref() {
+            out.insert(file.to_string(), key);
+        }
+    }
+    out
+}
+
+/// `CSS-004` and `RSC-028` (`declared_non_utf8`): a stylesheet or an XML
+/// file that declares a legacy encoding. `fix.charset_label` (AutoSafe)
+/// rewrites the label of an all-ASCII file; `fix.charset_transcode`
+/// (ConfirmNeeded) transcodes single-byte text that is not UTF-8. One
+/// proposal per fixer and finding key.
+fn charset_fixes(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    let findings = charset_findings(report);
+    let mut planned: BTreeMap<String, (CharsetPlan, Vec<u8>)> = BTreeMap::new();
+    for (file, (_, _, expected)) in &findings {
+        if let Some(p) = ws
+            .raw(file)
+            .and_then(|b| plan_charset(b, file, expected.as_deref()))
+        {
+            planned.insert(file.clone(), p);
+        }
+    }
+
+    let mut groups: CharsetGroups = BTreeMap::new();
+    for (file, (plan, _)) in planned {
+        let (id, rule, _) = findings[&file];
+        let transcode = matches!(plan, CharsetPlan::Transcode { .. });
+        groups
+            .entry((transcode, id, rule))
+            .or_default()
+            .push((file, plan));
+    }
+    groups
+        .into_iter()
+        .map(|((transcode, id, rule), files)| charset_proposal(report, transcode, id, rule, files))
+        .collect()
+}
+
+fn charset_proposal(
+    report: &Report,
+    transcode: bool,
+    id: &'static str,
+    rule: Option<&'static str>,
+    files: Vec<(String, CharsetPlan)>,
+) -> ProposedFix {
+    let n = files.len();
+    let s = if n == 1 { "" } else { "s" };
+    let preview = files
+        .iter()
+        .take(6)
+        .map(|(file, plan)| Change {
+            path: file.clone(),
+            note: match plan {
+                CharsetPlan::Label => {
+                    "declare UTF-8 (every byte is ASCII, so no byte else changes)".to_string()
+                }
+                CharsetPlan::Transcode { sample } => {
+                    format!("decode with the declared encoding and write as UTF-8; reads {sample}")
+                }
+            },
+        })
+        .collect();
+    let names: Vec<String> = files.into_iter().map(|(f, _)| f).collect();
+    let (fix_id, tier, title, rationale) = if transcode {
+        (
+            "fix.charset_transcode",
+            Tier::ConfirmNeeded,
+            format!("Transcode {n} file{s} from the declared legacy encoding to UTF-8"),
+            "EPUB requires UTF-8 (or, for a stylesheet, UTF-16). This file declares a single-byte \
+             legacy encoding, and its bytes are not valid UTF-8, so the declaration is what they \
+             are in. Each byte is decoded as the declared encoding says and the text is written \
+             as UTF-8, with the declaration changed to match; the text itself does not change. \
+             Check the quoted words: if they read wrong, the declaration was wrong and this \
+             should be declined.",
+        )
+    } else {
+        (
+            "fix.charset_label",
+            Tier::AutoSafe,
+            format!("Declare UTF-8 in {n} file{s} whose bytes are all ASCII"),
+            "EPUB requires UTF-8 (or, for a stylesheet, UTF-16). This file declares a legacy \
+             encoding, but every byte in it is ASCII, which that encoding and UTF-8 read the same \
+             way. Only the label changes, to `UTF-8`; no other byte does.",
+        )
+    };
+    let apply_names = names.clone();
+    ProposedFix {
+        fix_id,
+        addresses_id: id.to_string(),
+        addresses_rule: rule,
+        addresses_severity: addressed_severity(report, id, rule),
+        tier,
+        title,
+        rationale: rationale.to_string(),
+        preview,
+        apply_fn: Box::new(move |ws: &mut Workspace| {
+            for file in &apply_names {
+                // Re-planned on the bytes as they are now (the label was
+                // checked against the finding when planning).
+                if let Some((_, out)) = ws.raw(file).and_then(|b| plan_charset(b, file, None)) {
+                    ws.set_bytes(file, out);
+                }
+            }
+        }),
+    }
+}
+
 /// `PKG-014`: a directory entry in the ZIP with nothing inside it
 /// (`OEBPS/fonts/`, `OEBPS/images/` — left behind when a tool moved the files
 /// and kept the folders). The repair leaves the entry out of the archive.
@@ -12896,6 +13198,307 @@ mod tests {
         r.messages[0].rule = None;
         r.messages[0].location = Some("nav.xhtml".to_string());
         assert!(viewport_name_case(&r, &ws).is_empty());
+    }
+
+    // ---- fix.charset_label / fix.charset_transcode --------------------
+
+    /// `ws` with entry `name` replaced by `content`, every other entry as it is.
+    fn with_entry(ws: &Workspace, name: &str, content: &[u8]) -> Workspace {
+        let mut out = Workspace::load(&ws.serialize().unwrap()).unwrap();
+        out.set_bytes(name, content.to_vec());
+        Workspace::load(&out.serialize().unwrap()).unwrap()
+    }
+
+    /// The charset proposals for `ws`: (fix id, tier, id, rule).
+    fn charset_plan(ws: &Workspace) -> Vec<(&'static str, Tier, String, Option<&'static str>)> {
+        charset_fixes(&ws.detect().unwrap(), ws)
+            .into_iter()
+            .map(|f| (f.fix_id, f.tier, f.addresses_id, f.addresses_rule))
+            .collect()
+    }
+
+    fn plain_book() -> Workspace {
+        br_book(b"p { margin: 0 }", "", "<body><p>one</p></body>", &[])
+    }
+
+    /// Applies every charset proposal and returns the book.
+    fn apply_charset(mut ws: Workspace) -> Workspace {
+        let report = ws.detect().unwrap();
+        for f in charset_fixes(&report, &ws) {
+            f.apply(&mut ws);
+        }
+        ws
+    }
+
+    /// An all-ASCII stylesheet under a legacy label: the label alone becomes
+    /// `UTF-8`, and the book's findings are those of the plain book.
+    #[test]
+    fn an_ascii_stylesheet_is_relabelled() {
+        let baseline = finding_keys(&plain_book());
+        for label in ["windows-1252", " iso-8859-1 ", "latin1", "KOI8-R"] {
+            let css = format!("@charset \"{label}\";\np {{ margin: 0 }}");
+            let ws = with_entry(&plain_book(), "s.css", css.as_bytes());
+            assert_eq!(
+                charset_plan(&ws),
+                [(
+                    "fix.charset_label",
+                    Tier::AutoSafe,
+                    "CSS-004".to_string(),
+                    None
+                )],
+                "{label}"
+            );
+            let ws = apply_charset(ws);
+            assert_eq!(
+                ws.raw("s.css").unwrap(),
+                b"@charset \"UTF-8\";\np { margin: 0 }",
+                "{label}"
+            );
+            assert_eq!(finding_keys(&ws), baseline, "{label}");
+        }
+        // Through `plan`, first, and only rule-less `CSS-004` is read.
+        let ws = with_entry(&plain_book(), "s.css", b"@charset \"latin1\";\np {}");
+        let mut report = ws.detect().unwrap();
+        assert_eq!(
+            plan(&report, &ws, crate::Goal::Valid)[0].fix_id,
+            "fix.charset_label"
+        );
+        for m in &mut report.messages {
+            m.rule = Some("css.other");
+        }
+        assert!(charset_fixes(&report, &ws).is_empty());
+    }
+
+    /// Latin-1 text in a stylesheet that says so: transcoded, the preview
+    /// quotes the decoded word, and nothing else changes.
+    #[test]
+    fn a_latin1_stylesheet_is_transcoded() {
+        let baseline = finding_keys(&plain_book());
+        let css = b"@charset \"ISO-8859-1\";\np::before { content: \"caf\xe9\" }";
+        let ws = with_entry(&plain_book(), "s.css", css);
+        let fixes = charset_fixes(&ws.detect().unwrap(), &ws);
+        assert_eq!(fixes.len(), 1);
+        assert_eq!(fixes[0].fix_id, "fix.charset_transcode");
+        assert_eq!(fixes[0].tier, Tier::ConfirmNeeded);
+        assert!(
+            fixes[0].preview[0].note.contains("\"café\""),
+            "{}",
+            fixes[0].preview[0].note
+        );
+        let ws = apply_charset(ws);
+        assert_eq!(
+            ws.raw("s.css").unwrap(),
+            "@charset \"UTF-8\";\np::before { content: \"café\" }".as_bytes()
+        );
+        assert_eq!(finding_keys(&ws), baseline);
+    }
+
+    /// Reported, and not proposed: `replacement`, a byte in 0x80–0x9F, UTF-8
+    /// bytes under a Latin-1 label, a multi-byte encoding.
+    #[test]
+    fn a_stylesheet_charset_is_declined_where_the_bytes_may_say_otherwise() {
+        for css in [
+            &b"@charset \"iso-2022-kr\";\np { margin: 0 }"[..],
+            b"@charset \"windows-1252\";\np::before { content: \"\x93q\x94\" }",
+            "@charset \"ISO-8859-1\";\np::before { content: \"café\" }".as_bytes(),
+            b"@charset \"Shift_JIS\";\np::before { content: \"\x82\xa0\" }",
+        ] {
+            let why = String::from_utf8_lossy(css).into_owned();
+            let ws = with_entry(&plain_book(), "s.css", css);
+            assert!(
+                finding_keys(&ws).contains(&("CSS-004", None)),
+                "{why}: the fixture must carry the finding"
+            );
+            assert_eq!(charset_plan(&ws), [], "{why}");
+        }
+    }
+
+    /// Declined as well: a BOM (it decides, not the label), ISO-2022-JP, a
+    /// byte the single-byte table leaves unmapped (windows-1253 0xAA), a
+    /// non-ASCII byte before the label, and a label that is not the one the
+    /// finding named.
+    #[test]
+    fn a_charset_is_declined_where_the_label_does_not_decide() {
+        let latin1 = xml_chapter("ISO-8859-1", b"caf\xe9");
+        let decl = b"<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?>";
+        assert!(latin1.starts_with(decl));
+        let cases: [(&str, &str, Vec<u8>); 4] = [
+            // Not markup, so no parse would catch a bad splice or decode.
+            ("utf-16", "content.opf", xml_chapter("UTF-16", b"caf\xe9")),
+            (
+                "iso-2022-jp",
+                "s.css",
+                b"@charset \"iso-2022-jp\";\np { margin: 0 }".to_vec(),
+            ),
+            (
+                "unmapped",
+                "s.css",
+                b"@charset \"windows-1253\";\np::before { content: \"\xaa\" }".to_vec(),
+            ),
+            (
+                "before the label",
+                "content.opf",
+                [
+                    &b"<?xml version=\"1.\xe9\" encoding=\"ISO-8859-1\"?>"[..],
+                    &latin1[decl.len()..],
+                ]
+                .concat(),
+            ),
+        ];
+        // Each would be proposed without its guard: the same bytes with the
+        // one fault removed are.
+        assert!(plan_charset(&latin1, "c.xhtml", None).is_some());
+        assert!(plan_charset(&latin1, "content.opf", None).is_some());
+        // A BOM before the declaration: there is no declaration to edit.
+        let bom = [&b"\xef\xbb\xbf"[..], &latin1].concat();
+        assert!(plan_charset(&bom, "c.xhtml", None).is_none());
+        for (why, name, bytes) in cases {
+            assert!(plan_charset(&bytes, name, None).is_none(), "{why}");
+        }
+        // The finding names another label than the file holds.
+        let ws = with_entry(&plain_book(), "c.xhtml", &xml_chapter("ISO-8859-1", b"one"));
+        let mut report = ws.detect().unwrap();
+        for m in &mut report.messages {
+            if m.rule == Some(XML_DECLARED_NON_UTF8) {
+                m.params = vec!["windows-1252".to_string()];
+            }
+        }
+        assert!(charset_fixes(&report, &ws).is_empty());
+        // Only the two `declared_non_utf8` rules of `RSC-028` are read.
+        for m in &mut report.messages {
+            if m.id == "RSC-028" {
+                m.rule = Some("xml.encoding.utf16");
+                m.params = vec!["ISO-8859-1".to_string()];
+            }
+        }
+        assert!(charset_fixes(&report, &ws).is_empty());
+    }
+
+    /// If this fails, something enabled styloria's `legacy-cjk`: restrict
+    /// `plan_charset` to single-byte encodings before it transcodes Shift_JIS
+    /// (`docs/FIXERS.md`: not ours).
+    #[test]
+    fn legacy_cjk_stays_undecoded() {
+        for label in ["shift_jis", "gbk", "big5", "euc-jp", "euc-kr"] {
+            assert!(
+                !styloria::Encoding::for_label(label).unwrap().is_supported(),
+                "{label}"
+            );
+        }
+    }
+
+    /// The chapter with its declaration naming `label`, and `word` in place
+    /// of "one", in `bytes`.
+    fn xml_chapter(label: &str, word: &[u8]) -> Vec<u8> {
+        let text = plain_book().get_text("c.xhtml").unwrap();
+        let text = text.replace(r#"encoding="utf-8""#, &format!(r#"encoding="{label}""#));
+        let (a, b) = text.split_once("one").unwrap();
+        [a.as_bytes(), word, b.as_bytes()].concat()
+    }
+
+    /// A content document: ASCII under ISO-8859-1 is relabelled, Latin-1
+    /// text is transcoded, and either ends as the UTF-8 book.
+    #[test]
+    fn an_xhtml_declaration_is_relabelled_or_transcoded() {
+        let baseline = finding_keys(&plain_book());
+        let rule = Some(XML_DECLARED_NON_UTF8);
+        let ws = with_entry(&plain_book(), "c.xhtml", &xml_chapter("ISO-8859-1", b"one"));
+        assert_eq!(
+            charset_plan(&ws),
+            [(
+                "fix.charset_label",
+                Tier::AutoSafe,
+                "RSC-028".to_string(),
+                rule
+            )]
+        );
+        let ws = apply_charset(ws);
+        assert_eq!(ws.raw("c.xhtml").unwrap(), xml_chapter("UTF-8", b"one"));
+        assert_eq!(finding_keys(&ws), baseline);
+
+        let ws = with_entry(
+            &plain_book(),
+            "c.xhtml",
+            &xml_chapter("ISO-8859-1", b"caf\xe9"),
+        );
+        assert_eq!(
+            charset_plan(&ws),
+            [(
+                "fix.charset_transcode",
+                Tier::ConfirmNeeded,
+                "RSC-028".to_string(),
+                rule
+            )]
+        );
+        let ws = apply_charset(ws);
+        assert_eq!(
+            ws.raw("c.xhtml").unwrap(),
+            xml_chapter("UTF-8", "café".as_bytes())
+        );
+        assert_eq!(finding_keys(&ws), baseline);
+    }
+
+    /// A `Content-Type` or `charset` `<meta>` naming the legacy encoding is
+    /// left saying something false by the edit: declined.
+    #[test]
+    fn an_xhtml_declaration_with_a_charset_meta_is_declined() {
+        for meta in [
+            r#"<meta http-equiv="Content-Type" content="text/html; charset=iso-8859-1"/>"#,
+            r#"<meta charset="windows-1252"/>"#,
+        ] {
+            let chapter = String::from_utf8(xml_chapter("ISO-8859-1", b"one"))
+                .unwrap()
+                .replace("<title>t</title>", &format!("<title>t</title>{meta}"));
+            let ws = with_entry(&plain_book(), "c.xhtml", chapter.as_bytes());
+            assert!(finding_keys(&ws).contains(&("RSC-028", Some(XML_DECLARED_NON_UTF8))));
+            assert_eq!(charset_plan(&ws), [], "{meta}");
+        }
+    }
+
+    /// The package document has its own rule, and the same repair.
+    #[test]
+    fn a_package_declaration_is_relabelled() {
+        let opf = String::from_utf8(plain_book().raw("content.opf").unwrap().to_vec())
+            .unwrap()
+            .replace(
+                r#"<?xml version="1.0"?>"#,
+                r#"<?xml version="1.0" encoding="ISO-8859-1"?>"#,
+            );
+        let ws = with_entry(&plain_book(), "content.opf", opf.as_bytes());
+        assert_eq!(
+            charset_plan(&ws),
+            [(
+                "fix.charset_label",
+                Tier::AutoSafe,
+                "RSC-028".to_string(),
+                Some(OPF_DECLARED_NON_UTF8)
+            )]
+        );
+        let ws = apply_charset(ws);
+        assert!(
+            String::from_utf8(ws.raw("content.opf").unwrap().to_vec())
+                .unwrap()
+                .starts_with(r#"<?xml version="1.0" encoding="UTF-8"?>"#)
+        );
+        assert_eq!(finding_keys(&ws), finding_keys(&plain_book()));
+    }
+
+    /// The declaration parser: both quotes, whitespace around `=`, and
+    /// nothing outside a declaration at the very start.
+    #[test]
+    fn charset_label_span_reads_the_declaration_only() {
+        let at = |b: &[u8]| charset_label_span(b, false).map(|r| b[r].to_vec());
+        assert_eq!(
+            at(b"<?xml version='1.0' encoding = 'latin1'?><a/>"),
+            Some(b"latin1".to_vec())
+        );
+        assert_eq!(
+            at(b"<?xml version=\"1.0\"\n encoding=\"x\"?>"),
+            Some(b"x".to_vec())
+        );
+        assert_eq!(at(b" <?xml version=\"1.0\" encoding=\"x\"?>"), None);
+        assert_eq!(at(b"<?xml version=\"1.0\"?><a encoding=\"x\"/>"), None);
+        assert_eq!(at(b"<?xml version=\"1.0\"xencoding=\"x\"?>"), None);
     }
 
     // ---- fix.empty_directory -----------------------------------------
