@@ -129,6 +129,7 @@ pub fn plan(report: &Report, ws: &Workspace, _goal: Goal) -> Vec<ProposedFix> {
     fixes.extend(css_direction_ltr(report, ws));
     fixes.extend(navdoc_empty_navs(report, ws));
     fixes.extend(mimetype_packaging(report, ws));
+    fixes.extend(mimetype_content(report, ws));
     fixes.extend(empty_directories(report, ws));
     // Future fixers append here, in a sensible confirm order — and in
     // `handled_rules()` below.
@@ -182,6 +183,7 @@ pub fn handled_rules() -> &'static [&'static str] {
         "ncx.uid.package_identifier_mismatch",
         "ocf.mimetype.not_first_entry",
         "ocf.mimetype.not_stored_uncompressed",
+        "ocf.mimetype.wrong_content",
         "opf.content_document.dangling_fragment",
         "opf.content_document.duplicate_id",
         "opf.content_document.empty_title",
@@ -10244,6 +10246,69 @@ fn mimetype_packaging(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
     }]
 }
 
+/// `PKG-007`'s rule for a `mimetype` entry whose bytes are not exactly
+/// `application/epub+zip`.
+const MIMETYPE_WRONG_CONTENT: &str = "ocf.mimetype.wrong_content";
+
+/// The only content OCF allows in the `mimetype` entry.
+const EPUB_MEDIA_TYPE: &str = "application/epub+zip";
+
+/// Whether `text`, the `mimetype` entry decoded as UTF-8, still names the
+/// EPUB media type: after one leading BOM (Encoding's *UTF-8 decode*) and
+/// leading and trailing HTTP whitespace (MIME Sniffing's *parse a MIME
+/// type*) are removed, it equals `application/epub+zip` ASCII
+/// case-insensitively (type and subtype are case-insensitive, RFC 6838
+/// §4.2). A lossy decode's U+FFFD never matches.
+fn names_the_epub_media_type(text: &str) -> bool {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let http_ws = |c: char| matches!(c, '\t' | '\n' | '\r' | ' ');
+    text.trim_matches(http_ws)
+        .eq_ignore_ascii_case(EPUB_MEDIA_TYPE)
+}
+
+/// `PKG-007` / `ocf.mimetype.wrong_content`: the `mimetype` entry names
+/// `application/epub+zip` but not in exactly those bytes (a BOM, a trailing
+/// newline, a leading space, upper case). The repair writes the exact string;
+/// another media type is declined. Where the entry sits and how it is
+/// compressed are `fix.mimetype_packaging`'s. See `docs/FIXERS.md`.
+fn mimetype_content(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    if !report
+        .messages
+        .iter()
+        .any(|m| m.id == "PKG-007" && m.rule == Some(MIMETYPE_WRONG_CONTENT))
+    {
+        return Vec::new();
+    }
+    let Some(text) = ws.get_text("mimetype") else {
+        return Vec::new();
+    };
+    if text == EPUB_MEDIA_TYPE || !names_the_epub_media_type(&text) {
+        return Vec::new();
+    }
+    vec![ProposedFix {
+        fix_id: "fix.mimetype_content",
+        addresses_id: "PKG-007".to_string(),
+        addresses_rule: Some(MIMETYPE_WRONG_CONTENT),
+        addresses_severity: addressed_severity(report, "PKG-007", Some(MIMETYPE_WRONG_CONTENT)),
+        tier: Tier::ConfirmNeeded,
+        title: "Write the `mimetype` entry as exactly `application/epub+zip`".to_string(),
+        rationale: format!(
+            "OCF requires the `mimetype` entry to hold exactly the ASCII string \
+             `application/epub+zip`, with no BOM, whitespace or newline. This one holds {text:?}: \
+             the same media type, since decoding drops a leading BOM, parsing a media type \
+             drops surrounding whitespace, and type and subtype are case-insensitive. Only \
+             these bytes change; the entry's place and compression stay."
+        ),
+        preview: vec![Change {
+            path: "mimetype".to_string(),
+            note: format!("{text:?} → \"{EPUB_MEDIA_TYPE}\""),
+        }],
+        apply_fn: Box::new(|ws: &mut Workspace| {
+            ws.set_bytes("mimetype", EPUB_MEDIA_TYPE.as_bytes().to_vec())
+        }),
+    }]
+}
+
 /// `PKG-014`: a directory entry in the ZIP with nothing inside it
 /// (`OEBPS/fonts/`, `OEBPS/images/` — left behind when a tool moved the files
 /// and kept the folders). The repair leaves the entry out of the archive.
@@ -12313,6 +12378,11 @@ mod tests {
     /// `br_book`'s container with `mimetype` still first but compressed
     /// with `method`; every other entry is copied as it is.
     fn mimetype_first_with(method: zip::CompressionMethod) -> Workspace {
+        mimetype_book(method, b"application/epub+zip")
+    }
+
+    /// The same, with `content` in place of the `mimetype` bytes.
+    fn mimetype_book(method: zip::CompressionMethod, content: &[u8]) -> Workspace {
         use std::io::{Read, Write};
         let src = br_book(b"p { margin: 0 }", "", "<body><p>one</p></body>", &[])
             .serialize()
@@ -12326,6 +12396,9 @@ mod tests {
                 let name = e.name().unwrap().to_string();
                 let mut body = Vec::new();
                 e.read_to_end(&mut body).unwrap();
+                if name == "mimetype" {
+                    body = content.to_vec();
+                }
                 let m = if name == "mimetype" {
                     method
                 } else {
@@ -12421,6 +12494,121 @@ mod tests {
         assert_eq!(fixes.len(), 1);
         assert_eq!(fixes[0].addresses_id, "PKG-006");
         assert_eq!(fixes[0].addresses_rule, None);
+    }
+
+    // ---- fix.mimetype_content ----------------------------------------
+
+    /// Each spelling of the EPUB media type, through the real detector: one
+    /// proposal; after it the entry is exactly the 20 bytes, still first and
+    /// stored, and the findings are those of the correct book.
+    #[test]
+    fn a_misspelled_mimetype_is_written_exactly() {
+        let stored = finding_keys(&mimetype_first_with(zip::CompressionMethod::Stored));
+        for content in [
+            &b"application/epub+zip\n"[..],
+            b"application/epub+zip\r\n",
+            "\u{feff}application/epub+zip".as_bytes(),
+            b" application/epub+zip",
+            b"\tapplication/epub+zip ",
+            b"APPLICATION/EPUB+ZIP",
+            b"Application/Epub+Zip\n",
+        ] {
+            let why = String::from_utf8_lossy(content).into_owned();
+            let mut ws = mimetype_book(zip::CompressionMethod::Stored, content);
+            let report = ws.detect().unwrap();
+            assert!(
+                report
+                    .messages
+                    .iter()
+                    .any(|m| m.rule == Some(MIMETYPE_WRONG_CONTENT)),
+                "{why:?}: the fixture must carry the finding"
+            );
+            assert!(mimetype_packaging(&report, &ws).is_empty(), "{why:?}");
+            let fixes = mimetype_content(&report, &ws);
+            assert_eq!(fixes.len(), 1, "{why:?}");
+            assert_eq!(fixes[0].tier, Tier::ConfirmNeeded);
+            fixes.into_iter().next().unwrap().apply(&mut ws);
+            let out = ws.serialize().unwrap();
+            let mut z = zip::ZipArchive::new(std::io::Cursor::new(out)).unwrap();
+            let mut first = z.by_index(0).unwrap();
+            assert_eq!(first.name().unwrap(), "mimetype");
+            assert_eq!(first.compression(), zip::CompressionMethod::Stored);
+            let mut body = Vec::new();
+            std::io::Read::read_to_end(&mut first, &mut body).unwrap();
+            assert_eq!(body, b"application/epub+zip", "{why:?}");
+            drop(first);
+            assert_eq!(finding_keys(&ws), stored, "{why:?}");
+        }
+    }
+
+    /// Another media type, a parameter, a character HTTP whitespace does not
+    /// cover, a second BOM, or bytes that are not UTF-8: reported, and not
+    /// proposed.
+    #[test]
+    fn a_mimetype_naming_something_else_is_left_alone() {
+        for content in [
+            &b"application/epub"[..],
+            b"application/zip",
+            b"application/epub+zip; charset=utf-8",
+            b"application/epub+zip\x0c",
+            "application/epub+zip\u{a0}".as_bytes(),
+            "\u{feff}\u{feff}application/epub+zip".as_bytes(),
+            b"application/epub+zip\xff",
+            b"application/ epub+zip",
+            b"",
+        ] {
+            let why = String::from_utf8_lossy(content).into_owned();
+            let ws = mimetype_book(zip::CompressionMethod::Stored, content);
+            let report = ws.detect().unwrap();
+            assert!(
+                report
+                    .messages
+                    .iter()
+                    .any(|m| m.rule == Some(MIMETYPE_WRONG_CONTENT)),
+                "{why:?}: the fixture must carry the finding"
+            );
+            assert!(mimetype_content(&report, &ws).is_empty(), "{why:?}");
+        }
+    }
+
+    /// Compressed and misspelled: both fixes, in plan order, compose. The
+    /// re-emission writes the new bytes, and nothing is left.
+    #[test]
+    fn a_compressed_misspelled_mimetype_takes_both_fixes() {
+        let stored = finding_keys(&mimetype_first_with(zip::CompressionMethod::Stored));
+        let mut ws = mimetype_book(zip::CompressionMethod::Deflated, b"application/epub+zip\n");
+        let report = ws.detect().unwrap();
+        let fixes: Vec<_> = plan(&report, &ws, crate::Goal::Valid)
+            .into_iter()
+            .filter(|f| f.fix_id.starts_with("fix.mimetype_"))
+            .collect();
+        let ids: Vec<_> = fixes.iter().map(|f| f.fix_id).collect();
+        assert_eq!(ids, ["fix.mimetype_packaging", "fix.mimetype_content"]);
+        for f in fixes {
+            f.apply(&mut ws);
+        }
+        let out = ws.serialize().unwrap();
+        let mut z = zip::ZipArchive::new(std::io::Cursor::new(out)).unwrap();
+        assert_eq!(
+            z.by_index(0).unwrap().compression(),
+            zip::CompressionMethod::Stored
+        );
+        assert_eq!(ws.get_text("mimetype").unwrap(), "application/epub+zip");
+        assert_eq!(finding_keys(&ws), stored);
+    }
+
+    /// Only `wrong_content` is read: the same bytes under the other rule, and
+    /// an exact entry under this one, get nothing.
+    #[test]
+    fn mimetype_content_reads_only_its_rule() {
+        let ws = mimetype_book(zip::CompressionMethod::Stored, b"application/epub+zip\n");
+        let mut r = id_only("PKG-007");
+        r.messages[0].rule = Some(MIMETYPE_NOT_STORED);
+        assert!(mimetype_content(&r, &ws).is_empty());
+        r.messages[0].rule = Some(MIMETYPE_WRONG_CONTENT);
+        assert_eq!(mimetype_content(&r, &ws).len(), 1);
+        let exact = mimetype_first_with(zip::CompressionMethod::Stored);
+        assert!(mimetype_content(&r, &exact).is_empty());
     }
 
     // ---- fix.empty_directory -----------------------------------------

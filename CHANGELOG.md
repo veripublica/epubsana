@@ -24,6 +24,11 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 - `fix.mimetype_packaging` also stores a `mimetype` entry that is first but
   compressed (`PKG-007`, `ocf.mimetype.not_stored_uncompressed`). As before,
   no byte of any entry changes.
+- `fix.mimetype_content` writes the `mimetype` entry as exactly
+  `application/epub+zip` when it holds that media type with a leading BOM,
+  surrounding whitespace or other letter case (`PKG-007`,
+  `ocf.mimetype.wrong_content`). Another value, such as `application/epub`,
+  is left alone.
 
 ### Changed
 

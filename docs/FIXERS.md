@@ -37,6 +37,7 @@ grows one carefully-argued entry at a time.
 | `CSS-001` | *(none)* | ConfirmNeeded | A stylesheet says `direction: ltr` in an EPUB 3 book where nothing can set another direction | [Delete the declaration](#css-001--direction-ltr-where-nothing-sets-another-direction) |
 | `OPF-014` | `opf.content_document.property_used_undeclared` | AutoSafe | A content document uses a feature its manifest item doesn't declare | [Add the token to that item's `properties`](#opf-014--undeclared-content-property) |
 | `PKG-006` / `PKG-007` / `PKG-005` | *(none)* / `ocf.mimetype.not_stored_uncompressed` / *(none)* | AutoSafe | The `mimetype` entry is not first in the ZIP, is compressed, or its header carries an extra field | [Re-emit it first and stored, touching no content](#pkg-006--pkg-007--pkg-005--the-mimetype-entrys-packaging) |
+| `PKG-007` | `ocf.mimetype.wrong_content` | ConfirmNeeded | The `mimetype` entry names `application/epub+zip` with a BOM, surrounding whitespace or other letter case | [Write exactly `application/epub+zip`](#pkg-007--the-mimetype-entrys-content) |
 | `PKG-014` | *(none)* | AutoSafe | A ZIP directory entry has nothing inside it | [Leave the entry out of the archive](#pkg-014--an-empty-directory-entry) |
 | `RSC-005` | `opf.content_document.schema_violation` (stray text / inline element / incomplete content, in `<body>` or `<blockquote>`) | ConfirmNeeded | EPUB 2 text or inline elements sit where the grammar requires block content | [Wrap each run in one `<div>`, leaving whitespace alone](#rsc-005--non-block-content-in-body-or-blockquote-epub-2) |
 | `RSC-001` | `opf.manifest_item.missing_resource` | ConfirmNeeded | A manifest `<item>` declares a resource the container doesn't hold | [Drop the item, and every reference that named it](#rsc-001--dangling-manifest-item) |
@@ -648,6 +649,59 @@ re-emitted `mimetype` first and stored, so merely producing output repaired this
 defect with no proposal and no approval. That contradicted epubsana's first
 guarantee, so the writer now preserves packaging exactly and this fixer proposes
 the repair in the open, where you can see it and decline it.
+
+---
+
+## PKG-007 — the `mimetype` entry's content
+
+> **Status (2026-11-22):** built. The boundary was approved by Baris on
+> 2026-11-22. The tier is ConfirmNeeded because the entry's bytes change;
+> that choice is ours, and he may change it.
+
+**Finding.** `PKG-007` / `ocf.mimetype.wrong_content`, `params[0]` = the
+entry's bytes, read as UTF-8 lossily: *'mimetype' must contain exactly
+'application/epub+zip' (found "…")*. OCF 3.3 §4.3.3 and OCF 2.0.1 §4 both
+require the entry to hold exactly the US-ASCII string `application/epub+zip`,
+with no padding, newline or BOM.
+
+**When the value is still that media type.** Two WHATWG definitions say what
+a reader that decodes the bytes as text and parses them as a media type gets:
+- The Encoding Standard's *UTF-8 decode* drops one leading BOM.
+- MIME Sniffing's *parse a MIME type* drops leading and trailing HTTP
+  whitespace (tab, LF, CR, space) and lowercases the type and subtype. RFC
+  6838 §4.2 says the same of case: type and subtype names are
+  case-insensitive.
+
+So when the bytes are valid UTF-8 and, after one leading BOM and leading and
+trailing HTTP whitespace are removed, equal `application/epub+zip` ASCII
+case-insensitively, the entry already names the EPUB media type, and only its
+spelling is wrong.
+
+**Fix** (`fix.mimetype_content`, ConfirmNeeded). Write the entry's content as
+exactly the 20 bytes `application/epub+zip`. Its place in the archive and its
+compression are not changed: a `mimetype` that is also not first, compressed
+or carrying an extra field is `fix.mimetype_packaging`'s finding, and the two
+compose (the re-emission writes the new bytes).
+
+**When it declines.**
+- Anything else, such as `application/epub` or `application/zip`: another
+  media type. Writing `application/epub+zip` would assert what the file is,
+  as with a missing `mimetype` (see above).
+- A value with parameters (`application/epub+zip; charset=utf-8`), or any
+  other character inside it: not the exact string, and not a spelling of it
+  that this reading covers.
+- Bytes that are not valid UTF-8, or a second BOM.
+- No `mimetype` entry.
+
+**Measured (2026-11-22, A/B against `68deea9` on 562 shelf books + *Past
+Masters 279* + 696 epub-test-books sets at `8049bd2`, every fix approved).**
+0 on the shelf. Seven sets change and nothing else: BOM, leading space and
+trailing newline in EPUB 2 and EPUB 3, and uppercase in EPUB 2. Each ends
+with no finding, and its `mimetype` is the 20 bytes, first and stored. The
+two `mimetype-wrong-value` sets (`application/epub`) are declined and keep
+their one error. 9 mutations of the guards (the rule, the BOM, the
+whitespace set, case, the exact-entry check, the registration): every one
+makes a test fail.
 
 ---
 
