@@ -3315,11 +3315,13 @@ fn body_link_drops(
     }
     let body_path = xhtml_element_path(body)?;
 
-    // Case 2 and case 3 do not depend on the attribute, so ask once.
+    // Case 2 does not depend on the attribute; case 4 asks each one in its
+    // own link states.
     let links = possible_links(&doc);
-    let colours_nothing = links
-        .as_ref()
-        .map(|links| links.is_empty() || every_link_coloured(ws, doc_name, &doc, links));
+    let coloured = match &links {
+        Some(links) if !links.is_empty() => coloured_link_attrs(ws, doc_name, &doc, links, attrs),
+        _ => BTreeSet::new(),
+    };
 
     let mut drops = Vec::new();
     for &name in attrs {
@@ -3329,7 +3331,10 @@ fn body_link_drops(
         else {
             continue;
         };
-        if is_not_a_legacy_colour(attr.value()) || colours_nothing == Some(true) {
+        let colours_nothing = links
+            .as_ref()
+            .is_some_and(|l| l.is_empty() || coloured.contains(name));
+        if is_not_a_legacy_colour(attr.value()) || colours_nothing {
             drops.push((
                 name,
                 attr_span_with_leading_space(text, prepared.unshift(attr.range())),
@@ -3374,8 +3379,11 @@ fn possible_links<'a, 'i>(
     Some(links)
 }
 
-/// Case 3: whether author CSS certainly sets `color` on every link
-/// (styloria's cascade, `Yes`).
+/// Cases 3 and 4: which of `attrs` author CSS overrides on every link, in
+/// every state that attribute's hint applies to (styloria's cascade, `Yes`
+/// for `color`; [`LinkState`]). Case 3 is the same question with the states
+/// unknown, and the answer is monotone, so asking with the states known
+/// keeps every case 3 `Yes`.
 ///
 /// **Only a false `Yes` is a risk, and only a sheet we count but the reader
 /// may not apply can make one.** The hint sits below the author origin, so a
@@ -3388,12 +3396,13 @@ fn possible_links<'a, 'i>(
 /// `conditional`, which turns its rules' answers into `Unknown`. `false`
 /// (decline) on a counted sheet that does not decode losslessly, which could
 /// be misread into a `color` it does not hold.
-fn every_link_coloured(
+fn coloured_link_attrs(
     ws: &Workspace,
     doc_name: &str,
     doc: &roxmltree::Document,
     links: &[roxmltree::Node],
-) -> bool {
+    attrs: &[&'static str],
+) -> BTreeSet<&'static str> {
     const XHTML: &str = "http://www.w3.org/1999/xhtml";
     let conditional = |n: roxmltree::Node| {
         n.attr_no_ns("media").is_some_and(|m| {
@@ -3429,7 +3438,7 @@ fn every_link_coloured(
                 continue;
             }
             if !ws.text_round_trips(&name) {
-                return false;
+                return BTreeSet::new();
             }
             let Some(css) = ws.get_text(&name) else {
                 continue; // not in the book: we cannot read it, and need not
@@ -3450,16 +3459,159 @@ fn every_link_coloured(
         })
         .collect();
     let cascade = styloria::Cascade::new(&sheets);
-    links.iter().all(|link| {
-        let inline = link
-            .attr_no_ns("style")
-            .map(|s| styloria::parse_block_contents(s).0);
-        cascade
-            .style_for(&StyledNode(*link), inline.as_deref())
-            .property("color")
-            .status
-            == styloria::Match::Yes
-    })
+    let inline: Vec<_> = links
+        .iter()
+        .map(|link| {
+            link.attr_no_ns("style")
+                .map(|s| styloria::parse_block_contents(s).0)
+        })
+        .collect();
+    attrs
+        .iter()
+        .copied()
+        .filter(|&attr| {
+            LinkState::for_attr(attr).iter().all(|&state| {
+                links.iter().zip(&inline).all(|(link, inline)| {
+                    let node = StatedNode {
+                        node: *link,
+                        state,
+                        subject: link.id(),
+                    };
+                    cascade
+                        .style_for(&node, inline.as_deref())
+                        .property("color")
+                        .status
+                        == styloria::Match::Yes
+                })
+            })
+        })
+        .collect()
+}
+
+/// The state of a link that one of `<body>`'s attributes colours (HTML
+/// §15.3.2): `link` the unvisited ones, `vlink` the visited, `alink` the
+/// active ones, visited or not.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum LinkState {
+    Unvisited,
+    Visited,
+    ActiveUnvisited,
+    ActiveVisited,
+}
+
+impl LinkState {
+    fn for_attr(attr: &str) -> &'static [LinkState] {
+        match attr {
+            "link" => &[LinkState::Unvisited],
+            "vlink" => &[LinkState::Visited],
+            _ => &[LinkState::ActiveUnvisited, LinkState::ActiveVisited],
+        }
+    }
+    fn visited(self) -> bool {
+        matches!(self, LinkState::Visited | LinkState::ActiveVisited)
+    }
+    fn active(self) -> bool {
+        matches!(self, LinkState::ActiveUnvisited | LinkState::ActiveVisited)
+    }
+}
+
+/// What an element is to `:link` and `:visited`: a link by HTML or SVG, an
+/// element with an `href` some other specification might make a link, or no
+/// link at all.
+#[derive(PartialEq, Eq)]
+enum LinkKind {
+    Link,
+    Maybe,
+    NotLink,
+}
+
+fn link_kind(n: roxmltree::Node) -> LinkKind {
+    const XHTML: &str = "http://www.w3.org/1999/xhtml";
+    const SVG: &str = "http://www.w3.org/2000/svg";
+    const XLINK: &str = "http://www.w3.org/1999/xlink";
+    let href = n.attr_no_ns("href").is_some();
+    let xlink = n.attribute((XLINK, "href")).is_some();
+    let html_link = href && (n.has_tag_name((XHTML, "a")) || n.has_tag_name((XHTML, "area")));
+    let svg_link = (href || xlink) && n.has_tag_name((SVG, "a"));
+    if html_link || svg_link {
+        LinkKind::Link
+    } else if href || xlink {
+        LinkKind::Maybe
+    } else {
+        LinkKind::NotLink
+    }
+}
+
+/// An element asked about in one [`LinkState`]: every link of the document
+/// is in that state, and `subject` is the link the question is about, the one
+/// that is active in the `alink` states. The table is in `docs/FIXERS.md`.
+#[derive(Clone, Copy)]
+struct StatedNode<'a, 'i> {
+    node: roxmltree::Node<'a, 'i>,
+    state: LinkState,
+    subject: roxmltree::NodeId,
+}
+
+impl<'a, 'i> StatedNode<'a, 'i> {
+    fn with(&self, node: Option<roxmltree::Node<'a, 'i>>) -> Option<Self> {
+        node.map(|node| StatedNode { node, ..*self })
+    }
+}
+
+impl styloria::Element for StatedNode<'_, '_> {
+    fn parent(&self) -> Option<Self> {
+        self.with(self.node.parent_element())
+    }
+    fn prev_sibling(&self) -> Option<Self> {
+        self.with(self.node.prev_sibling_element())
+    }
+    fn next_sibling(&self) -> Option<Self> {
+        self.with(self.node.next_sibling_element())
+    }
+    fn has_children(&self) -> bool {
+        StyledNode(self.node).has_children()
+    }
+    fn local_name(&self) -> &str {
+        self.node.tag_name().name()
+    }
+    fn namespace(&self) -> Option<&str> {
+        self.node.tag_name().namespace()
+    }
+    fn attribute(&self, local_name: &str) -> Option<&str> {
+        self.node
+            .attributes()
+            .find(|a| a.namespace().is_none() && a.name() == local_name)
+            .map(|a| a.value())
+    }
+    fn attribute_ns(&self, namespace_uri: &str, local_name: &str) -> Option<&str> {
+        self.node.attribute((namespace_uri, local_name))
+    }
+    fn is_html_document(&self) -> bool {
+        false
+    }
+    fn pseudo_class(&self, name: &str) -> styloria::Match {
+        use styloria::Match;
+        let kind = link_kind(self.node);
+        match name {
+            "link" | "visited" | "any-link" => match kind {
+                LinkKind::NotLink => Match::No,
+                LinkKind::Maybe => Match::Unknown,
+                LinkKind::Link => match name {
+                    "link" => Match::from(!self.state.visited()),
+                    "visited" => Match::from(self.state.visited()),
+                    _ => Match::Yes,
+                },
+            },
+            "active"
+                if self.state.active()
+                    && kind == LinkKind::Link
+                    && self.node.id() == self.subject =>
+            {
+                Match::Yes
+            }
+            _ => Match::Unknown,
+        }
+    }
 }
 
 /// Whether anything in the book can make a box float, or a file that would
@@ -13958,7 +14110,7 @@ mod tests {
         for css in [
             b"p { margin: 0 }" as &[u8],
             b"body { color: black }", // inherited only: the hint wins on `a`
-            b"a:link { color: blue }", // the state is not known (case 4)
+            b"a:link:hover { color: blue }", // hover is not known
             b"a:hover { color: blue }",
             b"@media print { a { color: blue } }",
             b"a { colr: blue }",
@@ -14009,6 +14161,202 @@ mod tests {
             );
             assert!(link_fix(&ws).is_none(), "{why}");
         }
+    }
+
+    /// Which of the `<body>`'s `link`, `vlink`, `alink` the fixer keeps,
+    /// asked of `body_link_drops` directly, so one table covers every
+    /// selector without a detector run per row.
+    /// `link_colors_alink_is_dropped_through_the_detector` covers the path
+    /// from the finding.
+    fn link_attrs_left(css: &[u8], body: &str) -> Vec<&'static str> {
+        let ws = br_book(css, "", body, &[]);
+        let text = ws.get_text("c.xhtml").unwrap();
+        let dropped: Vec<&str> = body_link_drops(&ws, "c.xhtml", &text, &BODY_LINK_ATTRS)
+            .map(|(_, d)| d.into_iter().map(|(a, _)| a).collect())
+            .unwrap_or_default();
+        let tag = &body[..body.find('>').unwrap()];
+        BODY_LINK_ATTRS
+            .into_iter()
+            .filter(|a| tag.contains(&format!(" {a}=")) && !dropped.contains(a))
+            .collect()
+    }
+
+    /// Case 4: the CSS colours links by state. Each attribute is asked in
+    /// the states its hint applies to: `link` unvisited, `vlink` visited,
+    /// `alink` active, visited or not.
+    #[test]
+    fn link_colors_are_dropped_by_link_state() {
+        let all = LINK_BODY_A.replace(r#"vlink="purple""#, r#"vlink="purple" alink="red""#);
+        for (css, left) in [
+            // Doitsu's table of contents: both classes on every link.
+            (
+                b".pcalibre:link { color: blue } .pcalibre1:visited { color: purple }" as &[u8],
+                vec![],
+            ),
+            (b"a:link { color: blue }", vec!["vlink", "alink"]),
+            (b"a:visited { color: blue }", vec!["link", "alink"]),
+            (b"a:not(:visited) { color: blue }", vec!["vlink", "alink"]),
+            (b":any-link { color: blue }", vec![]),
+            (b"a:active { color: blue }", vec!["link", "vlink"]),
+            (
+                b"a:link:active { color: blue }",
+                vec!["link", "vlink", "alink"],
+            ),
+            (b"a:link, a:visited { color: blue }", vec![]),
+            (b"p a:link { color: blue }", vec!["vlink", "alink"]),
+            (
+                b"p:active a { color: blue }",
+                vec!["link", "vlink", "alink"],
+            ),
+            (
+                b"a:link:hover { color: blue }",
+                vec!["link", "vlink", "alink"],
+            ),
+        ] {
+            let body = all.replace(r#"class="k""#, r#"class="calibre1 pcalibre pcalibre1""#);
+            assert_eq!(
+                link_attrs_left(css, &body),
+                left,
+                "{}",
+                String::from_utf8_lossy(css)
+            );
+        }
+        // An element with no `href` is no link in any state, so
+        // `:not(:any-link)` matches it.
+        assert_eq!(
+            link_attrs_left(b"p:not(:any-link) a { color: blue }", &all),
+            Vec::<&str>::new()
+        );
+        // `:active` is only the link asked about: the link before it may
+        // or may not be active.
+        let two = all.replace(
+            r#"<p><a href="c.xhtml#x" class="k" id="y">one</a></p>"#,
+            r#"<p><a href="c.xhtml#x">one</a><a href="c.xhtml#x">two</a></p>"#,
+        );
+        assert_eq!(
+            link_attrs_left(b"a:first-child, a:active + a { color: blue }", &two),
+            vec!["link", "vlink", "alink"]
+        );
+        // Through the detector, Doitsu's shape loses both attributes.
+        let ws = br_book(
+            b".pcalibre:link { color: blue } .pcalibre1:visited { color: purple }",
+            "",
+            &LINK_BODY_A.replace(r#"class="k""#, r#"class="calibre1 pcalibre pcalibre1""#),
+            &[],
+        );
+        let text = apply_link_fix(ws);
+        assert!(!text.contains(" link=") && !text.contains("vlink="));
+        // Off a link, `:link` matches nothing in any state: a rule for a
+        // `<p>` does not colour the link.
+        assert_eq!(
+            link_attrs_left(b"p:link, p:visited, p:any-link { color: blue }", &all),
+            vec!["link", "vlink", "alink"]
+        );
+        // An SVG `<a>` is a link too.
+        let svg = LINK_BODY.replace(
+            r#"<p class="k">one</p>"#,
+            r##"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1" height="1"><a xlink:href="#x"><rect width="1" height="1"/></a></svg>"##,
+        );
+        assert_eq!(
+            link_attrs_left(b"a:link { color: blue }", &svg),
+            vec!["vlink"]
+        );
+        // An `<area href>` is a link.
+        let area = LINK_BODY.replace(
+            r#"<p class="k">one</p>"#,
+            r##"<map id="m" name="m"><area href="#x" alt="x" shape="default"/></map>"##,
+        );
+        assert_eq!(
+            link_attrs_left(b"area:link { color: blue }", &area),
+            vec!["vlink"]
+        );
+        // The state reaches the ancestors too: the inner link matches
+        // `a:link a` only if the outer one is unvisited as well.
+        let nested = LINK_BODY.replace(
+            r#"<p class="k">one</p>"#,
+            r##"<p><a href="#x"><span><a href="#y">in</a></span></a></p>"##,
+        );
+        assert_eq!(
+            link_attrs_left(b"p > a:link, a:link a { color: blue }", &nested),
+            vec!["vlink"]
+        );
+        // An element with `href` that no specification we know makes a link
+        // is asked too, and its state is not known.
+        let odd = LINK_BODY_A.replace(r#"<p id="x">"#, r##"<p id="x" href="#y">"##);
+        assert_eq!(
+            link_attrs_left(b"a:link, p:link { color: blue }", &odd),
+            vec!["link", "vlink"]
+        );
+        assert_eq!(
+            link_attrs_left(b"a:link, p { color: blue }", &odd),
+            vec!["vlink"]
+        );
+        assert_eq!(
+            link_attrs_left(b"a:link, p:not(:link) { color: blue }", &odd),
+            vec!["link", "vlink"]
+        );
+        let odd_a = odd.replace(r#"vlink="purple""#, r#"vlink="purple" alink="red""#);
+        assert_eq!(
+            link_attrs_left(b"a:active, p:active { color: blue }", &odd_a),
+            vec!["link", "vlink", "alink"]
+        );
+    }
+
+    /// Since epubveri 0.49.0 `alink` is `htm.obsolete_attribute` too, so the
+    /// proposal reaches it: with no link (case 2), and with CSS that colours
+    /// the link in every active state (case 4), it goes with the other two
+    /// and no finding is left. With CSS that colours only the active states,
+    /// `alink` alone goes.
+    #[test]
+    fn link_colors_alink_is_dropped_through_the_detector() {
+        let with_alink =
+            |body: &str| body.replace(r#"vlink="purple""#, r#"vlink="purple" alink="red""#);
+        let reported = |ws: &Workspace| -> Vec<String> {
+            let mut v: Vec<String> = ws
+                .detect()
+                .unwrap()
+                .messages
+                .into_iter()
+                .filter(|m| m.rule == CLEAR)
+                .filter_map(|m| m.params.first().cloned())
+                .collect();
+            v.sort();
+            v
+        };
+
+        let mut ws = br_book(b"p { margin: 0 }", "", &with_alink(LINK_BODY), &[]);
+        assert_eq!(reported(&ws), ["alink", "link", "vlink"]);
+        link_fix(&ws).expect("proposed").apply(&mut ws);
+        assert!(!ws.get_text("c.xhtml").unwrap().contains("link="));
+        assert!(reported(&ws).is_empty());
+
+        let css: &[u8] = b"a:link, a:visited, a:active { color: blue }";
+        let mut ws = br_book(css, "", &with_alink(LINK_BODY_A), &[]);
+        link_fix(&ws).expect("proposed").apply(&mut ws);
+        assert!(!ws.get_text("c.xhtml").unwrap().contains("link="));
+        assert!(reported(&ws).is_empty());
+
+        // CSS that colours only the active states: `alink` alone goes, and
+        // `link` and `vlink` stay reported.
+        let mut ws = br_book(
+            b"a:active { color: blue }",
+            "",
+            &with_alink(LINK_BODY_A),
+            &[],
+        );
+        link_fix(&ws).expect("proposed").apply(&mut ws);
+        let text = ws.get_text("c.xhtml").unwrap();
+        assert!(
+            text.contains(r#"<body lang="EN-US" link="blue" vlink="purple" class="calibre">"#),
+            "{text}"
+        );
+        assert_eq!(reported(&ws), ["link", "vlink"]);
+        // An unvisited link may be active, so `:not(:active)` decides nothing
+        // in the `link` and `vlink` states, and the active states are left
+        // uncoloured: all three stay and nothing is proposed.
+        let css: &[u8] = b"a:link:not(:active), a:visited:not(:active) { color: blue }";
+        let ws = br_book(css, "", &with_alink(LINK_BODY_A), &[]);
+        assert!(link_fix(&ws).is_none());
     }
 
     /// Case 2 does not read the CSS: with no link, a sheet case 3 would

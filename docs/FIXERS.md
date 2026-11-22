@@ -1510,8 +1510,9 @@ approved, A/B against `3fe8eb0`).**
 
 ## RSC-005 — `link`, `vlink` or `alink` on `<body>` that colours nothing
 
-> **Status (2026-11-21):** cases 1–3 are built (Baris, 2026-11-21). Case 4
-> waits on styloria: we asked it by note for a state-aware match the same day.
+> **Status (2026-11-22):** cases 1–4 are built (Baris, 2026-11-21). Case 4
+> needs styloria 0.23.0 (`Element::pseudo_class`); `alink` reaches the fixer
+> through the detector since epubveri 0.49.0.
 
 **Finding.** `htm.obsolete_attribute`, `params[0]` ∈ {`link`, `vlink`,
 `alink`}, `element_path` ending in `/h:body[1]/@link` (`@vlink`, `@alink`):
@@ -1625,7 +1626,7 @@ This asks styloria's `Cascade` (0.21): for each link element,
 0 on the shelf (2026-11-21). The shelf's one document with links needs
 case 4.
 
-**Case 4: the author CSS colours links by state** (needs styloria).
+**Case 4: the author CSS colours links by state** (styloria 0.23).
 calibre turns `link`/`vlink` into rules and keeps the attributes. In
 *Past Masters 279*'s table of contents:
 
@@ -1637,18 +1638,43 @@ unvisited link matches `.pcalibre:link`, so `link="blue"` never decides its
 colour. A visited one matches `.pcalibre1:visited`, so `vlink="purple"`
 never decides either. Both attributes colour nothing. styloria 0.21
 answers `:link` and `:visited` `Unknown`, because it cannot know a link's
-state, so case 3 declines this document.
+state, so case 3 alone declines this document.
 
 The question we need answered is narrower than "is this link visited?". For
 `link`, the hint applies only to a link that matches `:link`. So we ask the
-cascade **given that the link is unvisited**: `:link` matches, `:visited`
-does not, and `:hover`/`:active`/`:focus` stay `Unknown`. The same holds for
-`vlink`, given that the link is visited. For `alink` the state is "active,
-visited or not", so `alink` needs `Yes` under both visited states. This needs
-a way to tell styloria's matcher a link's state. A sketch would be an
-`Element` method returning `Option<bool>` for `:link`/`:visited`, with a
-default of `None`, which is today's behaviour. That is styloria's API to
-design. We would ask by note, with Baris's yes.
+cascade **given that the link is unvisited**. The same holds for `vlink`,
+given that the link is visited. For `alink` the hint applies to a link that
+matches `:active` and `:link` or `:visited`, so `alink` needs `Yes` given
+an active unvisited link and given an active visited one.
+
+styloria 0.23 lets the caller answer such pseudo-classes
+(`Element::pseudo_class`, asked on every element the matcher walks to). We
+ask each link once per state, with every element of the document answering
+for that state:
+
+| element | `link` | `visited` | `any-link` | `active` |
+|---|---|---|---|---|
+| XHTML `a`/`area` with `href`, SVG `a` with `href` or `xlink:href` | the state | the state | `Yes` | `Yes` on the link asked about, in the `alink` states |
+| any other element with `href` or `xlink:href` | `Unknown` | `Unknown` | `Unknown` | `Unknown` |
+| an element with neither | `No` | `No` | `No` | `Unknown` |
+
+Everything else (`:hover`, `:focus`, unknown and vendor names) is
+`Unknown`, and so is `active` anywhere it is not marked `Yes` above: HTML
+lets an active element's ancestors match `:active` too, and we do not decide
+which.
+
+- The middle row is the one that keeps this safe. Case 2 counts an element
+  with `href` in any namespace as a possible link, so such an element is
+  asked here too, and to it neither state is known. A rule that colours it
+  only through `:link` then answers `Unknown`, and the document declines.
+- **Case 3 is the same question with every state `Unknown`**, so it is kept
+  inside case 4: styloria's three-valued answer is monotone, so a `Yes` with
+  the states unknown stays `Yes` once they are known. We ask only the state
+  questions, and a case 3 document still gets its `Yes`.
+- The state answers are ours to keep consistent: `link` and `visited` are
+  never both `Yes` for one element.
+- Browsers apply only colour properties through `:visited`. We ask about
+  `color`, so that restriction changes nothing here.
 
 ### When it declines
 
@@ -1707,6 +1733,42 @@ body, `<script>`, the linked sheets).
   wraps the body's text in a `<div>`. The body is found by name, so this
   fix applies after it.
 - 21 mutations of the guards and branches: every one makes a test fail.
+
+**Case 4 measured (2026-11-22, epubveri 0.48.0, styloria `e72451d` by path
+patch, 562 shelf books + *Past Masters 279* + 688 epub-test-books v0.9.1
+sets, every fix approved, A/B against the same build without case 4).**
+
+- One book changes: *Past Masters 279*. Its TOC (`split_001`, 23 links)
+  loses ` link="blue" vlink="purple"`, and the book goes from 99 errors to
+  none (`repair -y`, goal `valid` met; 25 PKG-010 warnings stay). Nothing
+  else moves in any of the 1,251 books, so no case 3 answer was lost.
+- `alink` is not reached through the detector: epubveri 0.48.0 reports it as
+  `opf.content_document.schema_violation`, not `htm.obsolete_attribute`
+  (its `OBSOLETE_GLOBAL_ATTRS` holds `link`, `vlink`, `clear`). The `alink`
+  states are tested through `body_link_drops` directly. 0 `alink` on the
+  shelf.
+- 16 mutations of the case 4 branches (the state table, `LinkState`,
+  `link_kind`, the ancestor state): every one makes a test fail.
+
+**On the released crates (2026-11-22, epubveri 0.49.0, styloria 0.23.0, 562
+shelf books + *Past Masters 279* + 696 epub-test-books sets at `8049bd2`,
+every fix approved, A/B against `813dbe5`: epubveri 0.48.0, styloria 0.22,
+no case 4).**
+
+- Plan, outcome and repaired bytes change in one book of 1,259: *Past
+  Masters 279*, as above (its last 2 `htm.obsolete_attribute` go; after
+  repair only the 25 PKG-010 warnings are left).
+- epubveri 0.49.0 reports `alink`, `text`, `bgcolor` and `background` as
+  `htm.obsolete_attribute`. On the shelf this moves 12 `<body text>` findings
+  in two books from `opf.content_document.schema_violation`, same count. The fixer reads only
+  `link`, `vlink` and `alink`, and neither book's plan or bytes change.
+  The other census moves are new 0.49.0 findings in 6 test sets
+  (`xml.encoding.invalid_utf8`, `opf.encoding.invalid_utf8`,
+  `htm.microdata.itemprop_outside_every_item`) that no fixer reads.
+- `alink` through the detector: `link_colors_alink_is_dropped_through_the_detector`.
+  An unvisited link may be active, so `:link:not(:active)` decides nothing:
+  the `link` state leaves `active` unknown, as HTML's `link` hint applies to
+  every `:link`, active or not. 0 `alink` on the shelf.
 
 ---
 

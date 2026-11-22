@@ -494,18 +494,30 @@ members = ["epubsana-wasm"]
 # book's 29 Adobe `<meta name="Adept.resource" value>`, now also
 # `htm.meta.missing_content`, which `fix.adept_meta_value` already clears.
 #
+# **0.49.0 (2026-11-22), taken with styloria 0.23 (its own requirement, and
+# ours: `Element::pseudo_class` for `fix.body_link_colors` case 4); zip stays
+# 9.7.0, as in its tag's lock (R19).** `alink`, `text`, `bgcolor` and
+# `background` move from `opf.content_document.schema_violation` to
+# `htm.obsolete_attribute` (our question), so `fix.body_link_colors` now
+# receives `alink`. Measured on 562 books plus *Past Masters 279* and 696
+# epub-test-books sets (`813dbe5` vs this, census keyed by severity): plan,
+# outcome and repaired-byte hash change only in *Past Masters 279* (case 4:
+# its TOC, 99 errors to 0). The census moves where the release note says: 12
+# `<body text>` in two shelf books change key at the same count, and 6 test
+# sets get new 0.49.0 findings no fixer reads.
+#
 # For local co-development of epubveri, add an uncommitted override:
 #   [patch.crates-io] epubveri = { path = "../epubveri" }
-epubveri = "0.48.0"
+epubveri = "0.49.0"
 # CSS, located: the family's own parser, taken directly as a peer (Baris,
 # 2026-10-18; epubveri will not re-export it). Two conditions. **One styloria
-# in the lock**: the requirement is epubveri's own (`0.22`), so the text we
+# in the lock**: the requirement is epubveri's own (`0.23`), so the text we
 # parse is the text it parsed, and `scripts/preflight.sh` fails on any
 # duplicate in `cargo tree -d`. **styloria locates, it never decides**: which
 # url is missing or which id is invalid is still epubveri's finding; styloria
 # only says where a rule is, which selectors name an id, and how to decode and
 # re-encode a stylesheet byte for byte. None of its types is in our public API.
-styloria = "0.22"
+styloria = "0.23"
 # Pure-Rust only (no C deps), same philosophy as epubveri: zip's "deflate"
 # feature uses zlib-rs (Rust); bzip2/zstd (C) stay disabled.
 # Aligned to epubveri's zip — the family shares one zip version because

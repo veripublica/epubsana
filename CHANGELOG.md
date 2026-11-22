@@ -17,14 +17,19 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
   older calibre and Word conversions) where they colour nothing. Each only
   sets the colour of the document's links. So it does nothing in a document
   with no link, with a value that is not a colour, or where the book's own CSS
-  already colours every link. A link coloured only by state (`a:link`,
-  `a:visited`) is left alone for now.
+  already colours every link. CSS that colours links by state counts for
+  the states each attribute colours: `link` the unvisited links, `vlink` the
+  visited ones, `alink` the active ones. So `a:link { color: blue }` lets
+  `link` go and keeps `vlink`.
 
 ### Changed
 
-- epubveri 0.48.0 and styloria 0.22. On the books we measure, nothing epubsana
-  proposes or writes changes. A `direction` declaration the parsed style sheet
-  drops no longer draws CSS-001, so `fix.css_direction_ltr` no longer sees it.
+- epubveri 0.49.0 and styloria 0.23. A `direction` declaration the parsed
+  style sheet drops no longer draws CSS-001, so `fix.css_direction_ltr` no
+  longer sees it. `alink`, `text`, `bgcolor` and `background` are now reported
+  as `htm.obsolete_attribute`, like `link` and `vlink`, so
+  `fix.body_link_colors` now receives `alink`. It still leaves `text`,
+  `bgcolor` and `background` alone.
 
 ### Fixed
 
