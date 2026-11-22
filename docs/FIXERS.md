@@ -36,7 +36,7 @@ grows one carefully-argued entry at a time.
 | `RSC-020` | `opf.content_document.malformed_absolute_url` (an email address) | ConfirmNeeded | A link is `http://name%40domain` and its text is `name@domain` | [Point it at `mailto:name@domain`](#rsc-020--an-email-address-written-as-a-web-address) |
 | `CSS-001` | *(none)* | ConfirmNeeded | A stylesheet says `direction: ltr` in an EPUB 3 book where nothing can set another direction | [Delete the declaration](#css-001--direction-ltr-where-nothing-sets-another-direction) |
 | `OPF-014` | `opf.content_document.property_used_undeclared` | AutoSafe | A content document uses a feature its manifest item doesn't declare | [Add the token to that item's `properties`](#opf-014--undeclared-content-property) |
-| `PKG-006` / `PKG-005` | *(none)* | AutoSafe | The `mimetype` entry is not first in the ZIP, or its header carries an extra field | [Re-emit it first and stored, touching no content](#pkg-006--pkg-005--the-mimetype-entrys-packaging) |
+| `PKG-006` / `PKG-007` / `PKG-005` | *(none)* / `ocf.mimetype.not_stored_uncompressed` / *(none)* | AutoSafe | The `mimetype` entry is not first in the ZIP, is compressed, or its header carries an extra field | [Re-emit it first and stored, touching no content](#pkg-006--pkg-007--pkg-005--the-mimetype-entrys-packaging) |
 | `PKG-014` | *(none)* | AutoSafe | A ZIP directory entry has nothing inside it | [Leave the entry out of the archive](#pkg-014--an-empty-directory-entry) |
 | `RSC-005` | `opf.content_document.schema_violation` (stray text / inline element / incomplete content, in `<body>` or `<blockquote>`) | ConfirmNeeded | EPUB 2 text or inline elements sit where the grammar requires block content | [Wrap each run in one `<div>`, leaving whitespace alone](#rsc-005--non-block-content-in-body-or-blockquote-epub-2) |
 | `RSC-001` | `opf.manifest_item.missing_resource` | ConfirmNeeded | A manifest `<item>` declares a resource the container doesn't hold | [Drop the item, and every reference that named it](#rsc-001--dangling-manifest-item) |
@@ -588,7 +588,7 @@ proposal each, applied, none reverted, and no other line differs. After
 Geceleri*); this was their last error. *Dahi Diktatör* keeps an empty
 `dc:identifier`. No reader opened the links.
 
-## PKG-006 / PKG-005 — the `mimetype` entry's packaging
+## PKG-006 / PKG-007 / PKG-005 — the `mimetype` entry's packaging
 
 **Finding.** `PKG-006` (no `rule` sub-code — the code is unambiguous on its own,
 and its subject is the container itself, so there is nothing to disambiguate).
@@ -596,13 +596,21 @@ The archive has a `mimetype` entry, but it is not the first one. OCF requires th
 `mimetype` entry to come first and to be stored uncompressed, so that a reader
 can identify the file by reading its opening bytes.
 
+`PKG-007` / `ocf.mimetype.not_stored_uncompressed`: the `mimetype` entry is
+first, but compressed. EPUB 3.3 §4.3.3: "EPUB creators MUST NOT compress or
+encrypt the `mimetype` file"; OCF 2.0.1 says the same. epubveri reports it only
+when the entry is first; one that is neither first nor stored is `PKG-006`.
+`PKG-007` has a second rule, `ocf.mimetype.wrong_content`, for the entry's
+bytes; this fix does not read it (see below).
+
 `PKG-005` (also no `rule`): the `mimetype` entry is first, but its ZIP header
 carries an extra field, so its contents do not sit at the fixed offset a reader
 looks at. On the test shelf it is a 36-byte field in eight books.
 
 **Fix** (`fix.mimetype_packaging`, AutoSafe). Re-emit the `mimetype` entry first
 and stored, with its own header fields but no local extra field. One edit
-repairs both findings; when both are present the proposal names `PKG-006`.
+repairs all three findings; the proposal names the largest change present:
+`PKG-006`, then `PKG-007`, then `PKG-005`.
 Every other entry keeps its original order, bytes, headers and compression.
 
 **`PKG-005` was invisible until 0.22.0, and that was a bug, not a decline.** The
@@ -620,7 +628,18 @@ is about, and OCF permits exactly one correct answer: first, and stored. Nothing
 inside the book can be corrupted by it because nothing inside the book is read or
 rewritten.
 
-**When it declines.** If the archive has no `mimetype` entry at all, there is
+**`PKG-007` measured (2026-11-22).** 0 on the 562-book shelf. epub-test-books
+has two sets, `epub-2.0.1/ocf/Section4/mimetype-compressed` and
+`epub-3.3/ocf/sec-zip-container-mime/mimetype-compressed`, each with this one
+error. epubcheck 5.4.0 reports neither: it compares the inflated contents
+only. A/B against `4896764` on those 1,259 books (562 shelf + *Past Masters
+279* + 696 sets at `8049bd2`, every fix approved): only the two sets change,
+both end with no finding, and the repaired `mimetype` is first, stored, 20
+bytes. 5 mutations of the new branches: every one makes a test fail.
+
+**When it declines.** A `mimetype` whose *bytes* are wrong
+(`ocf.mimetype.wrong_content`) is not this fix: the re-emission writes the
+bytes unchanged, so it would still be reported. If the archive has no `mimetype` entry at all, there is
 nothing to move — epubsana will not create one, because inventing a mimetype is
 asserting what the file *is* rather than repairing how it is packaged.
 

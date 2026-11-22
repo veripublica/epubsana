@@ -181,6 +181,7 @@ pub fn handled_rules() -> &'static [&'static str] {
         "ncx.schema_violation",
         "ncx.uid.package_identifier_mismatch",
         "ocf.mimetype.not_first_entry",
+        "ocf.mimetype.not_stored_uncompressed",
         "opf.content_document.dangling_fragment",
         "opf.content_document.duplicate_id",
         "opf.content_document.empty_title",
@@ -10174,15 +10175,29 @@ fn plan_empty_nav_drops(text: &str) -> Option<Vec<MetaEdit>> {
 /// Through 0.3.2 the writer did this unconditionally, repairing the defect as a
 /// side effect of producing output — no proposal, no approval. The writer now
 /// preserves packaging, and this proposes the repair in the open.
+/// `PKG-007`'s rule for a `mimetype` entry that is first but compressed.
+const MIMETYPE_NOT_STORED: &str = "ocf.mimetype.not_stored_uncompressed";
+
 fn mimetype_packaging(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
-    // PKG-006 (not first) and PKG-005 (an extra field in its ZIP header) are
-    // repaired by the same edit: re-emit `mimetype` first, stored, with its own
-    // header fields but no local extra field. PKG-006 leads when both
-    // are present, since moving the entry is the larger change.
-    let id = ["PKG-006", "PKG-005"]
-        .into_iter()
-        .find(|id| report.messages.iter().any(|m| m.id == *id));
-    let Some(id) = id else {
+    // PKG-006 (not first), PKG-007 `not_stored_uncompressed` (first but
+    // compressed) and PKG-005 (an extra field in its ZIP header) are repaired
+    // by the same edit: re-emit `mimetype` first, stored, with its own header
+    // fields but no local extra field. The largest change present leads.
+    // PKG-007's other rule, `wrong_content`, is about the bytes, which this
+    // edit writes unchanged, so it is not read here.
+    let id = [
+        ("PKG-006", None),
+        ("PKG-007", Some(MIMETYPE_NOT_STORED)),
+        ("PKG-005", None),
+    ]
+    .into_iter()
+    .find(|(id, rule)| {
+        report
+            .messages
+            .iter()
+            .any(|m| m.id == *id && rule.is_none_or(|r| m.rule == Some(r)))
+    });
+    let Some((id, rule)) = id else {
         return Vec::new();
     };
     // Nothing to move — and we will not invent a mimetype, since that asserts
@@ -10195,6 +10210,11 @@ fn mimetype_packaging(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
             "Move the `mimetype` entry first in the container, stored uncompressed",
             "move to the first entry in the ZIP and store it uncompressed (contents unchanged)",
         )
+    } else if id == "PKG-007" {
+        (
+            "Store the `mimetype` entry uncompressed",
+            "store the entry uncompressed, still first (contents unchanged)",
+        )
     } else {
         (
             "Rewrite the `mimetype` entry's ZIP header without its extra field",
@@ -10205,8 +10225,8 @@ fn mimetype_packaging(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
     vec![ProposedFix {
         fix_id: "fix.mimetype_packaging",
         addresses_id: id.to_string(),
-        addresses_rule: None,
-        addresses_severity: addressed_severity(report, id, None),
+        addresses_rule: rule,
+        addresses_severity: addressed_severity(report, id, rule),
         tier: Tier::AutoSafe,
         title: title.to_string(),
         rationale: "OCF requires the `mimetype` entry to be the archive's first entry, stored \
@@ -12288,6 +12308,119 @@ mod tests {
         let fixes = mimetype_packaging(&r, &ws);
         assert_eq!(fixes.len(), 1);
         assert_eq!(fixes[0].addresses_id, "PKG-006");
+    }
+
+    /// `br_book`'s container with `mimetype` still first but compressed
+    /// with `method`; every other entry is copied as it is.
+    fn mimetype_first_with(method: zip::CompressionMethod) -> Workspace {
+        use std::io::{Read, Write};
+        let src = br_book(b"p { margin: 0 }", "", "<body><p>one</p></body>", &[])
+            .serialize()
+            .unwrap();
+        let mut a = zip::ZipArchive::new(std::io::Cursor::new(src)).unwrap();
+        let mut buf = Vec::new();
+        {
+            let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            for i in 0..a.len() {
+                let mut e = a.by_index(i).unwrap();
+                let name = e.name().unwrap().to_string();
+                let mut body = Vec::new();
+                e.read_to_end(&mut body).unwrap();
+                let m = if name == "mimetype" {
+                    method
+                } else {
+                    e.compression()
+                };
+                let opts = zip::write::SimpleFileOptions::default().compression_method(m);
+                zip.start_file(name, opts).unwrap();
+                zip.write_all(&body).unwrap();
+            }
+            zip.finish().unwrap();
+        }
+        Workspace::load(&buf).unwrap()
+    }
+
+    /// The `(id, rule)` of every finding in `ws`, sorted.
+    fn finding_keys(ws: &Workspace) -> Vec<(&'static str, Option<&'static str>)> {
+        let mut v: Vec<_> = ws
+            .detect()
+            .unwrap()
+            .messages
+            .iter()
+            .map(|m| (m.id, m.rule))
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// A `mimetype` first but deflated, through the real detector: the
+    /// proposal names `PKG-007`, and after it the entry is first, stored,
+    /// with the same bytes, and the book's findings are those of the same
+    /// book stored.
+    #[test]
+    fn a_compressed_mimetype_is_stored() {
+        let stored = finding_keys(&mimetype_first_with(zip::CompressionMethod::Stored));
+        let mut ws = mimetype_first_with(zip::CompressionMethod::Deflated);
+        let mut expected = stored.clone();
+        expected.push(("PKG-007", Some(MIMETYPE_NOT_STORED)));
+        expected.sort();
+        assert_eq!(finding_keys(&ws), expected);
+        let report = ws.detect().unwrap();
+        let fixes = mimetype_packaging(&report, &ws);
+        assert_eq!(fixes.len(), 1);
+        assert_eq!(fixes[0].addresses_id, "PKG-007");
+        assert_eq!(fixes[0].addresses_rule, Some(MIMETYPE_NOT_STORED));
+        assert!(
+            fixes[0].title.contains("uncompressed"),
+            "{}",
+            fixes[0].title
+        );
+        let fix = fixes.into_iter().next().unwrap();
+        fix.apply(&mut ws);
+        let out = ws.serialize().unwrap();
+        let mut z = zip::ZipArchive::new(std::io::Cursor::new(out)).unwrap();
+        {
+            let first = z.by_index(0).unwrap();
+            assert_eq!(first.name().unwrap(), "mimetype");
+            assert_eq!(first.compression(), zip::CompressionMethod::Stored);
+        }
+        assert_eq!(ws.get_text("mimetype").unwrap(), "application/epub+zip");
+        assert_eq!(finding_keys(&ws), stored);
+    }
+
+    /// `PKG-007`'s other rule is about the bytes, which the re-emission
+    /// writes unchanged: not proposed. A stored `mimetype` gets nothing.
+    #[test]
+    fn a_mimetype_with_wrong_content_is_not_repackaged() {
+        let ws = mimetype_first_with(zip::CompressionMethod::Stored);
+        assert!(
+            !finding_keys(&ws)
+                .iter()
+                .any(|(id, _)| id.starts_with("PKG-"))
+        );
+        assert!(mimetype_packaging(&ws.detect().unwrap(), &ws).is_empty());
+        let mut r = id_only("PKG-007");
+        r.messages[0].rule = Some("ocf.mimetype.wrong_content");
+        assert!(mimetype_packaging(&r, &ws).is_empty());
+    }
+
+    /// Compressed and with an extra field: one edit, addressed to the
+    /// compression; misplaced as well: addressed to the move.
+    #[test]
+    fn mimetype_packaging_names_the_largest_change() {
+        let ws = container(&[("META-INF/container.xml", "<container/>")]);
+        let mut r = id_only("PKG-005");
+        let mut c = id_only("PKG-007");
+        c.messages[0].rule = Some(MIMETYPE_NOT_STORED);
+        r.messages.extend(c.messages);
+        let fixes = mimetype_packaging(&r, &ws);
+        assert_eq!(fixes.len(), 1);
+        assert_eq!(fixes[0].addresses_id, "PKG-007");
+        r.messages.extend(id_only("PKG-006").messages);
+        let fixes = mimetype_packaging(&r, &ws);
+        assert_eq!(fixes.len(), 1);
+        assert_eq!(fixes[0].addresses_id, "PKG-006");
+        assert_eq!(fixes[0].addresses_rule, None);
     }
 
     // ---- fix.empty_directory -----------------------------------------

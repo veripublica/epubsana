@@ -21,6 +21,9 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
   the states each attribute colours: `link` the unvisited links, `vlink` the
   visited ones, `alink` the active ones. So `a:link { color: blue }` lets
   `link` go and keeps `vlink`.
+- `fix.mimetype_packaging` also stores a `mimetype` entry that is first but
+  compressed (`PKG-007`, `ocf.mimetype.not_stored_uncompressed`). As before,
+  no byte of any entry changes.
 
 ### Changed
 
