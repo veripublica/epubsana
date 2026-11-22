@@ -125,6 +125,7 @@ fn item(index: usize, f: &ReportedFix) -> Item<Data> {
                 Tier::AutoSafe => "auto_safe",
                 Tier::ConfirmNeeded => "confirm_needed",
             },
+            rationale: f.rationale.clone(),
             changes: f
                 .changes
                 .iter()
@@ -241,6 +242,11 @@ pub struct Data {
     pub index: usize,
     pub fix_id: &'static str,
     pub tier: &'static str,
+    /// Why the repair is safe and, for a `confirm_needed` fix, what to check
+    /// before approving it: the text the CLI's confirm prompt and `-v` show.
+    /// A plugin that asks the reader shows it with the preview (calibre
+    /// plugin, 2026-11-22).
+    pub rationale: String,
     pub changes: Vec<ChangeItem>,
 }
 
@@ -506,5 +512,27 @@ pub(crate) mod tests {
                 .sum::<u64>(),
             outcomes.len() as u64
         );
+    }
+
+    /// Each fix item carries its rationale, the same text as the report's,
+    /// so a plugin can show why a proposal is safe before asking.
+    #[test]
+    fn every_fix_item_carries_its_rationale() {
+        let mut ws = Workspace::load(&fixture_epub()).unwrap();
+        let report = repair(&mut ws, Goal::Valid, Policy::DryRun, &mut RejectAll).unwrap();
+        assert!(!report.fixes.is_empty(), "the fixture must plan something");
+        let env = envelope(input("in.epub".into(), None, &report), true);
+        let json: serde_json::Value = serde_json::to_value(&env).unwrap();
+        let items = json["inputs"][0]["items"].as_array().unwrap();
+        assert_eq!(items.len(), report.fixes.len());
+        for (item, fix) in items.iter().zip(&report.fixes) {
+            assert!(!fix.rationale.is_empty(), "{}", fix.fix_id);
+            assert_eq!(
+                item["data"]["rationale"],
+                fix.rationale.as_str(),
+                "{}",
+                fix.fix_id
+            );
+        }
     }
 }

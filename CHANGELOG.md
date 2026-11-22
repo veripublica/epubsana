@@ -8,6 +8,14 @@ epubsana is pre-1.0, so breaking changes land as minor-version bumps (`0.x.0`),
 per [Cargo's SemVer compatibility
 rules](https://doc.rust-lang.org/cargo/reference/semver.html).
 
+## [Unreleased]
+
+### Added
+
+- `--format json` carries each fix's rationale as `data.rationale`: why the
+  repair is safe and what to check before approving it, the text the confirm
+  prompt and `-v` show. A plugin that asks the reader can show it.
+
 ## [0.43.0] - 2026-11-22
 
 ### Added

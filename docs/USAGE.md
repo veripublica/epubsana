@@ -612,6 +612,7 @@ reads both:
           "message": "Map 1 undeclared HTML entity (657×) to characters …",
           "data": {
             "index": 1, "fix_id": "fix.html_entities", "tier": "auto_safe",
+            "rationale": "…",
             "changes": [ { "path": "OEBPS/Text/bolum2.xhtml", "note": "…" } ]
           }
         }
@@ -637,6 +638,9 @@ Two fields carry epubsana's half of the contract:
   report that cannot say which is not a report of what changed. Under
   `--dry-run` every item is `"proposed"` (and `dry_run: true` is a summary of
   that, never a contradiction of it).
+- **`data.rationale`** is why the repair is safe and, for a `confirm_needed`
+  fix, what to check before approving it: the text the confirm prompt and
+  `-v` show. A consumer that asks a person shows it beside `changes`.
 - **`severity`** is **inherited** from the finding the fix addresses, verbatim
   from epubveri — it describes the *defect*, never epubsana's opinion of its own
   fix. How much judgement the fix needs is a different axis, and lives in
