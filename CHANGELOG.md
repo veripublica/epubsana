@@ -41,6 +41,16 @@ rules](https://doc.rust-lang.org/cargo/reference/semver.html).
   the proposal quotes the decoded words, so a reader can tell whether the
   declaration was right. Bytes in 0x80–0x9F are accepted only under a
   Windows code page's own name (`windows-1252`), not under `ISO-8859-1`.
+- `fix.fixed_version_attribute` adds the one allowed `version` to an NCX's
+  `<ncx>` (`2005-1`) or to `container.xml`'s `<container>` (`1.0`).
+- `fix.spine_toc` points the spine's `toc` at the book's one NCX when it is
+  missing or names something else, and asks first.
+- `fix.reserved_manifest_item` drops a manifest item for the package
+  document, `mimetype` or a file in `META-INF/`, where nothing names it.
+- `fix.modified_utc_designator` writes a `dcterms:modified` that ends in
+  `+00:00` with `Z`.
+- `fix.language_tag_separator` writes a POSIX locale language tag in the
+  package document (`en_US`) as BCP 47 (`en-US`), and asks first.
 
 ### Changed
 

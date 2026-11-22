@@ -40,6 +40,11 @@ grows one carefully-argued entry at a time.
 | `PKG-007` | `ocf.mimetype.wrong_content` | ConfirmNeeded | The `mimetype` entry names `application/epub+zip` with a BOM, surrounding whitespace or other letter case | [Write exactly `application/epub+zip`](#pkg-007--the-mimetype-entrys-content) |
 | `CSS-004` / `RSC-028` | *(none)* / `xml.encoding.declared_non_utf8`, `opf.encoding.declared_non_utf8` | AutoSafe | A stylesheet or XML file declares a legacy encoding, but every byte is ASCII | [Rewrite the label as `UTF-8`](#css-004--rsc-028--a-legacy-encoding-label) |
 | `CSS-004` / `RSC-028` | same | ConfirmNeeded | The same, with non-ASCII bytes in a single-byte encoding that are not UTF-8 | [Transcode the file to UTF-8](#css-004--rsc-028--a-legacy-encoding-label) |
+| `RSC-005` | `ncx.schema_violation`, `ocf.container.schema_violation` (`missing_attribute`, `version` on the root) | AutoSafe | The NCX's `<ncx>` or `container.xml`'s `<container>` has no `version` | [Add the one value the grammar allows](#rsc-005--a-missing-fixed-version-attribute) |
+| `RSC-005` / `OPF-049` / `OPF-050` | `opf.spine.missing_toc_epub2` / `opf.spine.toc_idref_not_in_manifest` / *(none)* | ConfirmNeeded | The spine's `toc` is missing, names no item, or names an item that is not an NCX, and the manifest has exactly one NCX | [Point `toc` at that NCX](#rsc-005--opf-049--opf-050--the-spines-toc) |
+| `OPF-099` / `SPEC-006` / `PKG-025` | *(none)* | AutoSafe | The manifest declares the package document itself, `mimetype`, or a file in `META-INF/` | [Drop the item](#opf-099--spec-006--pkg-025--a-manifest-item-for-a-file-that-is-not-a-publication-resource) |
+| `RSC-005` | `opf.metadata.invalid_dcterms_modified` | AutoSafe | `dcterms:modified` ends in `+00:00` instead of `Z` | [Write `Z`](#rsc-005--dctermsmodified-written-with-0000) |
+| `OPF-092` | `opf.language.invalid_tag` | ConfirmNeeded | A language tag in the package document is a POSIX locale (`en_US`) | [Write the BCP 47 separator (`en-US`)](#opf-092--a-language-tag-written-as-a-posix-locale) |
 | `PKG-014` | *(none)* | AutoSafe | A ZIP directory entry has nothing inside it | [Leave the entry out of the archive](#pkg-014--an-empty-directory-entry) |
 | `RSC-005` | `opf.content_document.schema_violation` (stray text / inline element / incomplete content, in `<body>` or `<blockquote>`) | ConfirmNeeded | EPUB 2 text or inline elements sit where the grammar requires block content | [Wrap each run in one `<div>`, leaving whitespace alone](#rsc-005--non-block-content-in-body-or-blockquote-epub-2) |
 | `RSC-001` | `opf.manifest_item.missing_resource` | ConfirmNeeded | A manifest `<item>` declares a resource the container doesn't hold | [Drop the item, and every reference that named it](#rsc-001--dangling-manifest-item) |
@@ -798,6 +803,159 @@ mutations (the meta tags, the Windows names, the undefined bytes, the edit
 order): every one makes a test fail; two guards no mutation could reach
 were removed (an empty-label check `for_label` already makes, and a sort
 of spans already in order).
+
+---
+
+## RSC-005 — a missing fixed `version` attribute
+
+> **Status (2026-11-22):** built (Baris: "başka eksik fixer varsa onu yapmaya
+> devam et"). Source: epub-test-books `ncx-no-version`,
+> `container-no-version`; 0 on the shelf.
+
+**Finding.** `RSC-005` / `ncx.schema_violation` or
+`ocf.container.schema_violation`, kind `missing_attribute`, `params` =
+`["ncx", "version"]` or `["container", "version"]`: *element "ncx" is
+missing the required attribute "version"*.
+
+**Why there is one answer.** Each attribute has exactly one allowed value:
+- The NCX DTD (ANSI/NISO Z39.86-2005) declares `version CDATA #FIXED
+  "2005-1"` on `<ncx>`.
+- OCF (2.0.1 §3.5.1, 3.3 `#sec-container-metainf-container.xml`): the
+  `<container>` element's `version` "MUST be `1.0`".
+
+**Fix** (`fix.fixed_version_attribute`, AutoSafe). Insert `version="2005-1"`
+(or `version="1.0"`) right after the root element's name. Nothing else
+changes.
+
+**When it declines.** The root is not the reported element (another name or
+namespace), it already carries a `version` (then the finding is something
+else), or the file does not parse.
+
+**Measured, with the four fixers below (2026-11-22, A/B against `12d7640`
+on 562 shelf books + *Past Masters 279* + 696 epub-test-books sets at
+`8049bd2`, every fix approved).** 13 sets change, each ending with no
+finding: `ncx-no-version`, `container-no-version` (this fix);
+`spine-no-toc`, `toc-not-ncx` (`fix.spine_toc`); the two
+`manifest-lists-package-doc`, `mimetype-in-manifest`,
+`container-in-manifest` (`fix.reserved_manifest_item`);
+`modified-no-zulu` (`fix.modified_utc_designator`); the two
+`language-malformed`, `xml-lang-malformed`, `link-hreflang-malformed`
+(`fix.language_tag_separator`). No shelf book changes. The first run missed
+`ncx-no-version`: its NCX carries a DOCTYPE, which the root lookup's parser
+refused; it now parses as every other fixer here does (`parse_xml`), and a
+test with the DOCTYPE pins it. Mutations of every guard of the five fixers
+make a test fail; four guards no mutation could reach were removed (a
+duplicate-id check the reference scan already makes, a `toc` already
+naming the NCX, and two location filters the findings already imply).
+
+---
+
+## RSC-005 / OPF-049 / OPF-050 — the spine's `toc`
+
+> **Status (2026-11-22):** built (Baris: "başka eksik fixer varsa onu yapmaya
+> devam et"). Source: epub-test-books `spine-no-toc`, `toc-not-ncx`; 0 on the
+> shelf.
+
+**Findings**, all located at the package document:
+- `RSC-005` / `opf.spine.missing_toc_epub2`: an EPUB 2 `<spine>` with no
+  `toc` (OPF 2.0.1 §2.4.1.2 requires it to name the NCX).
+- `OPF-049` / `opf.spine.toc_idref_not_in_manifest`, `params[0]` = the
+  value: `toc` names no manifest item.
+- `OPF-050` (no `rule`): `toc` names an item whose media type is not
+  `application/x-dtbncx+xml`.
+
+**Why there is one answer.** `toc` means one thing, "this item is the NCX".
+When the manifest holds exactly one item of type `application/x-dtbncx+xml`,
+that item is the only value that says something true.
+
+**Fix** (`fix.spine_toc`, ConfirmNeeded). Set `toc` to that item's id:
+insert it after `<spine`, or rewrite the value in place. ConfirmNeeded
+because it changes which table of contents an EPUB 2 reader shows: from
+none to the book's NCX.
+
+**When it declines.** No NCX item, or two; not exactly one `<spine>`; a
+`toc` value spelled through a character reference; the OPF does not parse.
+
+---
+
+## OPF-099 / SPEC-006 / PKG-025 — a manifest item for a file that is not a publication resource
+
+> **Status (2026-11-22):** built (same request). Source: epub-test-books
+> `manifest-lists-package-doc`, `mimetype-in-manifest`,
+> `container-in-manifest`; 0 on the shelf.
+
+**Findings.** `OPF-099` (at the package document): an item references the
+package document itself. `SPEC-006` (at the package document): an item
+references `mimetype`. `PKG-025` (at the file): a file inside `META-INF/` is
+declared as a publication resource. None carries `params`; the item is the
+one whose `href`, resolved against the package document, names that file.
+
+**Why there is one answer.** OCF says these files are not publication
+resources (the package document is the publication's own description,
+`mimetype` and `META-INF/` belong to the container). The file itself is
+required where it is, so only the declaration is wrong, and nothing a reader
+shows comes from it.
+
+**Fix** (`fix.reserved_manifest_item`, AutoSafe). Delete the `<item>`
+element; the file stays.
+
+**When it declines.** Anything else in the package document names the
+item's id (a spine `itemref`, `toc`, a `fallback`, a `refines="#…"`, a
+`<meta content>`), any other file links to the file, two items share the
+id, or the OPF does not parse. Then the declaration is in use, and dropping
+it would move the finding elsewhere.
+
+---
+
+## RSC-005 — `dcterms:modified` written with `+00:00`
+
+> **Status (2026-11-22):** built (same request). Source: epub-test-books
+> `modified-no-zulu`; 0 on the shelf.
+
+**Finding.** `RSC-005` / `opf.metadata.invalid_dcterms_modified`,
+`params[0]` = the trimmed value: *dcterms:modified must be of the form
+'CCYY-MM-DDThh:mm:ssZ'* (EPUB 3.3 `#sec-metadata-last-modified`).
+
+**Why there is one answer.** When the value is exactly
+`CCYY-MM-DDThh:mm:ss+00:00`, it names the same instant as the same digits
+with `Z` (RFC 3339 §4.3: `Z` and `+00:00` are the same offset). Only the
+spelling is wrong.
+
+**Fix** (`fix.modified_utc_designator`, AutoSafe). Replace the trailing
+`+00:00` with `Z`.
+
+**When it declines.** Any other shape: another offset (converting it would
+need arithmetic on a time the author chose to write locally), `-00:00`
+(RFC 3339: the offset is unknown), fractional seconds, no time. Also a
+value written through a character reference, or two such elements.
+
+---
+
+## OPF-092 — a language tag written as a POSIX locale
+
+> **Status (2026-11-22):** built (same request). Source: epub-test-books
+> `language-malformed`, `link-hreflang-malformed`, `xml-lang-malformed`; 0
+> on the shelf.
+
+**Finding.** `OPF-092` / `opf.language.invalid_tag`, located at the package
+document, `params` = `["dc:language" | "xml:lang" | "hreflang", tag]`:
+*language tag 'en_US' is not well-formed*.
+
+**Why there is one answer.** BCP 47 (RFC 5646 §2.1) separates subtags with
+`-` only; `_` is never part of a tag. `en_US` is the POSIX locale spelling
+of `en-US`, the same language and region. When the tag is exactly a 2- or
+3-letter language, `_`, and a 2-letter or 3-digit region, writing `-` is
+the only reading.
+
+**Fix** (`fix.language_tag_separator`, ConfirmNeeded). Replace the `_` with
+`-` in each reported value: the `dc:language` text, the `xml:lang` or the
+`hreflang` attribute. ConfirmNeeded because the book's language is what a
+reader hyphenates and reads aloud by, and a reader that could not parse
+`en_US` will now apply `en-US`.
+
+**When it declines.** Any other shape (`en_US.UTF-8`, `en_us_x`, a script
+subtag); a value written through a character reference; the OPF does not
+parse.
 
 ---
 

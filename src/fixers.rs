@@ -82,6 +82,11 @@ pub fn plan(report: &Report, ws: &Workspace, _goal: Goal) -> Vec<ProposedFix> {
     fixes.extend(ncx_duplicate_ids(report, ws));
     fixes.extend(ncx_play_order(report, ws));
     fixes.extend(ncx_navpoint_ids(report, ws));
+    fixes.extend(fixed_version_attributes(report, ws));
+    fixes.extend(spine_toc(report, ws));
+    fixes.extend(reserved_manifest_items(report, ws));
+    fixes.extend(modified_utc_designator(report, ws));
+    fixes.extend(language_tag_separator(report, ws));
     fixes.extend(content_type_meta(report, ws));
     fixes.extend(ncx_dtb_uid(report, ws));
     fixes.extend(manifest_href_spaces(report, ws));
@@ -185,6 +190,7 @@ pub fn handled_rules() -> &'static [&'static str] {
         // One shape inside it: a `navPoint` with no `id`.
         "ncx.schema_violation",
         "ncx.uid.package_identifier_mismatch",
+        "ocf.container.schema_violation",
         "ocf.mimetype.not_first_entry",
         "ocf.mimetype.not_stored_uncompressed",
         "ocf.mimetype.wrong_content",
@@ -206,12 +212,14 @@ pub fn handled_rules() -> &'static [&'static str] {
         "opf.guide.duplicate_reference",
         "opf.guide.reference_fragment_not_defined",
         "opf.guide.reference_missing_resource",
+        "opf.language.invalid_tag",
         // One shape inside it: a core image declared as another core image.
         "opf.manifest_item.declared_media_type_mismatch",
         "opf.manifest_item.missing_resource",
         "opf.manifest_item.non_preferred_media_type",
         "opf.manifest_item.unencoded_space_in_href",
         "opf.metadata.empty_element",
+        "opf.metadata.invalid_dcterms_modified",
         "opf.ncx.content_src_missing_resource",
         "opf.ncx.content_src_unencoded_space",
         "opf.package.dc_value_not_empty",
@@ -221,6 +229,8 @@ pub fn handled_rules() -> &'static [&'static str] {
         "opf.package.unrecognized_version",
         "opf.spine.duplicate_itemref",
         "opf.spine.itemref_idref_not_in_manifest",
+        "opf.spine.missing_toc_epub2",
+        "opf.spine.toc_idref_not_in_manifest",
         "svg.attributes.attribute_not_allowed",
         "svg.elements.element_not_allowed",
         "xml.encoding.declared_non_utf8",
@@ -10843,6 +10853,599 @@ fn charset_proposal(
     }
 }
 
+/// The root elements whose `version` attribute has one allowed value: the
+/// rule, the element's namespace and local name, and the value.
+const FIXED_VERSIONS: [(&str, &str, &str, &str); 2] = [
+    (
+        "ncx.schema_violation",
+        "http://www.daisy.org/z3986/2005/ncx/",
+        "ncx",
+        "2005-1",
+    ),
+    (
+        "ocf.container.schema_violation",
+        "urn:oasis:names:tc:opendocument:xmlns:container",
+        "container",
+        "1.0",
+    ),
+];
+
+/// Where to insert ` version="…"` in `text`: right after the root element's
+/// qualified name, if the root is `ns`/`local` and has no `version`.
+fn fixed_version_insert_at(text: &str, ns: &str, local: &str) -> Option<usize> {
+    let doc = parse_xml(text)?;
+    let root = doc.root_element();
+    if root.tag_name().namespace() != Some(ns)
+        || root.tag_name().name() != local
+        || root
+            .attributes()
+            .any(|a| a.namespace().is_none() && a.name() == "version")
+    {
+        return None;
+    }
+    let start = root.range().start;
+    let tag = text.get(start..)?.strip_prefix('<')?;
+    let qname = tag
+        .find(|c: char| c.is_ascii_whitespace() || c == '>' || c == '/')
+        .unwrap_or(tag.len());
+    Some(start + 1 + qname)
+}
+
+/// `RSC-005`, `missing_attribute` `version` on `<ncx>` or `<container>`:
+/// add the one value each grammar allows (`2005-1`, `1.0`). See
+/// `docs/FIXERS.md`.
+fn fixed_version_attributes(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    let mut fixes = Vec::new();
+    for (rule, ns, local, value) in FIXED_VERSIONS {
+        let files: BTreeSet<&str> = report
+            .messages
+            .iter()
+            .filter(|m| is_schema_violation(m, rule, ViolationKind::MissingAttribute))
+            .filter(|m| m.params == [local, "version"])
+            .filter_map(|m| m.location.as_deref())
+            .collect();
+        for file in files {
+            let Some(text) = ws.get_text(file) else {
+                continue;
+            };
+            if fixed_version_insert_at(&text, ns, local).is_none() {
+                continue;
+            }
+            let file = file.to_string();
+            let apply_file = file.clone();
+            fixes.push(ProposedFix {
+                fix_id: "fix.fixed_version_attribute",
+                addresses_id: "RSC-005".to_string(),
+                addresses_rule: Some(rule),
+                addresses_severity: addressed_severity(report, "RSC-005", Some(rule)),
+                tier: Tier::AutoSafe,
+                title: format!("Add version=\"{value}\" to <{local}> in {file}"),
+                rationale: format!(
+                    "The grammar requires a `version` on `<{local}>`, and allows one value: \
+                     `{value}`. It is added; nothing else changes."
+                ),
+                preview: vec![Change {
+                    path: file,
+                    note: format!("add version=\"{value}\" to <{local}>"),
+                }],
+                apply_fn: Box::new(move |ws: &mut Workspace| {
+                    if let Some(text) = ws.get_text(&apply_file)
+                        && let Some(at) = fixed_version_insert_at(&text, ns, local)
+                    {
+                        let mut out = text;
+                        out.insert_str(at, &format!(" version=\"{value}\""));
+                        ws.set_text(&apply_file, out);
+                    }
+                }),
+            });
+        }
+    }
+    fixes
+}
+
+/// The NCX media type, which `<spine toc>` must name.
+const NCX_MEDIA_TYPE: &str = "application/x-dtbncx+xml";
+
+/// The edit that points `<spine toc>` at the manifest's one NCX, and that
+/// NCX's id: insert `toc` if absent, or rewrite its value. `None` (decline)
+/// if there is no NCX item or more than one, not exactly one `<spine>`, or
+/// the value's source spelling is not its value.
+fn spine_toc_edit(opf: &str) -> Option<(MetaEdit, String)> {
+    let doc = parse_xml(opf)?;
+    let ncx: Vec<&str> = doc
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "item")
+        .filter(|n| {
+            n.attr_no_ns("media-type")
+                .map(|t| t.trim_matches(is_xml_space))
+                == Some(NCX_MEDIA_TYPE)
+        })
+        .filter_map(|n| n.attr_no_ns("id"))
+        .collect();
+    let [ncx_id] = ncx.as_slice() else {
+        return None;
+    };
+    let spines: Vec<_> = doc
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "spine")
+        .collect();
+    let [spine] = spines.as_slice() else {
+        return None;
+    };
+    let edit = match spine
+        .attributes()
+        .find(|a| a.namespace().is_none() && a.name() == "toc")
+    {
+        None => {
+            let at = spine.range().start + 1 + spine_qname_len(opf, spine.range().start)?;
+            MetaEdit {
+                range: at..at,
+                replacement: format!(" toc=\"{ncx_id}\""),
+            }
+        }
+        Some(attr) => {
+            let span = attr_value_span(opf, attr.range())?;
+            if opf.get(span.clone())? != attr.value() {
+                return None;
+            }
+            MetaEdit {
+                range: span,
+                replacement: (*ncx_id).to_string(),
+            }
+        }
+    };
+    Some((edit, (*ncx_id).to_string()))
+}
+
+/// The length of the qualified name of the start tag at `start` (`<spine`,
+/// `<opf:spine`).
+fn spine_qname_len(text: &str, start: usize) -> Option<usize> {
+    let tag = text.get(start..)?.strip_prefix('<')?;
+    Some(
+        tag.find(|c: char| c.is_ascii_whitespace() || c == '>' || c == '/')
+            .unwrap_or(tag.len()),
+    )
+}
+
+/// `RSC-005` `opf.spine.missing_toc_epub2`, `OPF-049`
+/// `opf.spine.toc_idref_not_in_manifest`, `OPF-050`: `<spine toc>` missing,
+/// naming nothing, or naming an item that is not an NCX, while the manifest
+/// holds exactly one NCX. `toc` is pointed at it. See `docs/FIXERS.md`.
+fn spine_toc(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    let Some(opf_path) = opf_path(ws) else {
+        return Vec::new();
+    };
+    let Some(m) = report.messages.iter().find(|m| {
+        m.location.as_deref() == Some(opf_path.as_str())
+            && matches!(
+                (m.id, m.rule),
+                ("RSC-005", Some("opf.spine.missing_toc_epub2"))
+                    | ("OPF-049", Some("opf.spine.toc_idref_not_in_manifest"))
+                    | ("OPF-050", None)
+            )
+    }) else {
+        return Vec::new();
+    };
+    let Some(opf) = ws.get_text(&opf_path) else {
+        return Vec::new();
+    };
+    let Some((edit, ncx_id)) = spine_toc_edit(&opf) else {
+        return Vec::new();
+    };
+    let (id, rule) = (m.id, m.rule);
+    let note = if edit.range.is_empty() {
+        format!("spine: add toc=\"{ncx_id}\"")
+    } else {
+        format!("spine: point toc at \"{ncx_id}\"")
+    };
+    let apply_path = opf_path.clone();
+    vec![ProposedFix {
+        fix_id: "fix.spine_toc",
+        addresses_id: id.to_string(),
+        addresses_rule: rule,
+        addresses_severity: addressed_severity(report, id, rule),
+        tier: Tier::ConfirmNeeded,
+        title: format!("Point the spine's toc at the NCX \"{ncx_id}\""),
+        rationale: "The spine's `toc` attribute names the book's NCX, the table of contents an \
+                    EPUB 2 reader shows. Here it is missing or names something else, and the \
+                    manifest holds exactly one NCX, so that is the only value that is true. A \
+                    reader that showed no table of contents will now show the NCX's."
+            .to_string(),
+        preview: vec![Change {
+            path: opf_path,
+            note,
+        }],
+        apply_fn: Box::new(move |ws: &mut Workspace| {
+            if let Some(text) = ws.get_text(&apply_path)
+                && let Some((edit, _)) = spine_toc_edit(&text)
+            {
+                ws.set_text(&apply_path, apply_edits(&text, vec![edit]));
+            }
+        }),
+    }]
+}
+
+/// Which reserved file an item may name, by the finding that reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reserved {
+    /// `OPF-099`: the package document itself.
+    PackageDocument,
+    /// `SPEC-006`: `mimetype`.
+    Mimetype,
+    /// `PKG-025`: a file inside `META-INF/`.
+    MetaInf,
+}
+
+/// The `<item>` elements to delete from `opf`, with the file each names:
+/// those whose `href` names a reserved file a finding reported (`targets`),
+/// and whose id nothing else in the package document names. `None` if the
+/// OPF does not parse.
+fn reserved_item_drops(
+    opf: &str,
+    opf_path: &str,
+    targets: &BTreeSet<String>,
+) -> Option<Vec<(Range<usize>, String)>> {
+    let doc = parse_xml(opf)?;
+    let items: Vec<_> = doc
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "item")
+        .collect();
+    let mut out = Vec::new();
+    for item in &items {
+        let (Some(id), Some(href)) = (item.attr_no_ns("id"), item.attr_no_ns("href")) else {
+            continue;
+        };
+        let Some(target) = resolve_against(opf_path, href) else {
+            continue;
+        };
+        if !targets.contains(&target) {
+            continue;
+        }
+        // Any other attribute with the value counts, so a second item with
+        // the same id declines it too.
+        let named_elsewhere = doc.descendants().filter(|n| n.is_element()).any(|n| {
+            n.attributes().any(|a| {
+                !(n == *item && a.name() == "id")
+                    && (a.value() == id
+                        || a.value().strip_prefix('#') == Some(id)
+                        || a.value().split_ascii_whitespace().any(|t| t == id))
+            })
+        });
+        if named_elsewhere {
+            continue;
+        }
+        out.push((item.range(), target));
+    }
+    Some(out)
+}
+
+/// `OPF-099`, `SPEC-006`, `PKG-025`: the manifest declares the package
+/// document, `mimetype`, or a file in `META-INF/`. The `<item>` is deleted
+/// where nothing names it; the file stays. See `docs/FIXERS.md`.
+fn reserved_manifest_items(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    let Some(opf_path) = opf_path(ws) else {
+        return Vec::new();
+    };
+    let mut targets: BTreeMap<String, Reserved> = BTreeMap::new();
+    for m in &report.messages {
+        match (m.id, m.rule) {
+            ("OPF-099", None) => {
+                targets.insert(opf_path.clone(), Reserved::PackageDocument);
+            }
+            ("SPEC-006", None) => {
+                targets.insert("mimetype".to_string(), Reserved::Mimetype);
+            }
+            ("PKG-025", None) => {
+                if let Some(file) = m.location.as_deref() {
+                    targets.insert(file.to_string(), Reserved::MetaInf);
+                }
+            }
+            _ => {}
+        }
+    }
+    if targets.is_empty() {
+        return Vec::new();
+    }
+    let Some(opf) = ws.get_text(&opf_path) else {
+        return Vec::new();
+    };
+    let keys: BTreeSet<String> = targets.keys().cloned().collect();
+    let Some(drops) = reserved_item_drops(&opf, &opf_path, &keys) else {
+        return Vec::new();
+    };
+    let mut by_kind: BTreeMap<&'static str, Vec<String>> = BTreeMap::new();
+    for (_, target) in &drops {
+        if any_entry_references(ws, target, &opf_path) {
+            continue;
+        }
+        let id = match targets[target] {
+            Reserved::PackageDocument => "OPF-099",
+            Reserved::Mimetype => "SPEC-006",
+            Reserved::MetaInf => "PKG-025",
+        };
+        by_kind.entry(id).or_default().push(target.clone());
+    }
+    by_kind
+        .into_iter()
+        .map(|(id, files)| {
+            let apply_path = opf_path.clone();
+            let apply_targets: BTreeSet<String> = files.iter().cloned().collect();
+            ProposedFix {
+                fix_id: "fix.reserved_manifest_item",
+                addresses_id: id.to_string(),
+                addresses_rule: None,
+                addresses_severity: addressed_severity(report, id, None),
+                tier: Tier::AutoSafe,
+                title: format!(
+                    "Drop the manifest item for {}, which is not a publication resource",
+                    files.join(", ")
+                ),
+                rationale: "OCF keeps the package document, `mimetype` and the files in \
+                            `META-INF/` out of the publication's resources, and this manifest \
+                            declares one of them. Nothing names the item, so the declaration is \
+                            dropped; the file itself stays where it is."
+                    .to_string(),
+                preview: files
+                    .iter()
+                    .map(|f| Change {
+                        path: opf_path.clone(),
+                        note: format!("manifest: drop the item for \"{f}\""),
+                    })
+                    .collect(),
+                apply_fn: Box::new(move |ws: &mut Workspace| {
+                    if let Some(text) = ws.get_text(&apply_path)
+                        && let Some(drops) = reserved_item_drops(&text, &apply_path, &apply_targets)
+                    {
+                        let edits = drops
+                            .into_iter()
+                            .map(|(range, _)| MetaEdit {
+                                range,
+                                replacement: String::new(),
+                            })
+                            .collect();
+                        ws.set_text(&apply_path, apply_edits(&text, edits));
+                    }
+                }),
+            }
+        })
+        .collect()
+}
+
+/// Whether `v` is `CCYY-MM-DDThh:mm:ss+00:00`, the one spelling of a UTC
+/// `dcterms:modified` other than `…Z`.
+fn is_modified_plus_zero(v: &str) -> bool {
+    let b = v.as_bytes();
+    b.len() == 25
+        && v.ends_with("+00:00")
+        && b.iter().enumerate().take(19).all(|(i, c)| match i {
+            4 | 7 => *c == b'-',
+            10 => *c == b'T',
+            13 | 16 => *c == b':',
+            _ => c.is_ascii_digit(),
+        })
+}
+
+/// The span of `+00:00` in the one `<meta property="dcterms:modified">`
+/// whose trimmed text is `value`. `None` if there is not exactly one, or its
+/// text is not spelled in the source as it reads.
+fn modified_offset_span(opf: &str, value: &str) -> Option<Range<usize>> {
+    let doc = parse_xml(opf)?;
+    let metas: Vec<_> = doc
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "meta")
+        .filter(|n| {
+            n.attr_no_ns("property")
+                .map(|p| p.trim_matches(is_xml_space))
+                == Some("dcterms:modified")
+        })
+        .filter(|n| n.text().map(|t| t.trim_matches(is_xml_space)) == Some(value))
+        .collect();
+    let [meta] = metas.as_slice() else {
+        return None;
+    };
+    // The first child, which `text()` read: anything after it (a comment)
+    // leaves this text as the whole value.
+    let text = meta.first_child().filter(|t| t.is_text())?;
+    let range = text.range();
+    let raw = opf.get(range.clone())?;
+    if raw != text.text()? {
+        return None;
+    }
+    let end = range.start + raw.trim_end_matches(is_xml_space).len();
+    Some(end - "+00:00".len()..end)
+}
+
+/// `RSC-005` / `opf.metadata.invalid_dcterms_modified` with a value
+/// `CCYY-MM-DDThh:mm:ss+00:00`: the same instant as `…Z`, which is written.
+/// See `docs/FIXERS.md`.
+fn modified_utc_designator(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    let Some(value) = report
+        .messages
+        .iter()
+        .filter(|m| m.rule == Some("opf.metadata.invalid_dcterms_modified"))
+        .find_map(|m| m.params.first().filter(|v| is_modified_plus_zero(v)))
+    else {
+        return Vec::new();
+    };
+    let Some(opf_path) = opf_path(ws) else {
+        return Vec::new();
+    };
+    let Some(opf) = ws.get_text(&opf_path) else {
+        return Vec::new();
+    };
+    if modified_offset_span(&opf, value).is_none() {
+        return Vec::new();
+    }
+    let value = value.clone();
+    let fixed = format!("{}Z", &value[..19]);
+    let apply_path = opf_path.clone();
+    let rule = Some("opf.metadata.invalid_dcterms_modified");
+    vec![ProposedFix {
+        fix_id: "fix.modified_utc_designator",
+        addresses_id: "RSC-005".to_string(),
+        addresses_rule: rule,
+        addresses_severity: addressed_severity(report, "RSC-005", rule),
+        tier: Tier::AutoSafe,
+        title: format!("Write dcterms:modified as {fixed}"),
+        rationale: "EPUB requires `dcterms:modified` in the form `CCYY-MM-DDThh:mm:ssZ`. This \
+                    one ends in `+00:00`, which names the same instant as `Z`; only the \
+                    spelling changes."
+            .to_string(),
+        preview: vec![Change {
+            path: opf_path,
+            note: format!("dcterms:modified: {value} → {fixed}"),
+        }],
+        apply_fn: Box::new(move |ws: &mut Workspace| {
+            if let Some(text) = ws.get_text(&apply_path)
+                && let Some(span) = modified_offset_span(&text, &value)
+            {
+                let edit = MetaEdit {
+                    range: span,
+                    replacement: "Z".to_string(),
+                };
+                ws.set_text(&apply_path, apply_edits(&text, vec![edit]));
+            }
+        }),
+    }]
+}
+
+/// Whether `tag` is a POSIX locale for a language and region: 2 or 3
+/// letters, `_`, then 2 letters or 3 digits (`en_US`, `es_419`).
+fn is_posix_language_region(tag: &str) -> bool {
+    let Some((lang, region)) = tag.split_once('_') else {
+        return false;
+    };
+    (2..=3).contains(&lang.len())
+        && lang.bytes().all(|b| b.is_ascii_alphabetic())
+        && ((region.len() == 2 && region.bytes().all(|b| b.is_ascii_alphabetic()))
+            || (region.len() == 3 && region.bytes().all(|b| b.is_ascii_digit())))
+}
+
+/// The byte offsets of the `_` in each `slot` value equal to `tag` in the
+/// package document: the `dc:language` text, or an `xml:lang` / `hreflang`
+/// (on `<link>`) attribute. `None` if the OPF does not parse or such a value
+/// is not spelled in the source as it reads.
+fn language_separator_offsets(opf: &str, slot: &str, tag: &str) -> Option<Vec<usize>> {
+    const XML_NS: &str = "http://www.w3.org/XML/1998/namespace";
+    let doc = parse_xml(opf)?;
+    // The `_` in the source of a value that reads as `tag`; a spelling
+    // through a character reference does not contain `tag` and declines.
+    let at = |range: Range<usize>| -> Option<usize> {
+        let raw = opf.get(range.clone())?;
+        Some(range.start + raw.find(tag)? + tag.find('_')?)
+    };
+    let mut out = Vec::new();
+    for n in doc.descendants().filter(|n| n.is_element()) {
+        match slot {
+            "dc:language" if n.tag_name().name() == "language" => {
+                let Some(text) = n.first_child().filter(|t| t.is_text()) else {
+                    continue;
+                };
+                if text.text()?.trim_matches(is_xml_space) == tag {
+                    out.push(at(text.range())?);
+                }
+            }
+            "xml:lang" | "hreflang" => {
+                for a in n.attributes() {
+                    let hit = match slot {
+                        "xml:lang" => a.namespace() == Some(XML_NS) && a.name() == "lang",
+                        _ => {
+                            a.namespace().is_none()
+                                && a.name() == "hreflang"
+                                && n.tag_name().name() == "link"
+                        }
+                    };
+                    if hit && a.value() == tag {
+                        let span = attr_value_span(opf, a.range())?;
+                        out.push(at(span)?);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Some(out)
+}
+
+/// `OPF-092` / `opf.language.invalid_tag` on a POSIX locale (`en_US`) in the
+/// package document: the BCP 47 separator is written (`en-US`). See
+/// `docs/FIXERS.md`.
+fn language_tag_separator(report: &Report, ws: &Workspace) -> Vec<ProposedFix> {
+    let Some(opf_path) = opf_path(ws) else {
+        return Vec::new();
+    };
+    let reported: BTreeSet<(String, String)> = report
+        .messages
+        .iter()
+        .filter(|m| m.rule == Some("opf.language.invalid_tag"))
+        .filter(|m| m.location.as_deref() == Some(opf_path.as_str()))
+        .filter_map(|m| match m.params.as_slice() {
+            [slot, tag] if is_posix_language_region(tag) => Some((slot.clone(), tag.clone())),
+            _ => None,
+        })
+        .collect();
+    let Some(opf) = ws.get_text(&opf_path) else {
+        return Vec::new();
+    };
+    let planned: Vec<(String, String)> = reported
+        .into_iter()
+        .filter(|(slot, tag)| {
+            language_separator_offsets(&opf, slot, tag).is_some_and(|o| !o.is_empty())
+        })
+        .collect();
+    if planned.is_empty() {
+        return Vec::new();
+    }
+    let rule = Some("opf.language.invalid_tag");
+    let preview = planned
+        .iter()
+        .map(|(slot, tag)| Change {
+            path: opf_path.clone(),
+            note: format!("{slot}: {tag} → {}", tag.replace('_', "-")),
+        })
+        .collect();
+    let apply_path = opf_path.clone();
+    vec![ProposedFix {
+        fix_id: "fix.language_tag_separator",
+        addresses_id: "OPF-092".to_string(),
+        addresses_rule: rule,
+        addresses_severity: addressed_severity(report, "OPF-092", rule),
+        tier: Tier::ConfirmNeeded,
+        title: format!(
+            "Write {} with the BCP 47 separator",
+            planned
+                .iter()
+                .map(|(_, t)| t.as_str())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        rationale: "A language tag separates its subtags with `-`; `en_US` is the POSIX locale \
+                    spelling of `en-US`, the same language and region. The `_` becomes `-`. \
+                    A reader that could not read the tag will now hyphenate and read aloud by it."
+            .to_string(),
+        preview,
+        apply_fn: Box::new(move |ws: &mut Workspace| {
+            let Some(text) = ws.get_text(&apply_path) else {
+                return;
+            };
+            let mut edits = Vec::new();
+            for (slot, tag) in &planned {
+                for at in language_separator_offsets(&text, slot, tag).unwrap_or_default() {
+                    edits.push(MetaEdit {
+                        range: at..at + 1,
+                        replacement: "-".to_string(),
+                    });
+                }
+            }
+            if !edits.is_empty() {
+                ws.set_text(&apply_path, apply_edits(&text, edits));
+            }
+        }),
+    }]
+}
+
 /// `PKG-014`: a directory entry in the ZIP with nothing inside it
 /// (`OEBPS/fonts/`, `OEBPS/images/` — left behind when a tool moved the files
 /// and kept the folders). The repair leaves the entry out of the archive.
@@ -13666,6 +14269,472 @@ mod tests {
         assert_eq!(at(b" <?xml version=\"1.0\" encoding=\"x\"?>"), None);
         assert_eq!(at(b"<?xml version=\"1.0\"?><a encoding=\"x\"/>"), None);
         assert_eq!(at(b"<?xml version=\"1.0\"xencoding=\"x\"?>"), None);
+    }
+
+    // ---- fix.fixed_version_attribute ---------------------------------
+
+    /// `plain_book` with an NCX in the manifest and named by the spine.
+    fn ncx_book(ncx_root: &str) -> Workspace {
+        let opf = String::from_utf8(plain_book().raw("content.opf").unwrap().to_vec())
+            .unwrap()
+            .replace(
+                "<manifest>",
+                r#"<manifest><item href="toc.ncx" id="ncx" media-type="application/x-dtbncx+xml"/>"#,
+            )
+            .replace("<spine>", r#"<spine toc="ncx">"#);
+        let ncx = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+{ncx_root}<head><meta name="dtb:uid" content="x"/></head><docTitle><text>t</text></docTitle><navMap><navPoint id="p1" playOrder="1"><navLabel><text>c</text></navLabel><content src="c.xhtml"/></navPoint></navMap></ncx>"#
+        );
+        let ws = with_entry(&plain_book(), "content.opf", opf.as_bytes());
+        with_entry(&ws, "toc.ncx", ncx.as_bytes())
+    }
+
+    const NCX_ROOT: &str = r#"<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">"#;
+
+    /// The NCX book is clean; without `version` on `<ncx>`, or on
+    /// `<container>`, the one allowed value is added and the book is clean
+    /// again.
+    #[test]
+    fn a_missing_fixed_version_is_added() {
+        let clean = finding_keys(&ncx_book(NCX_ROOT));
+        assert_eq!(clean, []);
+        let ws = ncx_book(&NCX_ROOT.replace(r#" version="2005-1""#, ""));
+        let container = String::from_utf8(ws.raw("META-INF/container.xml").unwrap().to_vec())
+            .unwrap()
+            .replace(r#" version="1.0""#, "");
+        let mut ws = with_entry(&ws, "META-INF/container.xml", container.as_bytes());
+        let report = ws.detect().unwrap();
+        let fixes: Vec<_> = plan(&report, &ws, crate::Goal::Valid)
+            .into_iter()
+            .filter(|f| f.fix_id == "fix.fixed_version_attribute")
+            .collect();
+        let rules: Vec<_> = fixes.iter().map(|f| f.addresses_rule).collect();
+        assert_eq!(
+            rules,
+            [
+                Some("ncx.schema_violation"),
+                Some("ocf.container.schema_violation")
+            ]
+        );
+        assert!(fixes.iter().all(|f| f.tier == Tier::AutoSafe));
+        for f in fixes {
+            f.apply(&mut ws);
+        }
+        assert!(
+            ws.get_text("toc.ncx")
+                .unwrap()
+                .contains(r#"<ncx version="2005-1" xmlns="http://www.daisy.org/z3986/2005/ncx/">"#)
+        );
+        assert!(
+            ws.get_text("META-INF/container.xml")
+                .unwrap()
+                .starts_with(r#"<container version="1.0" xmlns="#)
+        );
+        assert_eq!(finding_keys(&ws), clean);
+    }
+
+    /// The insertion point: after a prefixed root's name too; never on
+    /// another root, another namespace, or a root that has a `version`.
+    #[test]
+    fn fixed_version_insert_at_reads_the_root_only() {
+        let ns = FIXED_VERSIONS[0].1;
+        let at = |t: &str| fixed_version_insert_at(t, ns, "ncx");
+        assert_eq!(at(&format!(r#"<ncx xmlns="{ns}"/>"#)), Some(4));
+        assert_eq!(at(&format!(r#"<n:ncx xmlns:n="{ns}"/>"#)), Some(6));
+        assert_eq!(at(&format!("<ncx\nxmlns=\"{ns}\"/>")), Some(4));
+        // With the NCX DOCTYPE, as NCX files usually carry.
+        let doctype = r#"<!DOCTYPE ncx PUBLIC "-//NISO//DTD ncx 2005-1//EN" "http://www.daisy.org/z3986/2005/ncx-2005-1.dtd">"#;
+        assert_eq!(
+            at(&format!(r#"{doctype}<ncx xmlns="{ns}"/>"#)),
+            Some(doctype.len() + 4)
+        );
+        assert_eq!(at(&format!(r#"<ncx xmlns="{ns}" version="x"/>"#)), None);
+        assert_eq!(at(r#"<ncx xmlns="urn:other"/>"#), None);
+        assert_eq!(at(&format!(r#"<nav xmlns="{ns}"/>"#)), None);
+        assert_eq!(at("<ncx"), None);
+    }
+
+    /// Only `missing_attribute` `version` on the reported element is read.
+    #[test]
+    fn fixed_version_reads_only_its_finding() {
+        let ws = ncx_book(&NCX_ROOT.replace(r#" version="2005-1""#, ""));
+        let mut r = ws.detect().unwrap();
+        assert_eq!(fixed_version_attributes(&r, &ws).len(), 1);
+        for m in &mut r.messages {
+            m.params = vec!["ncx".to_string(), "id".to_string()];
+        }
+        assert!(fixed_version_attributes(&r, &ws).is_empty());
+        for m in &mut r.messages {
+            m.params = vec!["ncx".to_string(), "version".to_string()];
+            m.violation_kind = Some(ViolationKind::AttributeNotAllowed);
+        }
+        assert!(fixed_version_attributes(&r, &ws).is_empty());
+    }
+
+    // ---- fix.spine_toc -----------------------------------------------
+
+    /// `ncx_book`'s OPF with `from` replaced by `to`.
+    fn ncx_book_opf(from: &str, to: &str) -> Workspace {
+        let ws = ncx_book(NCX_ROOT);
+        let opf = String::from_utf8(ws.raw("content.opf").unwrap().to_vec()).unwrap();
+        assert!(opf.contains(from), "{from}");
+        with_entry(&ws, "content.opf", opf.replace(from, to).as_bytes())
+    }
+
+    /// Missing, naming no item, naming a non-NCX: each through `plan`, and
+    /// the book ends as clean as with the right `toc`.
+    #[test]
+    fn the_spine_toc_is_pointed_at_the_one_ncx() {
+        for (to, id) in [
+            ("<spine>", "RSC-005"),
+            (r#"<spine toc="nope">"#, "OPF-049"),
+            (r#"<spine toc="c">"#, "OPF-050"),
+        ] {
+            let mut ws = ncx_book_opf(r#"<spine toc="ncx">"#, to);
+            let report = ws.detect().unwrap();
+            let fixes: Vec<_> = plan(&report, &ws, crate::Goal::Valid)
+                .into_iter()
+                .filter(|f| f.fix_id == "fix.spine_toc")
+                .collect();
+            assert_eq!(fixes.len(), 1, "{to}");
+            assert_eq!(fixes[0].addresses_id, id, "{to}");
+            assert_eq!(fixes[0].tier, Tier::ConfirmNeeded);
+            fixes.into_iter().next().unwrap().apply(&mut ws);
+            assert!(
+                ws.get_text("content.opf")
+                    .unwrap()
+                    .contains(r#"<spine toc="ncx">"#),
+                "{to}"
+            );
+            assert_eq!(finding_keys(&ws), [], "{to}");
+        }
+    }
+
+    /// No NCX item, two of them, or a value through a character reference:
+    /// nothing proposed.
+    #[test]
+    fn the_spine_toc_is_left_where_the_ncx_is_not_one() {
+        assert!(spine_toc(&plain_book().detect().unwrap(), &plain_book()).is_empty());
+        let two = ncx_book_opf(
+            "<manifest>",
+            r#"<manifest><item href="toc2.ncx" id="ncx2" media-type="application/x-dtbncx+xml"/>"#,
+        );
+        let two = ncx_book_opf_on(&two, r#"<spine toc="ncx">"#, "<spine>");
+        assert!(spine_toc(&two.detect().unwrap(), &two).is_empty());
+        let charref = ncx_book_opf(r#"<spine toc="ncx">"#, r#"<spine toc="&#99;">"#);
+        let report = charref.detect().unwrap();
+        assert!(report.messages.iter().any(|m| m.id == "OPF-050"));
+        assert!(spine_toc(&report, &charref).is_empty());
+        // Only the three findings, at the package document, are read.
+        let ws = ncx_book_opf(r#"<spine toc="ncx">"#, "<spine>");
+        let mut r = ws.detect().unwrap();
+        for m in &mut r.messages {
+            m.location = Some("c.xhtml".to_string());
+        }
+        assert!(spine_toc(&r, &ws).is_empty());
+    }
+
+    fn ncx_book_opf_on(ws: &Workspace, from: &str, to: &str) -> Workspace {
+        let opf = String::from_utf8(ws.raw("content.opf").unwrap().to_vec()).unwrap();
+        assert!(opf.contains(from), "{from}");
+        with_entry(ws, "content.opf", opf.replace(from, to).as_bytes())
+    }
+
+    // ---- fix.reserved_manifest_item -----------------------------------
+
+    /// `ws` with `item` first in its manifest.
+    fn with_item(ws: &Workspace, item: &str) -> Workspace {
+        ncx_book_opf_on(ws, "<manifest>", &format!("<manifest>{item}"))
+    }
+
+    /// An item for the package document (EPUB 2), for `mimetype` or for
+    /// `container.xml` (EPUB 3, where those two are reported): dropped, and
+    /// the book ends clean.
+    #[test]
+    fn a_reserved_file_item_is_dropped() {
+        let epub2 = ncx_book(NCX_ROOT);
+        let epub3 = fxl_book(FXL_VIEWPORT);
+        for (book, item, id) in [
+            (
+                &epub2,
+                r#"<item href="content.opf" id="opf" media-type="application/oebps-package+xml"/>"#,
+                "OPF-099",
+            ),
+            (
+                &epub3,
+                r#"<item href="mimetype" id="mt" media-type="text/plain"/>"#,
+                "SPEC-006",
+            ),
+            (
+                &epub3,
+                r#"<item href="META-INF/container.xml" id="cx" media-type="application/xml"/>"#,
+                "PKG-025",
+            ),
+        ] {
+            let mut ws = with_item(book, item);
+            let report = ws.detect().unwrap();
+            assert!(
+                report.messages.iter().any(|m| m.id == id),
+                "{id}: the fixture must carry it"
+            );
+            let fixes: Vec<_> = plan(&report, &ws, crate::Goal::Valid)
+                .into_iter()
+                .filter(|f| f.fix_id == "fix.reserved_manifest_item")
+                .collect();
+            assert_eq!(fixes.len(), 1, "{id}");
+            assert_eq!(fixes[0].addresses_id, id);
+            fixes.into_iter().next().unwrap().apply(&mut ws);
+            assert!(!ws.get_text("content.opf").unwrap().contains(item), "{id}");
+            assert_eq!(finding_keys(&ws), [], "{id}");
+        }
+    }
+
+    /// Named by the spine, linked from a chapter, or sharing its id: left
+    /// alone; and without the finding, nothing.
+    #[test]
+    fn a_reserved_file_item_in_use_is_kept() {
+        let item = r#"<item href="META-INF/container.xml" id="cx" media-type="application/xml"/>"#;
+        let base = with_item(&fxl_book(FXL_VIEWPORT), item);
+        let named = ncx_book_opf_on(
+            &base,
+            "</spine>",
+            r#"<itemref idref="cx" linear="no"/></spine>"#,
+        );
+        let dup = with_item(
+            &base,
+            r#"<item href="nav.xhtml" id="cx" media-type="application/xhtml+xml"/>"#,
+        );
+        let chapter = base.get_text("c.xhtml").unwrap().replace(
+            "<p>one</p>",
+            r#"<p><a href="META-INF/container.xml">one</a></p>"#,
+        );
+        let linked = with_entry(&base, "c.xhtml", chapter.as_bytes());
+        for (why, ws) in [
+            ("itemref", named),
+            ("duplicate id", dup),
+            ("linked", linked),
+        ] {
+            let report = ws.detect().unwrap();
+            assert!(report.messages.iter().any(|m| m.id == "PKG-025"), "{why}");
+            assert!(reserved_manifest_items(&report, &ws).is_empty(), "{why}");
+        }
+        let mut r = base.detect().unwrap();
+        assert_eq!(reserved_manifest_items(&r, &base).len(), 1);
+        r.messages.retain(|m| m.id != "PKG-025");
+        assert!(reserved_manifest_items(&r, &base).is_empty());
+    }
+
+    /// The id is named by `refines="#id"` or in a list of ids: kept. Two
+    /// `<spine>` elements: `toc` is not edited.
+    #[test]
+    fn reserved_item_drops_and_spine_toc_edit_read_every_reference() {
+        let opf = |extra: &str| {
+            format!(
+                r#"<package xmlns="http://www.idpf.org/2007/opf"><metadata>{extra}</metadata><manifest><item id="cx" href="META-INF/x.xml" media-type="application/xml"/></manifest><spine/></package>"#
+            )
+        };
+        let targets: BTreeSet<String> = ["META-INF/x.xml".to_string()].into();
+        let drops = |t: &str| {
+            reserved_item_drops(t, "content.opf", &targets)
+                .unwrap()
+                .len()
+        };
+        assert_eq!(drops(&opf("")), 1);
+        assert_eq!(
+            drops(&opf(r##"<meta refines="#cx" property="p">v</meta>"##)),
+            0
+        );
+        assert_eq!(drops(&opf(r#"<x ids="a cx b"/>"#)), 0);
+        let two = r#"<package><manifest><item id="n" href="t.ncx" media-type="application/x-dtbncx+xml"/></manifest><spine/><spine/></package>"#;
+        assert!(spine_toc_edit(two).is_none());
+        assert!(spine_toc_edit(&two.replace("<spine/><spine/>", "<spine/>")).is_some());
+    }
+
+    // ---- fix.modified_utc_designator ---------------------------------
+
+    /// `fxl_book` with its `dcterms:modified` text replaced by `value`.
+    fn modified_book(value: &str) -> Workspace {
+        let ws = fxl_book(FXL_VIEWPORT);
+        let opf = String::from_utf8(ws.raw("content.opf").unwrap().to_vec())
+            .unwrap()
+            .replace("2026-11-22T00:00:00Z", value);
+        with_entry(&ws, "content.opf", opf.as_bytes())
+    }
+
+    /// `+00:00` becomes `Z`, through `plan`, and the book is clean.
+    #[test]
+    fn a_plus_zero_offset_is_written_as_z() {
+        let mut ws = modified_book("2026-11-22T00:00:00+00:00");
+        let report = ws.detect().unwrap();
+        let fixes: Vec<_> = plan(&report, &ws, crate::Goal::Valid)
+            .into_iter()
+            .filter(|f| f.fix_id == "fix.modified_utc_designator")
+            .collect();
+        assert_eq!(fixes.len(), 1);
+        fixes.into_iter().next().unwrap().apply(&mut ws);
+        assert!(
+            ws.get_text("content.opf")
+                .unwrap()
+                .contains(">2026-11-22T00:00:00Z<")
+        );
+        assert_eq!(finding_keys(&ws), []);
+        // Padded text keeps its padding.
+        let ws = modified_book(" 2026-11-22T00:00:00+00:00\n");
+        let opf = ws.get_text("content.opf").unwrap();
+        let span = modified_offset_span(&opf, "2026-11-22T00:00:00+00:00").unwrap();
+        assert_eq!(&opf[span.start..span.end + 1], "+00:00\n");
+    }
+
+    /// Another offset, `-00:00`, fractional seconds, a character reference:
+    /// reported, not proposed.
+    #[test]
+    fn another_modified_offset_is_left() {
+        for v in [
+            "2026-11-22T03:00:00+03:00",
+            "2026-11-22T00:00:00-00:00",
+            "2026-11-22T00:00:00.5+00:00",
+            "2026-11-22T00:00:00&#43;00:00",
+            "2026-11-22 00:00:00+00:00",
+            "2026-11-2200:00:00+00:00x",
+        ] {
+            let ws = modified_book(v);
+            let report = ws.detect().unwrap();
+            assert!(
+                report
+                    .messages
+                    .iter()
+                    .any(|m| m.rule == Some("opf.metadata.invalid_dcterms_modified")),
+                "{v}: the fixture must carry it"
+            );
+            assert!(modified_utc_designator(&report, &ws).is_empty(), "{v}");
+        }
+        // Two such elements; and only the `invalid_dcterms_modified` rule.
+        let v = "2026-11-22T00:00:00+00:00";
+        let meta = format!(r#"<meta property="dcterms:modified">{v}</meta>"#);
+        let two = format!(r#"<package><metadata>{meta}{meta}</metadata></package>"#);
+        assert!(modified_offset_span(&two, v).is_none());
+        let ws = modified_book(v);
+        let mut report = ws.detect().unwrap();
+        assert_eq!(modified_utc_designator(&report, &ws).len(), 1);
+        for m in &mut report.messages {
+            m.rule = Some("opf.metadata.other");
+        }
+        assert!(modified_utc_designator(&report, &ws).is_empty());
+        for (v, ok) in [
+            ("2026-11-22T00:00:00+00:00", true),
+            ("2026-11-22X00:00:00+00:00", false),
+            ("2026/11-22T00:00:00+00:00", false),
+            ("2026-11-22T00-00:00+00:00", false),
+            ("2026-1a-22T00:00:00+00:00", false),
+        ] {
+            assert_eq!(is_modified_plus_zero(v), ok, "{v}");
+        }
+    }
+
+    // ---- fix.language_tag_separator ----------------------------------
+
+    /// `dc:language`, `xml:lang` and `hreflang` holding `en_US`: each through
+    /// `plan`, `-` written, and the book clean.
+    #[test]
+    fn a_posix_locale_language_is_written_as_bcp47() {
+        let epub3 = fxl_book(FXL_VIEWPORT);
+        for (from, to) in [
+            (
+                "<dc:language>en</dc:language>",
+                "<dc:language>en_US</dc:language>",
+            ),
+            (r#"<package xmlns="#, r#"<package xml:lang="en_US" xmlns="#),
+            (
+                "</metadata>",
+                r#"<link rel="record" href="https://example.org/r" media-type="application/xml" hreflang="en_US"/></metadata>"#,
+            ),
+        ] {
+            let base = ncx_book_opf_on(&epub3, from, from);
+            let clean = finding_keys(&ncx_book_opf_on(&base, from, &to.replace("en_US", "en-US")));
+            let mut ws = ncx_book_opf_on(&base, from, to);
+            let report = ws.detect().unwrap();
+            let fixes: Vec<_> = plan(&report, &ws, crate::Goal::Valid)
+                .into_iter()
+                .filter(|f| f.fix_id == "fix.language_tag_separator")
+                .collect();
+            assert_eq!(fixes.len(), 1, "{to}");
+            fixes.into_iter().next().unwrap().apply(&mut ws);
+            assert!(
+                ws.get_text("content.opf")
+                    .unwrap()
+                    .contains(&to.replace("en_US", "en-US")),
+                "{to}"
+            );
+            assert_eq!(finding_keys(&ws), clean, "{to}");
+        }
+    }
+
+    /// The shape, a character reference, and the rule decide.
+    #[test]
+    fn another_language_tag_is_left() {
+        for (tag, ok) in [
+            ("en_US", true),
+            ("es_419", true),
+            ("ast_ES", true),
+            ("en_US.UTF-8", false),
+            ("en_us_x", false),
+            ("e_US", false),
+            ("en_U", false),
+            ("en_41", false),
+            ("zh_Hant", false),
+            ("en-US", false),
+            ("e1_US", false),
+            ("en_1S", false),
+            ("en_ABC", false),
+        ] {
+            assert_eq!(is_posix_language_region(tag), ok, "{tag}");
+        }
+        let opf = r#"<package xmlns="http://www.idpf.org/2007/opf"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:language>en&#95;US</dc:language></metadata></package>"#;
+        assert!(language_separator_offsets(opf, "dc:language", "en_US").is_none());
+        // Each slot reads its own places only: the same value elsewhere, or
+        // another value there, is not edited.
+        let busy = r#"<package xmlns="http://www.idpf.org/2007/opf" xmlns:x="urn:x" xml:lang="en_US" lang="en_US" x:lang="en_US"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:language>en_US</dc:language><dc:language>en_GB</dc:language><dc:title>en_US</dc:title><meta property="p">en_US</meta><link hreflang="en_US"/><link x:hreflang="en_US"/><link hreflang="en_GB"/><item hreflang="en_US"/><x:y xml:lang="en_GB"/></metadata></package>"#;
+        for slot in ["dc:language", "xml:lang", "hreflang"] {
+            assert_eq!(
+                language_separator_offsets(busy, slot, "en_US").map(|o| o.len()),
+                Some(1),
+                "{slot}"
+            );
+        }
+        let ws = ncx_book_opf_on(
+            &fxl_book(FXL_VIEWPORT),
+            "<dc:language>en</dc:language>",
+            "<dc:language>en_US</dc:language>",
+        );
+        let report = ws.detect().unwrap();
+        assert_eq!(language_tag_separator(&report, &ws).len(), 1);
+        let gated = |edit: &dyn Fn(&mut epubveri::report::Message)| {
+            let mut r = report.clone();
+            r.messages.iter_mut().for_each(edit);
+            language_tag_separator(&r, &ws).is_empty()
+        };
+        assert!(gated(&|m| m.rule = Some("opf.other")));
+        assert!(gated(&|m| m.location = Some("c.xhtml".to_string())));
+        assert!(gated(
+            &|m| m.params = vec!["dc:language".to_string(), "en_US.UTF-8".to_string()]
+        ));
+        assert!(gated(
+            &|m| m.params = vec!["dc:language".to_string(), "fr_FR".to_string()]
+        ));
+        // A value of another shape is in the OPF and reported: not proposed.
+        let odd = ncx_book_opf_on(
+            &fxl_book(FXL_VIEWPORT),
+            "<dc:language>en</dc:language>",
+            "<dc:language>en_US.UTF-8</dc:language>",
+        );
+        let r = odd.detect().unwrap();
+        assert!(
+            r.messages
+                .iter()
+                .any(|m| m.rule == Some("opf.language.invalid_tag"))
+        );
+        assert!(language_tag_separator(&r, &odd).is_empty());
     }
 
     // ---- fix.empty_directory -----------------------------------------
